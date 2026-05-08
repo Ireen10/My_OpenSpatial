@@ -7,10 +7,11 @@ Supports 4 datasets: **ScanNet**, **3RScan**, **Matterport3D**, **ARKitScenes**.
 ## Installation
 
 ```bash
-# Install EmbodiedScan from source (required dependency)
+# Install EmbodiedScan from source (required dependency).
+# The [visual] extras pull in open3d, which embodiedscan.explorer imports at module load.
 git clone https://github.com/OpenRobotLab/EmbodiedScan.git
 cd EmbodiedScan
-pip install -e .
+pip install -e ".[visual]"
 cd ..
 
 # Install this preprocessing package
