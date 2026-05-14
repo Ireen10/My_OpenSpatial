@@ -13,3 +13,6 @@ scripts/
 config/debug*.yaml
 tests/
 .pytest_cache/
+
+# Local dataset roots (large; not versioned)
+data_root/
