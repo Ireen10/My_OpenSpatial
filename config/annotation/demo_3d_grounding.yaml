@@ -1,7 +1,7 @@
 dataset:
   modality: image
   dataset_name: image_base
-  data_dir: /path/to/singleview_processed.parquet
+  data_dir: E:/GitRepo/OpenSpatial/output/base_pipeline_demo_preprocessing_embodiedscan/scene_fusion_stage/depth_back_projection/data.parquet
 
 pipeline:
   file_name: base_pipeline

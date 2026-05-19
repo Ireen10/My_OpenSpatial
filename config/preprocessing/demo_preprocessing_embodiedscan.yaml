@@ -1,9 +1,12 @@
-dataset: 
+dataset:
   modality: image
-  dataset_name:  image_base
-  data_dir: "Path to embodied scan dataset parquet file, e.g., /pfs/jianhuiliu/tmp/embodiedscan_sample.parquet"
+  dataset_name: image_base
+  # Parquet from embodiedscan_data export (per_image shards or single file).
+  data_dir: E:/GitRepo/OpenSpatial/data_root/EmbodiedScan/preprocess_output_lowres/per_image/data-00000.parquet
+  # Root of raw RGB/depth assets; joined with relative paths in parquet (EmbodiedScan data/).
+  raw_data_root: E:/GitRepo/OpenSpatial/data_root/EmbodiedScan/data
 
-pipeline: 
+pipeline:
   file_name: base_pipeline
   class_name: BasePipeline
 
@@ -19,7 +22,7 @@ pipeline:
         mask_area_threshold: 0.005
         update_keys: []
         filter_tags: ["ceiling", "floor", "wall", "object"]
-        output_dir:  
+        output_dir:
 
     localization_stage:
       -
@@ -27,7 +30,7 @@ pipeline:
         method: Sam2Refiner
         update_keys: ["obj_tags", "bboxes_3d_world_coords"]
         depends_on: filter_stage/3dbox_filter
-        output_dir:  
+        output_dir:
 
     scene_fusion_stage:
       -
@@ -35,4 +38,3 @@ pipeline:
         method: DepthBackProjecter
         depends_on: localization_stage/sam2_refiner
         output_dir:
-

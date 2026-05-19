@@ -1,10 +1,47 @@
 import os
-from typing import List, Optional
+import pickle
+from functools import lru_cache
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from embodiedscan_data.datasets import register
 from embodiedscan_data.datasets.base import DatasetConfig
+
+
+def _camera_name_from_matterport_path(img_path: str) -> str:
+    """Match EmbodiedScanExplorer naming for matterport3d frames."""
+    base = img_path.split("/")[-1]
+    return base[:-8] + base[-7:-4]
+
+
+@lru_cache(maxsize=4)
+def _matterport_scene_cameras_index(project_root: str) -> Dict[str, Tuple[str, ...]]:
+    """Map sample_idx -> camera names listed in EmbodiedScan v1 pkls."""
+    ann_rel_paths = (
+        "data/embodiedscan_infos_train.pkl",
+        "data/embodiedscan_infos_val.pkl",
+        "data/embodiedscan_infos_test.pkl",
+    )
+    index: Dict[str, Tuple[str, ...]] = {}
+    for rel in ann_rel_paths:
+        path = os.path.join(project_root, rel.replace("/", os.sep))
+        if not os.path.isfile(path):
+            continue
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+        for entry in payload["data_list"]:
+            sample_idx = entry.get("sample_idx", "")
+            if not sample_idx.startswith("matterport3d/"):
+                continue
+            names = tuple(
+                sorted(
+                    _camera_name_from_matterport_path(cam["img_path"])
+                    for cam in entry.get("images", [])
+                )
+            )
+            index[sample_idx] = names
+    return index
 
 
 @register
@@ -30,6 +67,8 @@ class Matterport3DConfig(DatasetConfig):
             region_dir = os.path.join(building_dir, "region_segmentations")
             if not os.path.isdir(region_dir):
                 continue
+            if not os.path.isdir(os.path.join(building_dir, "matterport_color_images")):
+                continue
             for f in sorted(os.listdir(region_dir)):
                 if f.endswith(".ply"):
                     region_name = f.split(".")[0]
@@ -37,19 +76,15 @@ class Matterport3DConfig(DatasetConfig):
         return scenes
 
     def list_cameras(self, data_root: str, scene: str) -> List[str]:
-        parts = scene.split("/")
-        building_id = parts[1]
-        color_dir = os.path.join(data_root, "matterport3d", building_id, "matterport_color_images")
-        if not os.path.isdir(color_dir):
+        project_root = os.path.dirname(os.path.abspath(data_root))
+        index = _matterport_scene_cameras_index(project_root)
+        cameras = list(index.get(scene, ()))
+        if not cameras:
             return []
-        cameras = []
-        for f in sorted(os.listdir(color_dir)):
-            if not f.endswith(".jpg"):
-                continue
-            prefix = f[:-8]
-            suffix = f[-7:-4]
-            cameras.append(prefix + suffix)
-        return cameras
+        return [
+            cam for cam in cameras
+            if not self.skip_camera(data_root, scene, cam)
+        ]
 
     def get_scene_id(self, scene: str) -> str:
         parts = scene.split("/")

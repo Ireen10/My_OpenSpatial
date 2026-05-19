@@ -18,6 +18,7 @@ dependencies = [
     "Pillow",
     "pyyaml",
     "opencv-python",
+    "scipy",
 ]
 
 [project.optional-dependencies]

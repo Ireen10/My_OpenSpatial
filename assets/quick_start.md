@@ -146,6 +146,12 @@ python data_preprocessing/hypersim/prepare_hypersim.py \
 # Install the preprocessing package first
 cd data_preprocessing/embodiedscan && pip install -e . && cd ../..
 
+# ARKitScenes only: prepare vga_wide + per-frame sky correction (default) before extract
+python -m embodiedscan_data prepare-arkit \
+    --data-root /path/to/EmbodiedScan/data \
+    --raw-root /path/to/EmbodiedScan/data/arkitscenes_highres \
+    --only-local-raw --workers 8
+
 # Extract per-image data
 python -m embodiedscan_data extract \
     --dataset all \
@@ -186,6 +192,7 @@ dataset:
   modality: image                          # input modality: "image"
   dataset_name: image_base                 # dataset loader class (dataset/image_base.py)
   data_dir: /path/to/input.parquet         # path to Parquet file(s), str or list[str]
+  raw_data_root: /path/to/raw/data         # optional: root for relative image/depth/pose paths in parquet
 
 # ── Pipeline ─────────────────────────────────────────────────
 pipeline:

@@ -12,18 +12,47 @@ from utils.data_utils import flatten_annotations
 
 HF_REPO_PATTERN = re.compile(r'^[\w-]+/[\w-]+$')
 
+# Parquet path columns that are relative to raw sensor data (e.g. EmbodiedScan data/).
+ASSET_PATH_FIELDS = (
+    "image",
+    "depth_map",
+    "intrinsic",
+    "pose",
+    "axis_align_matrix",
+)
+
+
+def _resolve_asset_path(path, raw_data_root):
+    """Join relative asset paths to raw_data_root; leave absolute paths unchanged."""
+    if not path or not isinstance(path, str):
+        return path
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    return os.path.normpath(os.path.join(raw_data_root, path))
+
+
+def _resolve_asset_value(value, raw_data_root):
+    if isinstance(value, str):
+        return _resolve_asset_path(value, raw_data_root)
+    if isinstance(value, list):
+        return [_resolve_asset_value(item, raw_data_root) for item in value]
+    return value
+
 
 class ImageBaseDataset:
     """Base image dataset backed by parquet or HuggingFace Hub."""
 
     MODALITY = "image"
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, *, _skip_load=False):
         if not cfg.data_dir:
             raise ValueError("cfg.data_dir is required")
         self.cfg = cfg
         self.data_dir = cfg.data_dir
-        self.data = self._load()
+        self.raw_data_root = getattr(cfg, "raw_data_root", None)
+        if self.raw_data_root:
+            self.raw_data_root = os.path.abspath(self.raw_data_root)
+        self.data = None if _skip_load else self._load()
 
     # ------------------------------------------------------------------
     # Load / Override
@@ -32,13 +61,28 @@ class ImageBaseDataset:
     def _load(self):
         """Load data from HuggingFace Hub or local parquet."""
         if HF_REPO_PATTERN.match(self.data_dir):
-            return pd.DataFrame(load_dataset(self.data_dir, split="train"))
-        return pd.read_parquet(self.data_dir, engine="pyarrow", dtype_backend="pyarrow")
+            data = pd.DataFrame(load_dataset(self.data_dir, split="train"))
+        else:
+            data = pd.read_parquet(self.data_dir, engine="pyarrow", dtype_backend="pyarrow")
+        return self._apply_raw_data_root(data)
+
+    def _apply_raw_data_root(self, df):
+        """Resolve relative asset paths in path columns against raw_data_root."""
+        if not self.raw_data_root or df is None or len(df) == 0:
+            return df
+        for col in ASSET_PATH_FIELDS:
+            if col not in df.columns:
+                continue
+            df[col] = df[col].apply(
+                lambda v: _resolve_asset_value(v, self.raw_data_root)
+            )
+        return df
 
     def override_data(self, data_path):
         """Replace in-memory data with another parquet file."""
         try:
-            self.data = pd.read_parquet(data_path, engine="pyarrow", dtype_backend="pyarrow")
+            data = pd.read_parquet(data_path, engine="pyarrow", dtype_backend="pyarrow")
+            self.data = self._apply_raw_data_root(data)
         except Exception as exc:
             raise ValueError(f"Failed to load parquet: {data_path}") from exc
 

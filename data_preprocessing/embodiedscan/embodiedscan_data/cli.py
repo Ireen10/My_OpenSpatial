@@ -16,6 +16,7 @@ def cmd_extract(args):
             output_dir=args.output,
             workers=args.workers,
             max_scenes=args.max_scenes,
+            arkit_asset_mode=args.arkit_asset_mode if ds == "arkitscenes" else None,
         )
 
 
@@ -59,6 +60,23 @@ def cmd_export(args):
     )
 
 
+def cmd_prepare_arkit(args):
+    from embodiedscan_data.prepare_arkitscenes import prepare_arkitscenes
+
+    prepare_arkitscenes(
+        data_root=args.data_root,
+        raw_root=args.raw_root,
+        workers=args.workers,
+        apply_sky_correction=not args.no_sky_correction,
+        force=args.force,
+        max_scenes=args.max_scenes,
+        scene_filter=args.scene,
+        only_local_raw=args.only_local_raw,
+        sky_source=getattr(args, "sky_source", "traj"),
+        sky_granularity=getattr(args, "sky_granularity", "frame"),
+    )
+
+
 def cmd_validate(args):
     from embodiedscan_data.validate import run_all
 
@@ -85,6 +103,13 @@ def main():
     p_extract.add_argument("--output", required=True, help="Output directory")
     p_extract.add_argument("--workers", type=int, default=24)
     p_extract.add_argument("--max-scenes", type=int, default=None, help="Limit scenes (for testing)")
+    p_extract.add_argument(
+        "--arkit-asset-mode",
+        choices=("auto", "vga", "lowres"),
+        default="auto",
+        help="ARKitScenes only: auto=use prepared vga if present else lowres; "
+        "vga=force prepared vga_wide; lowres=force lowres_wide (ignore prepared)",
+    )
     p_extract.set_defaults(func=cmd_extract)
 
     # merge
@@ -100,6 +125,53 @@ def main():
     p_export.add_argument("--batch-size", type=int, default=3000)
     p_export.add_argument("--hf-repo", default=None, help="HuggingFace repo ID for upload")
     p_export.set_defaults(func=cmd_export)
+
+    # prepare-arkit
+    p_arkit = sub.add_parser(
+        "prepare-arkit",
+        help="Prepare ARKitScenes vga_wide assets (sky correction + depth align)",
+    )
+    p_arkit.add_argument("--data-root", required=True, help="EmbodiedScan data root")
+    p_arkit.add_argument(
+        "--raw-root",
+        default=None,
+        help="Raw download root (default: <data-root>/arkitscenes_highres)",
+    )
+    p_arkit.add_argument("-j", "--workers", type=int, default=8, help="Parallel workers")
+    p_arkit.add_argument(
+        "--only-local-raw",
+        action="store_true",
+        help="Only scenes present under --raw-root",
+    )
+    p_arkit.add_argument(
+        "-ss",
+        "--sky-source",
+        choices=("metadata", "traj", "auto"),
+        default="traj",
+        help="Scene-level sky only (-sg scene): metadata|traj|auto (default: traj)",
+    )
+    p_arkit.add_argument(
+        "-sg",
+        "--sky-granularity",
+        choices=("scene", "frame"),
+        default="frame",
+        help="frame=per-frame traj; scene=one sky per video (default: frame)",
+    )
+    p_arkit.add_argument(
+        "-ns",
+        "--no-sky-correction",
+        action="store_true",
+        help="Pack vga without rotating to upright landscape",
+    )
+    p_arkit.add_argument("--force", action="store_true")
+    p_arkit.add_argument("--max-scenes", type=int, default=None)
+    p_arkit.add_argument(
+        "--scene",
+        action="append",
+        default=None,
+        help="sample_idx filter, e.g. arkitscenes/Training/40753679",
+    )
+    p_arkit.set_defaults(func=cmd_prepare_arkit)
 
     # validate
     p_validate = sub.add_parser("validate", help="Validate output data quality")

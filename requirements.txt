@@ -12,3 +12,4 @@ pyyaml
 ftfy
 regex
 onnxruntime-gpu==1.19.2
+shapely

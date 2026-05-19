@@ -18,13 +18,43 @@ _worker_config = None
 _worker_data_root = None
 
 
-def _init_worker(config_name: str, data_root: str):
+def _register_datasets():
+    """Import dataset modules so @register runs (required on Windows spawn workers)."""
+    import embodiedscan_data.datasets.scannet  # noqa: F401
+    import embodiedscan_data.datasets.rscan3d  # noqa: F401
+    import embodiedscan_data.datasets.matterport3d  # noqa: F401
+    import embodiedscan_data.datasets.arkitscenes  # noqa: F401
+
+
+def _relpath_under_data_root(path: str, data_root: str) -> str:
+    """Normalize any asset path to a path relative to ``data_root``."""
+    if not path or not isinstance(path, str):
+        return path
+    data_root = os.path.abspath(data_root)
+    if os.path.isabs(path):
+        return os.path.relpath(path, data_root)
+
+    candidates = (
+        os.path.normpath(os.path.join(data_root, path)),
+        os.path.normpath(os.path.join(os.getcwd(), path)),
+        os.path.normpath(path),
+    )
+    for abs_path in candidates:
+        if os.path.isfile(abs_path):
+            return os.path.relpath(abs_path, data_root)
+    return os.path.relpath(candidates[0], data_root)
+
+
+def _init_worker(config_name: str, data_root: str, arkit_asset_mode: str = ""):
     """Initialize Explorer in each worker process."""
     global _worker_explorer, _worker_config, _worker_data_root
     from embodiedscan_data.explorer import ExtendedExplorer
 
+    _register_datasets()
     _worker_config = get_dataset_config(config_name)
-    _worker_data_root = data_root
+    if config_name == "arkitscenes" and arkit_asset_mode:
+        _worker_config.asset_mode = arkit_asset_mode
+    _worker_data_root = os.path.abspath(data_root)
     explorer_kwargs = _worker_config.get_explorer_kwargs(data_root)
     _worker_explorer = ExtendedExplorer(**explorer_kwargs)
 
@@ -64,11 +94,11 @@ def _process_single(args):
         # Post-process
         info = _worker_config.post_process(info, _worker_data_root, scene, camera)
 
-        # Convert paths to relative
+        # Normalize asset paths relative to data_root (abs or cwd-relative).
         for field in ("image", "depth_map", "intrinsic", "pose", "axis_align_matrix"):
             val = info.get(field)
-            if val and isinstance(val, str) and os.path.isabs(val):
-                info[field] = os.path.relpath(val, _worker_data_root)
+            if val and isinstance(val, str):
+                info[field] = _relpath_under_data_root(val, _worker_data_root)
 
         return info
     except Exception as e:
@@ -82,6 +112,7 @@ def extract_dataset(
     output_dir: str,
     workers: int = 24,
     max_scenes: Optional[int] = None,
+    arkit_asset_mode: Optional[str] = None,
 ) -> str:
     """Extract per-image info for a dataset.
 
@@ -91,11 +122,23 @@ def extract_dataset(
         output_dir: Output directory for JSONL
         workers: Number of parallel workers
         max_scenes: Limit number of scenes (for smoke testing)
+        arkit_asset_mode: ARKitScenes only — ``auto`` | ``vga`` | ``lowres`` (ignored otherwise)
 
     Returns:
         Path to output JSONL file
     """
+    data_root = os.path.abspath(data_root)
+    if dataset_name == "arkitscenes" and arkit_asset_mode is not None:
+        from embodiedscan_data.datasets.arkitscenes import ARKIT_ASSET_MODES
+
+        if arkit_asset_mode not in ARKIT_ASSET_MODES:
+            raise ValueError(
+                f"arkit_asset_mode must be one of {ARKIT_ASSET_MODES}, got {arkit_asset_mode!r}"
+            )
     config = get_dataset_config(dataset_name)
+    if dataset_name == "arkitscenes" and arkit_asset_mode is not None:
+        config.asset_mode = arkit_asset_mode
+        logger.info("ARKitScenes asset_mode=%s", arkit_asset_mode)
     output_path = os.path.join(output_dir, f"{config.name}.jsonl")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -137,7 +180,12 @@ def extract_dataset(
     failed = 0
     start = time.time()
 
-    with Pool(processes=workers, initializer=_init_worker, initargs=(dataset_name, data_root)) as pool:
+    worker_arkit_mode = arkit_asset_mode if dataset_name == "arkitscenes" else ""
+    with Pool(
+        processes=workers,
+        initializer=_init_worker,
+        initargs=(dataset_name, data_root, worker_arkit_mode or ""),
+    ) as pool:
         pbar = tqdm(total=len(tasks), desc=f"Extracting {dataset_name}")
         try:
             for result in pool.imap_unordered(_process_single, tasks):

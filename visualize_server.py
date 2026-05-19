@@ -8,15 +8,23 @@ Then open http://<host>:8888 in browser.
 """
 
 import argparse
+import ast
 import base64
 import io
+import json
 import os
 import glob
+import re
 
 import numpy as np
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, render_template_string, request, jsonify
+
+from utils.box_utils import (
+    compute_box_3d_corners_from_params,
+    convert_box_3d_world_to_camera,
+)
 
 app = Flask(__name__)
 DATA_DIR = "output/debug"
@@ -36,8 +44,17 @@ def discover_parquets(data_dir):
         task_name = parts[-2] if len(parts) >= 2 else rel
         pipeline_name = parts[0] if parts else ""
         is_multiview = "multiview" in task_name
+        is_3d_grounding = "3d_grounding" in task_name.lower()
         label = f"{'[Multi] ' if is_multiview else '[Single] '}{task_name}"
-        results.append({"label": label, "path": pq_path, "task": task_name, "multiview": is_multiview})
+        if is_3d_grounding:
+            label += " (3D boxes)"
+        results.append({
+            "label": label,
+            "path": pq_path,
+            "task": task_name,
+            "multiview": is_multiview,
+            "grounding_3d": is_3d_grounding,
+        })
     return results
 
 
@@ -78,6 +95,253 @@ def load_original_image(image_field):
                 imgs.append(Image.open(item))
         return imgs if imgs else None
     return None
+
+
+# 3D grounding visualization (camera-frame boxes, zxy euler)
+_BOX_EDGES = (
+    (0, 1), (1, 2), (2, 3), (3, 0),
+    (4, 5), (5, 6), (6, 7), (7, 4),
+    (0, 4), (1, 5), (2, 6), (3, 7),
+)
+_BOX_COLORS = (
+    (255, 64, 64), (64, 200, 64), (64, 128, 255),
+    (255, 180, 40), (200, 64, 255), (40, 220, 220),
+)
+
+
+def _is_3d_grounding_task(task_name, parsed):
+    if task_name and "3d_grounding" in task_name.lower():
+        return True
+    tags = parsed.get("tags") or []
+    if any("3D Grounding" in str(t) for t in tags):
+        return True
+    for turn in parsed.get("turns") or []:
+        q = turn.get("question") or ""
+        a = turn.get("answer") or ""
+        if "Camera intrinsic parameters" in q and "bbox_3d" in a:
+            return True
+        if "bbox_3d" in a:
+            return True
+    return False
+
+
+def _parse_float_token(s):
+    """Parse a numeric token; tolerate trailing sentence punctuation (e.g. '48.49.')."""
+    return float(s.strip().rstrip("."))
+
+
+def _parse_camera_from_text(text):
+    """Parse hfov, vfov, width, height from grounding_3d camera system prompt."""
+    if not text:
+        return None
+    # vfov is often followed by '.' before "Image width" — avoid greedy [0-9.]+ swallowing it
+    num = r"[0-9]+(?:\.[0-9]+)?"
+    m = re.search(
+        rf"hfov\s*=\s*({num}).*?vfov\s*=\s*({num}).*?"
+        rf"(?:Image\s+)?width\s*=\s*(\d+).*?(?:Image\s+)?height\s*=\s*(\d+)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return None
+    try:
+        hfov = _parse_float_token(m.group(1))
+        vfov = _parse_float_token(m.group(2))
+        w, h = int(m.group(3)), int(m.group(4))
+    except ValueError:
+        return None
+    return {"hfov": hfov, "vfov": vfov, "width": w, "height": h}
+
+
+def _intrinsic_from_fov(hfov_deg, vfov_deg, width, height):
+    h_rad, v_rad = np.radians(hfov_deg), np.radians(vfov_deg)
+    fx = width / (2.0 * np.tan(h_rad / 2.0))
+    fy = height / (2.0 * np.tan(v_rad / 2.0))
+    k = np.eye(4, dtype=np.float64)
+    k[0, 0], k[1, 1] = fx, fy
+    k[0, 2], k[1, 2] = width / 2.0, height / 2.0
+    return k
+
+
+def _scale_intrinsic_to_image(intrinsic, ref_size, img_size):
+    """Scale K from reference (W,H) in the prompt to the actual PIL image size."""
+    ref_w, ref_h = ref_size
+    img_w, img_h = img_size
+    if ref_w <= 0 or ref_h <= 0:
+        return intrinsic
+    k = intrinsic.copy()
+    sx, sy = img_w / ref_w, img_h / ref_h
+    k[0, 0] *= sx
+    k[0, 2] *= sx
+    k[1, 1] *= sy
+    k[1, 2] *= sy
+    return k
+
+
+def _load_pose_matrix(pose_field):
+    if pose_field is None or (isinstance(pose_field, float) and np.isnan(pose_field)):
+        return None
+    if isinstance(pose_field, (list, np.ndarray)):
+        arr = np.asarray(pose_field, dtype=np.float64)
+        if arr.shape == (4, 4):
+            return arr
+        return None
+    if isinstance(pose_field, str) and os.path.isfile(pose_field):
+        return np.loadtxt(pose_field, dtype=np.float64)
+    return None
+
+
+def _intrinsic_from_row(row):
+    raw = row.get("intrinsic", None)
+    if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+        return None
+    k = np.asarray(raw, dtype=np.float64)
+    if k.shape == (3, 3):
+        k4 = np.eye(4, dtype=np.float64)
+        k4[:3, :3] = k
+        return k4
+    if k.shape == (4, 4):
+        return k
+    return None
+
+
+def _parse_bbox_entries_from_text(text):
+    """Extract [{'bbox_3d': [...], 'label': ...}, ...] from an answer string."""
+    if not text:
+        return []
+    m = re.search(r"(\[\s*\{.*\}\s*\])", text, flags=re.DOTALL)
+    if not m:
+        return []
+    blob = m.group(1)
+    for parser in (ast.literal_eval, lambda s: json.loads(s.replace("'", '"'))):
+        try:
+            data = parser(blob)
+        except (ValueError, SyntaxError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, list):
+            continue
+        entries = []
+        for item in data:
+            if isinstance(item, dict) and "bbox_3d" in item:
+                box = item["bbox_3d"]
+                if isinstance(box, (list, tuple)) and len(box) >= 9:
+                    entries.append({
+                        "bbox_3d": [float(v) for v in box[:9]],
+                        "label": str(item.get("label", "")),
+                    })
+        if entries:
+            return entries
+    return []
+
+
+def _bbox_entries_from_row(row):
+    """Use world-frame boxes + pose when present in parquet (pre-flatten rows)."""
+    boxes_world = row.get("bboxes_3d_world_coords", None)
+    if boxes_world is None or (isinstance(boxes_world, float) and np.isnan(boxes_world)):
+        return []
+    pose = _load_pose_matrix(row.get("pose", None))
+    if pose is None:
+        return []
+
+    tags = row.get("obj_tags", None)
+    if tags is None:
+        tags = []
+    if isinstance(tags, np.ndarray):
+        tags = tags.tolist()
+    if isinstance(boxes_world, np.ndarray):
+        boxes_world = boxes_world.tolist()
+
+    entries = []
+    for idx, box in enumerate(boxes_world):
+        if box is None or len(box) < 9:
+            continue
+        cam_box = convert_box_3d_world_to_camera(box, pose)
+        if cam_box is None:
+            continue
+        label = ""
+        if idx < len(tags):
+            tag = tags[idx]
+            if isinstance(tag, (list, tuple)) and tag:
+                label = str(tag[0])
+            else:
+                label = str(tag)
+        entries.append({"bbox_3d": cam_box, "label": label})
+    return entries
+
+
+def _project_cam_to_2d(points_cam, intrinsic):
+    pts = np.asarray(points_cam, dtype=np.float64)
+    uv = np.full((pts.shape[0], 2), np.nan)
+    valid = pts[:, 2] > 1e-3
+    z = pts[valid, 2]
+    uv[valid, 0] = intrinsic[0, 0] * pts[valid, 0] / z + intrinsic[0, 2]
+    uv[valid, 1] = intrinsic[1, 1] * pts[valid, 1] / z + intrinsic[1, 2]
+    return uv, valid
+
+
+def _resolve_grounding_context(row, parsed):
+    """Return (bbox_entries, intrinsic_4x4) or (None, None) if overlay cannot be built."""
+    entries = _bbox_entries_from_row(row)
+    intrinsic = _intrinsic_from_row(row)
+    ref_size = None
+
+    if not entries:
+        for turn in parsed.get("turns") or []:
+            entries = _parse_bbox_entries_from_text(turn.get("answer") or "")
+            if entries:
+                break
+
+    if not entries:
+        return None, None
+
+    if intrinsic is None:
+        cam = None
+        for turn in parsed.get("turns") or []:
+            cam = _parse_camera_from_text(turn.get("question") or "")
+            if cam:
+                break
+        if cam is None:
+            return entries, None
+        intrinsic = _intrinsic_from_fov(cam["hfov"], cam["vfov"], cam["width"], cam["height"])
+        ref_size = (cam["width"], cam["height"])
+
+    return entries, (intrinsic, ref_size)
+
+
+def draw_3d_boxes_on_image(img, entries, intrinsic, ref_size=None):
+    """Draw projected 3D box wireframes on a PIL image (in-place copy)."""
+    if not entries or intrinsic is None:
+        return img
+    out = img.convert("RGB")
+    w, h = out.size
+    k = intrinsic
+    if ref_size is not None:
+        k = _scale_intrinsic_to_image(k, ref_size, (w, h))
+    draw = ImageDraw.Draw(out)
+    try:
+        font = ImageFont.load_default()
+    except OSError:
+        font = None
+
+    for i, entry in enumerate(entries):
+        color = _BOX_COLORS[i % len(_BOX_COLORS)]
+        corners = compute_box_3d_corners_from_params(entry["bbox_3d"])
+        uv, valid = _project_cam_to_2d(corners, k)
+        for i0, i1 in _BOX_EDGES:
+            if not (valid[i0] and valid[i1]):
+                continue
+            p0 = tuple(uv[i0])
+            p1 = tuple(uv[i1])
+            if any(np.isnan(c) for c in p0 + p1):
+                continue
+            draw.line([p0, p1], fill=color, width=2)
+        vis = np.where(valid)[0]
+        if len(vis) > 0 and font is not None:
+            cx = int(np.nanmean(uv[vis, 0]))
+            cy = int(np.nanmean(uv[vis, 1]))
+            label = entry.get("label") or f"box{i}"
+            draw.text((cx + 4, cy + 4), label, fill=color, font=font)
+    return out
 
 
 def parse_row(row):
@@ -265,6 +529,7 @@ function renderRows(rows) {
     const typeHtml = row.question_type ? `<span class="tag tag-type">${row.question_type}</span>` : '';
     const isMultiTurn = row.turns && row.turns.length > 1;
     const turnBadge = isMultiTurn ? `<span class="turn-badge">${row.turns.length} turns</span>` : '';
+    const overlayBadge = row.has_3d_overlay ? '<span class="tag tag-type">3D bbox overlay</span>' : '';
 
     let imagesHtml = '';
     if (row.qa_images && row.qa_images.length > 0) {
@@ -297,7 +562,7 @@ function renderRows(rows) {
     <div class="card">
       <div class="card-header">
         <strong>#${globalIdx + 1}</strong>
-        ${tagsHtml} ${typeHtml} ${turnBadge}
+        ${tagsHtml} ${typeHtml} ${overlayBadge} ${turnBadge}
       </div>
       <div class="card-body">
         ${imagesHtml}
@@ -350,6 +615,11 @@ def index():
     return render_template_string(HTML_TEMPLATE, tasks=tasks, selected_path=selected)
 
 
+def _task_name_from_parquet_path(path):
+    parts = os.path.normpath(path).split(os.sep)
+    return parts[-2] if len(parts) >= 2 else ""
+
+
 @app.route("/api/data")
 def api_data():
     path = request.args.get("path", "")
@@ -363,18 +633,44 @@ def api_data():
     total = len(df)
     start = page * page_size
     end = min(start + page_size, total)
+    task_name = _task_name_from_parquet_path(path)
 
     rows = []
     for i in range(start, end):
         row = df.iloc[i]
         parsed = parse_row(row)
-        # Convert images to base64
-        img_b64_list = [pil_to_base64(img) for img in parsed["qa_images"]]
+        qa_images = list(parsed["qa_images"])
+        has_3d_overlay = False
+
+        if _is_3d_grounding_task(task_name, parsed):
+            try:
+                entries, ctx = _resolve_grounding_context(row, parsed)
+                if entries and ctx is not None:
+                    intrinsic, ref_size = ctx
+                    if qa_images:
+                        qa_images[0] = draw_3d_boxes_on_image(
+                            qa_images[0], entries, intrinsic, ref_size=ref_size,
+                        )
+                        has_3d_overlay = True
+                    else:
+                        orig = load_original_image(row.get("image"))
+                        if orig is not None and not isinstance(orig, list):
+                            qa_images = [
+                                draw_3d_boxes_on_image(
+                                    orig, entries, intrinsic, ref_size=ref_size,
+                                ),
+                            ]
+                            has_3d_overlay = True
+            except Exception as exc:
+                print(f"[3d_grounding] row {start + i} overlay failed: {exc}")
+
+        img_b64_list = [pil_to_base64(img) for img in qa_images]
         rows.append({
             "turns": parsed["turns"],
             "qa_images": img_b64_list,
             "tags": parsed["tags"] if isinstance(parsed["tags"], list) else [parsed["tags"]],
             "question_type": parsed["question_type"],
+            "has_3d_overlay": has_3d_overlay,
         })
 
     return jsonify({"total": total, "page": page, "rows": rows})

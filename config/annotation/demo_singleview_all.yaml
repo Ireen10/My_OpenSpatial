@@ -1,0 +1,96 @@
+# All singleview annotation tasks in one run (sequential).
+#
+# Usage:
+#   python run.py --config config/annotation/demo_singleview_all.yaml --output_dir output/
+#
+# Set dataset.data_dir to your per-image processed parquet (masks, pointclouds, etc.).
+# Tasks 2+ use depends_on with the same path - do not chain to a prior task's output.
+
+dataset:
+  modality: image
+  dataset_name: image_base
+  data_dir: &singleview_input E:/GitRepo/OpenSpatial/output/lowres/base_pipeline_demo_preprocessing_embodiedscan/scene_fusion_stage/depth_back_projection/data.parquet
+
+pipeline:
+  file_name: base_pipeline
+  class_name: BasePipeline
+
+  stages:
+    annotation_stage:
+      -
+        file_name: distance
+        method: AnnotationGenerator
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          absolute_distance: 1
+          relative_distance: 1
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:
+
+      -
+        file_name: depth_annotation
+        method: AnnotationGenerator
+        depends_on: *singleview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          depth_ordering_oe: 1
+          depth_ordering_mcq: 1
+          depth_choice_oe: 1
+          depth_choice_mcq: 1
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:
+
+      -
+        file_name: size
+        method: AnnotationGenerator
+        depends_on: *singleview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          absolute_size: 1
+          relative_size: 1
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:
+
+      -
+        file_name: position
+        method: AnnotationGenerator
+        depends_on: *singleview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          height_comparison: 1
+          proximity: 1
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:
+
+      -
+        file_name: counting
+        method: AnnotationGenerator
+        depends_on: *singleview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          count_oe: 1
+          count_mcq: 1
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:
+
+      -
+        file_name: 3d_grounding
+        method: ThreeDGroundingGenerator
+        depends_on: *singleview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          grounding_oe: 1
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:

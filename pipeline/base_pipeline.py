@@ -121,7 +121,7 @@ class BasePipeline:
                 print(f">>> Reusing model from {reuse_stage} for {task['task_name']}")
 
         # Build dataset
-        self.dataset = build_dataset(self.data_cfg, self.data_cfg.dataset_name)
+        self.dataset = build_dataset(self.data_cfg)
 
         # Initialize dataset from first task's depends_on if present
         if not self.task_queue:
@@ -174,7 +174,12 @@ class BasePipeline:
             task = task_info["task"]
 
             if i > 0:
-                print(f">>> Loading data from: {self.task_queue[i-1]['full_ref']}...")
+                depends_on = getattr(task_cfg, "depends_on", None)
+                if depends_on:
+                    resolved = self._resolve_dependency_path(depends_on, current_task_idx=i)
+                    print(f">>> Loading data for {task_name} from: {resolved}")
+                else:
+                    print(f">>> Loading data from: {self.task_queue[i-1]['full_ref']}...")
                 self.load_task_data(task_name, task_cfg, current_task_idx=i)
 
             print(f">>> Running Task [{i+1}/{len(self.task_queue)}]: {task_name}...")

@@ -87,7 +87,7 @@ def validate_config(config_dict):
 
 def _load_yaml_config(config_path):
     """Load YAML config with duplicate-key preserving loader."""
-    with open(config_path, "r") as file_obj:
+    with open(config_path, "r", encoding="utf-8") as file_obj:
         return yaml.load(file_obj, Loader=DuplicateKeySafeLoader)
 
 

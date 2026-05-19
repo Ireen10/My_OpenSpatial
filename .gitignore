@@ -1,5 +1,6 @@
 outputs/
 env
+.venv*/
 *.pyc
 __pycache__/
 eval_*.sh
@@ -16,3 +17,7 @@ tests/
 
 # Local dataset roots (large; not versioned)
 data_root/
+
+# ARKit sky_direction verification downloads (delete whole folder anytime)
+verification/arkit_sky_metadata/data/
+verification/arkit_sky_metadata/results/
