@@ -28,6 +28,7 @@
 | 字段 | 类型 | 必填 |
 |------|------|------|
 | `parent_preprocess_id` | string | 是 |
+| `dataset_source` | string | 推荐；上游数据集，如 `arkitscenes`、`scannet`、`3rscan`、`matterport3d`（由预处理 `dataset` 或路径推断） |
 | `scene_id` | string | 推荐 |
 | `frame_id` | string | 推荐 |
 | `raw_image_ref` | string | 单视图 |

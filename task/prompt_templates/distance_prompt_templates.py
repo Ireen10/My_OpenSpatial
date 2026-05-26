@@ -78,14 +78,29 @@ positional_far_oe_direct_answers = [
     "The [X] is farther from the [C].",
 ]
 
-positional_far_oe_reasoning_answers = [
+positional_far_oe_reasoning_metric_answers = [
     "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. Therefore, [X] is farther from [C].",
     "[X] is farther from [C]: the distance to [A] is about [D] and to [B] is about [E].",
 ]
+positional_far_oe_reasoning_semantic_answers = [
+    "The [X] is farther from the [C].",
+    "[X] is farther from the [C].",
+]
 
-positional_far_mcq_direct_answers = ["[X]"]
-positional_far_mcq_reasoning_answers = [
+positional_far_mcq_direct_answers = ["[X]", "[X]."]
+positional_far_mcq_reasoning_metric_answers = [
     "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. [X]",
+]
+positional_far_mcq_reasoning_semantic_answers = [
+    "The [F] is farther from the [C]. [X]",
+    "[F] is farther from the [C], so the answer is [X].",
+]
+positional_far_mcq_free_metric_answers = [
+    "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. Therefore, the answer is [X].",
+]
+positional_far_mcq_free_semantic_answers = [
+    "The [F] is farther from the [C]. Therefore, the answer is [X].",
+    "[F] is farther from the [C], so the answer is [X].",
 ]
 
 positional_close_oe_questions = [
@@ -111,14 +126,29 @@ positional_close_oe_direct_answers = [
     "The [X] is closer to the [C].",
 ]
 
-positional_close_oe_reasoning_answers = [
+positional_close_oe_reasoning_metric_answers = [
     "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. Therefore, [X] is closer to [C].",
     "[X] is closer to [C]: the distance to [A] is about [D] and to [B] is about [E].",
 ]
+positional_close_oe_reasoning_semantic_answers = [
+    "The [X] is closer to the [C].",
+    "[X] is closer to the [C].",
+]
 
-positional_close_mcq_direct_answers = ["[X]"]
-positional_close_mcq_reasoning_answers = [
+positional_close_mcq_direct_answers = ["[X]", "[X]."]
+positional_close_mcq_reasoning_metric_answers = [
     "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. [X]",
+]
+positional_close_mcq_reasoning_semantic_answers = [
+    "The [F] is closer to the [C]. [X]",
+    "[F] is closer to the [C], so the answer is [X].",
+]
+positional_close_mcq_free_metric_answers = [
+    "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. Therefore, the answer is [X].",
+]
+positional_close_mcq_free_semantic_answers = [
+    "The [F] is closer to the [C]. Therefore, the answer is [X].",
+    "[F] is closer to the [C], so the answer is [X].",
 ]
 
 relative_oe_direct_instructions = [
@@ -212,7 +242,48 @@ multiview_distance_obj_cam_mcq_questions = [q + "\n[O]" for q in multiview_dista
 multiview_distance_obj_cam_mcq_answers = [
     "[X]",
 ]
-from .register_structured import EMPTY_QUESTION_INSTRUCTION, register_mcq, register_oe
+from .register_structured import (
+    EMPTY_QUESTION_INSTRUCTION,
+    mixed_metric_default_profile,
+    register_mcq,
+    register_oe,
+)
+
+
+def _relative_oe_reasoning_profiles(polarity: str):
+    if polarity == "far":
+        return mixed_metric_default_profile(
+            positional_far_oe_reasoning_metric_answers,
+            positional_far_oe_reasoning_semantic_answers,
+        )
+    return mixed_metric_default_profile(
+        positional_close_oe_reasoning_metric_answers,
+        positional_close_oe_reasoning_semantic_answers,
+    )
+
+
+def _relative_mcq_reasoning_profiles(polarity: str):
+    if polarity == "far":
+        return mixed_metric_default_profile(
+            positional_far_mcq_reasoning_metric_answers,
+            positional_far_mcq_reasoning_semantic_answers,
+        )
+    return mixed_metric_default_profile(
+        positional_close_mcq_reasoning_metric_answers,
+        positional_close_mcq_reasoning_semantic_answers,
+    )
+
+
+def _relative_mcq_free_profiles(polarity: str):
+    if polarity == "far":
+        return mixed_metric_default_profile(
+            positional_far_mcq_free_metric_answers,
+            positional_far_mcq_free_semantic_answers,
+        )
+    return mixed_metric_default_profile(
+        positional_close_mcq_free_metric_answers,
+        positional_close_mcq_free_semantic_answers,
+    )
 
 
 def _register_relative_oe_pair(polarity: str) -> None:
@@ -220,11 +291,11 @@ def _register_relative_oe_pair(polarity: str) -> None:
     if polarity == "far":
         stems = positional_far_oe_questions
         direct_ans = positional_far_oe_direct_answers
-        reasoning_ans = positional_far_oe_reasoning_answers
     else:
         stems = positional_close_oe_questions
         direct_ans = positional_close_oe_direct_answers
-        reasoning_ans = positional_close_oe_reasoning_answers
+
+    reasoning_profiles = _relative_oe_reasoning_profiles(polarity)
 
     register_oe(
         f"distance.relative_{polarity}.direct",
@@ -235,13 +306,13 @@ def _register_relative_oe_pair(polarity: str) -> None:
     register_oe(
         f"distance.relative_{polarity}.reasoning",
         stems,
-        reasoning_ans,
+        answer_profiles=reasoning_profiles,
         question_instruction=relative_oe_reasoning_instructions,
     )
     register_oe(
         f"distance.relative_{polarity}.free",
         stems,
-        reasoning_ans,
+        answer_profiles=reasoning_profiles,
         question_instruction=EMPTY_QUESTION_INSTRUCTION,
     )
 
@@ -250,11 +321,12 @@ def _register_relative_mcq_pair(polarity: str) -> None:
     if polarity == "far":
         stems = positional_far_mcq_questions
         direct_ans = positional_far_mcq_direct_answers
-        reasoning_ans = positional_far_mcq_reasoning_answers
     else:
         stems = positional_close_mcq_questions
         direct_ans = positional_close_mcq_direct_answers
-        reasoning_ans = positional_close_mcq_reasoning_answers
+
+    reasoning_profiles = _relative_mcq_reasoning_profiles(polarity)
+    free_profiles = _relative_mcq_free_profiles(polarity)
 
     register_mcq(
         f"distance.relative_{polarity}_mcq.direct",
@@ -266,14 +338,14 @@ def _register_relative_mcq_pair(polarity: str) -> None:
     register_mcq(
         f"distance.relative_{polarity}_mcq.reasoning",
         stems,
-        answers=reasoning_ans,
+        answer_profiles=reasoning_profiles,
         letter_only=False,
         question_instruction=relative_mcq_reasoning_instructions,
     )
     register_mcq(
         f"distance.relative_{polarity}_mcq.free",
         stems,
-        answers=reasoning_ans,
+        answer_profiles=free_profiles,
         letter_only=False,
         question_instruction=EMPTY_QUESTION_INSTRUCTION,
     )

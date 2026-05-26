@@ -10,7 +10,7 @@ Sub-tasks:
 Visual annotation modes:
     random_sample (~10%) — sample 4-7 random pixels with distinct depths; returns
                            normalized [x, y] coordinate tags. No drawing on image.
-    object-based  (~90%) — select 3-5 nodes, draw point/mask/box via mark_spec,
+    object-based  (~90%) — select 3-5 nodes, plan point/box mark_spec,
                            then compute per-object depth from the depth_map.
 
 Depth estimation:
@@ -66,11 +66,8 @@ class AnnotationGenerator(BaseAnnotationTask):
         self.emit_marked_images = bool(args.get("emit_marked_images", False))
 
     def get_mark_config(self):
-        """50% point, 25% mask, 25% box — point is favoured because depth
-        questions focus on spatial position rather than object shape."""
-        return MarkConfig(
-            type_weights={"point": 0.5, "mask": 0.25, "box": 0.25},
-        )
+        """50% point / 50% box (mask marks disabled pipeline-wide)."""
+        return MarkConfig(type_weights={"point": 0.5, "box": 0.5})
 
     def check_example(self, example) -> bool:
         """Require image, obj_tags, depth_map, masks, and >= 3 objects."""
@@ -152,30 +149,46 @@ class AnnotationGenerator(BaseAnnotationTask):
             num = min(num_objects, len(nodes))
         sampled = random.sample(nodes, num)
 
+        graph = getattr(self._thread_local, "scene_graph", None)
+        enable = self.resolve_mark_enabled(graph, sampled, view_idx=0)
+
         self.marker.reset(shuffle=True)
         mark_type = self.marker.choose_mark_type()
-        spec, marked_info = self.marker.plan_mark(sampled, mark_type=mark_type)
-        self.marker._last_mark_spec = spec
+        if enable:
+            spec, marked_info = self.marker.plan_mark(sampled, mark_type=mark_type)
+        else:
+            spec = {"version": 2, "mark_kinds": [], "slots": []}
+            marked_info = [(n.tag, n) for n in sampled]
+        self.marker._last_mark_spec = spec if enable else None
         preprocess_row = getattr(self._thread_local, "preprocess_row", None)
-        if self.emit_marked_images:
+        if self.emit_marked_images and enable:
             processed_image = render_mark(image, spec, preprocess_row=preprocess_row)
         else:
             processed_image = {"bytes": convert_pil_to_bytes(image)}
 
         tags_legacy, tags_sem, depths = [], [], []
         kept_slots = []
-        for (desc, node), slot in zip(marked_info, spec["slots"]):
+
+        def _append_depth(node, legacy_label: str, semantic_label: str, slot=None):
             app = node.view_appearances.get(0)
             if app is None:
-                continue
+                return
             mask = np.array(app.mask)
             depth = self._compute_depth(mask, depth_map)
             if depth is None:
-                continue
-            tags_legacy.append(desc)
-            tags_sem.append(slot["tag"])
+                return
+            tags_legacy.append(legacy_label)
+            tags_sem.append(semantic_label)
             depths.append(depth)
-            kept_slots.append(slot)
+            if slot is not None:
+                kept_slots.append(slot)
+
+        if enable:
+            for (desc, node), slot in zip(marked_info, spec["slots"]):
+                _append_depth(node, desc, slot["tag"], slot)
+        else:
+            for node in sampled:
+                _append_depth(node, node.tag, node.tag)
 
         if len(tags_legacy) < 2:
             return None
@@ -257,7 +270,6 @@ class AnnotationGenerator(BaseAnnotationTask):
                 sub_task, tpl, prompt, qtype,
                 mark_spec=mark_spec,
                 coord_tags=tags_sem if is_points else None,
-                referent_mode="legacy",
                 sorted_semantic=sorted_sem,
             )
         else:
@@ -287,7 +299,6 @@ class AnnotationGenerator(BaseAnnotationTask):
                 sub_task, tpl, prompt, qtype,
                 mark_spec=mark_spec,
                 coord_tags=tags_sem if is_points else None,
-                referent_mode="legacy",
             )
         return prompt, image_bytes
 
@@ -323,7 +334,6 @@ class AnnotationGenerator(BaseAnnotationTask):
                 type_label=t_label,
                 sorted_semantic=[sorted_sem[correct_idx]],
                 coord_tags=tags_sem if is_points else None,
-                referent_mode="legacy",
             )
         else:
             wrong_idx = [i for i in range(len(sorted_sem)) if i != correct_idx]
@@ -348,7 +358,6 @@ class AnnotationGenerator(BaseAnnotationTask):
                 type_label=t_label,
                 answer_extra={"answer": answer_option},
                 coord_tags=tags_sem if is_points else None,
-                referent_mode="legacy",
             )
         return prompt, image_bytes
 

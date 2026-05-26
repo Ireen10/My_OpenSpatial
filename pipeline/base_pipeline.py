@@ -146,6 +146,19 @@ class BasePipeline:
         output_path = self._resolve_output_path(stage_name, task_name, task_cfg, default_rel_dir)
         os.makedirs(output_path, exist_ok=True)
 
+        skip_parquet = bool(getattr(task_cfg, "skip_parquet", False))
+        if stage_name == "export_stage" and skip_parquet:
+            print(f">>> Skipping data.parquet for {task_name} (upstream export only)")
+            return
+        if (
+            stage_name == "export_stage"
+            and processed_data is not None
+            and hasattr(processed_data, "__len__")
+            and len(processed_data) == 0
+        ):
+            print(f">>> Skipping empty data.parquet for {task_name}")
+            return
+
         if stage_name == "annotation_stage":
             batch_size = getattr(task_cfg, "save_batch_size", 1000)
             keep_cols = getattr(task_cfg, "keep_data_columns",

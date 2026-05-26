@@ -1,22 +1,22 @@
 """
-M7: Export merged aggregate parquet to upstream JSONL + images.tar + manifest (§4.7).
+M7: Export merged aggregate parquet to sharded upstream JSONL + tar (§4.7).
 
-Output is self-contained upstream data (metadata-rich), not a downstream training format.
+Writes under ``{output_dir}/jsonl`` and ``{output_dir}/images`` plus ``metadata.json``.
+Does not require a downstream ``data.parquet`` (set ``skip_parquet: true`` on the task).
 """
 
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pandas as pd
 
-from dataset.upstream_export import UPSTREAM_SCHEMA_VERSION, write_upstream_bundle
+from dataset.upstream_export import UPSTREAM_SCHEMA_VERSION, write_sharded_upstream_bundle
 from task.base_task import BaseTask
 
 
 class DatasetExporter(BaseTask):
-    """Read merged_samples parquet; write upstream bundle via dataset.upstream_export."""
+    """Read merged_samples parquet; write sharded upstream bundle."""
 
     def __init__(self, args):
         super().__init__(args)
@@ -24,19 +24,31 @@ class DatasetExporter(BaseTask):
         stage_out = args.get("output_dir") or "export_stage/dataset_exporter"
         if not os.path.isabs(stage_out):
             stage_out = os.path.join(pipeline_root, stage_out)
-        export_rel = args.get("export_dir", "export")
-        self.export_root = export_rel if os.path.isabs(export_rel) else os.path.join(stage_out, export_rel)
+        export_rel = args.get("export_dir")
+        if export_rel in (None, "", "."):
+            self.export_root = stage_out
+        elif os.path.isabs(export_rel):
+            self.export_root = export_rel
+        else:
+            self.export_root = os.path.join(stage_out, export_rel)
         self.schema_version = args.get("schema_version", UPSTREAM_SCHEMA_VERSION)
         self.pipeline_run_id = args.get("pipeline_run_id")
+        self.view_scope = args.get("view_scope") or self._infer_view_scope(stage_out)
+
+    @staticmethod
+    def _infer_view_scope(stage_out: str) -> str:
+        low = stage_out.replace("\\", "/").lower()
+        return "multiview" if "multiview" in low else "singleview"
 
     def run(self, dataset: pd.DataFrame) -> pd.DataFrame:
-        summary = write_upstream_bundle(
+        write_sharded_upstream_bundle(
             dataset,
             self.export_root,
             schema_version=self.schema_version,
             pipeline_run_id=self.pipeline_run_id,
+            view_scope=self.view_scope,
         )
-        return pd.DataFrame([summary])
+        return pd.DataFrame()
 
 
 class PassThroughExportTask(BaseTask):

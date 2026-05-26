@@ -16,13 +16,17 @@ from dataset.image_base import (
     _resolve_asset_value,
 )
 from dataset.upstream_export import (
+    JSONL_SUBDIR,
     MANIFEST_FILENAME,
     SAMPLES_FILENAME,
     UPSTREAM_SCHEMA_VERSION,
+    is_sharded_upstream_root,
     load_manifest,
     merged_row_to_upstream_record,
+    read_sharded_upstream,
+    read_upstream_bundle,
     read_upstream_jsonl,
-    write_upstream_bundle,
+    write_sharded_upstream_bundle,
 )
 
 PIPELINE_SAVE_BASENAME = "data.jsonl"
@@ -33,12 +37,13 @@ class JsonlBaseDataset(ImageBaseDataset):
     Pipeline dataset hook for upstream JSONL + tar bundles.
 
     Load:
-      - ``samples.jsonl`` (or any ``.jsonl`` file)
-      - export directory containing ``manifest.json`` + ``samples.jsonl``
+      - sharded export root: ``jsonl/metadata_*.jsonl`` + ``images/metadata_*.tar``
+      - legacy ``manifest.json`` + ``samples.jsonl`` + ``images.tar``
+      - any standalone ``.jsonl`` file
       - merged ``data.parquet`` (convenience: same rows as aggregate output)
 
     Save (``export_bundle: true`` in YAML):
-      - ``export/samples.jsonl``, ``export/images.tar``, ``export/manifest.json``
+      - sharded bundle under ``export_dir`` (default: dataset root, not ``export/``)
       - optional pipeline index at ``data.jsonl`` (one summary line)
 
     YAML (decoupled with ComposedDataset):
@@ -60,7 +65,8 @@ class JsonlBaseDataset(ImageBaseDataset):
             self.raw_data_root = os.path.abspath(self.raw_data_root)
         self.output_path = getattr(cfg, "output_path", None) or PIPELINE_SAVE_BASENAME
         self.export_bundle = bool(getattr(cfg, "export_bundle", False))
-        self.export_dir = getattr(cfg, "export_dir", "export")
+        self.export_dir = getattr(cfg, "export_dir", ".")
+        self.view_scope = getattr(cfg, "view_scope", None)
         self.schema_version = getattr(cfg, "schema_version", UPSTREAM_SCHEMA_VERSION)
         self.pipeline_run_id = getattr(cfg, "pipeline_run_id", None)
         self.data = None if _skip_load else self._load()
@@ -93,6 +99,10 @@ class JsonlBaseDataset(ImageBaseDataset):
 
     @staticmethod
     def _load_export_dir(directory: Path) -> pd.DataFrame:
+        if is_sharded_upstream_root(directory):
+            return JsonlBaseDataset._dataframe_from_upstream_records(
+                read_sharded_upstream(directory)
+            )
         manifest_path = directory / MANIFEST_FILENAME
         jsonl_path = directory / SAMPLES_FILENAME
         if manifest_path.is_file() and jsonl_path.is_file():
@@ -100,26 +110,38 @@ class JsonlBaseDataset(ImageBaseDataset):
             return JsonlBaseDataset._dataframe_from_upstream_records(
                 read_upstream_jsonl(jsonl_path)
             )
+        try:
+            return JsonlBaseDataset._dataframe_from_upstream_records(
+                read_upstream_bundle(directory)
+            )
+        except FileNotFoundError:
+            pass
         for child in sorted(directory.glob("*.jsonl")):
             return JsonlBaseDataset._dataframe_from_upstream_records(
                 read_upstream_jsonl(child)
             )
         raise FileNotFoundError(
-            f"No upstream bundle in {directory} (expected {MANIFEST_FILENAME} + {SAMPLES_FILENAME})"
+            f"No upstream bundle in {directory} "
+            f"(expected sharded {JSONL_SUBDIR}/ or legacy {MANIFEST_FILENAME} + {SAMPLES_FILENAME})"
         )
 
     @staticmethod
     def _dataframe_from_upstream_records(records: list[dict]) -> pd.DataFrame:
         rows = []
         for rec in records:
-            rows.append({
+            row = {
                 "schema_version": rec.get("schema_version"),
                 "sample_id": rec.get("sample_id"),
                 "merge_group_key": rec.get("merge_group_key"),
                 "image_refs": rec.get("image_refs"),
                 "messages_json": json.dumps(rec.get("messages") or [], ensure_ascii=False),
                 "metadata_json": json.dumps(rec.get("metadata") or {}, ensure_ascii=False),
-            })
+            }
+            if rec.get("_bundle_root"):
+                row["bundle_root"] = rec["_bundle_root"]
+            if rec.get("_shard_tar"):
+                row["shard_tar"] = rec["_shard_tar"]
+            rows.append(row)
         return pd.DataFrame(rows)
 
     def _apply_raw_data_root(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -149,10 +171,20 @@ class JsonlBaseDataset(ImageBaseDataset):
         return data_path if data_path.endswith(".jsonl") else data_path + ".jsonl"
 
     def _resolve_export_root(self, data_path: str) -> Path:
-        rel = self.export_dir or "export"
+        rel = self.export_dir
+        if rel in (None, "", "."):
+            return Path(os.path.dirname(data_path))
         if os.path.isabs(rel):
             return Path(rel)
         return Path(os.path.dirname(data_path)) / rel
+
+    def _infer_view_scope(self, export_root: Path) -> str:
+        if self.view_scope:
+            return str(self.view_scope)
+        parts = {p.lower() for p in export_root.parts}
+        if "multiview" in parts:
+            return "multiview"
+        return "singleview"
 
     @staticmethod
     def _row_to_jsonable(row: dict[str, Any]) -> dict[str, Any]:
@@ -179,11 +211,12 @@ class JsonlBaseDataset(ImageBaseDataset):
 
         if self.export_bundle:
             export_root = self._resolve_export_root(data_path)
-            summary = write_upstream_bundle(
+            summary = write_sharded_upstream_bundle(
                 data,
                 export_root,
                 schema_version=self.schema_version,
                 pipeline_run_id=self.pipeline_run_id,
+                view_scope=self._infer_view_scope(export_root),
             )
             index_path = self._resolve_jsonl_output_path(data_path)
             os.makedirs(os.path.dirname(index_path) or ".", exist_ok=True)

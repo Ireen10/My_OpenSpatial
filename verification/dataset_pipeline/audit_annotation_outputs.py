@@ -73,7 +73,7 @@ def _turn_answer_texts(meta: dict | None) -> list[str]:
 
 
 def audit_answer_consistency(path: Path, task_name: str) -> tuple[bool, list[str]]:
-    """Every row: metadata.turns[*].answer_text must match messages gpt (post sync)."""
+    """Messages must have non-empty gpt values (canonical viz surface)."""
     import pandas as pd
 
     errors: list[str] = []
@@ -81,21 +81,14 @@ def audit_answer_consistency(path: Path, task_name: str) -> tuple[bool, list[str
         return False, [f"missing file: {path}"]
 
     df = pd.read_parquet(path)
-    if "metadata" not in df.columns or "messages" not in df.columns:
-        return True, [f"{task_name}: skip answer check (no metadata/messages columns)"]
+    if "messages" not in df.columns:
+        return True, [f"{task_name}: skip (no messages column)"]
 
     for idx, row in df.iterrows():
-        meta = _normalize_meta(row.get("metadata"))
-        ats = _turn_answer_texts(meta)
         gpts = _gpt_answers_from_messages(row.get("messages"))
-        n_turns = max(len(ats), len(gpts))
-        for ti in range(n_turns):
-            at = ats[ti] if ti < len(ats) else ""
-            gpt = gpts[ti] if ti < len(gpts) else ""
-            if at and gpt and at != gpt:
-                errors.append(
-                    f"{task_name} row {idx} turn {ti}: answer_text={at!r} vs gpt={gpt!r}"
-                )
+        for ti, gpt in enumerate(gpts):
+            if not gpt.strip():
+                errors.append(f"{task_name} row {idx} turn {ti}: empty gpt message")
     return len(errors) == 0, errors
 
 

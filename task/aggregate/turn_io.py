@@ -25,12 +25,15 @@ class TurnRecord:
     question_core_key: str = ""
     dedup_fingerprint: str = ""
     merge_group_key: str = ""
+    viz_question: str = ""
+    viz_answer: str = ""
+    viz_prefix: Optional[str] = field(default=None)
+    viz_n_images: int = 1
 
     def enrich_keys(self) -> None:
-        self.turn.setdefault("referent_mode", "legacy")
         if "prompt_struct" not in self.turn:
             logger.warning(
-                "turn missing prompt_struct (legacy path): task=%s sub_task=%s turn_id=%s",
+                "turn missing prompt_struct: task=%s sub_task=%s turn_id=%s",
                 self.task_name,
                 self.turn.get("sub_task"),
                 self.turn.get("turn_id"),
@@ -43,16 +46,17 @@ class TurnRecord:
         self.turn["merge_group_key"] = self.merge_group_key
 
 
-def _message_to_qa(msg: list) -> tuple[str, str, Optional[str]]:
+def _message_to_qa(msg: list) -> tuple[str, str, Optional[str], int]:
     if not msg or len(msg) < 2:
-        return "", "", None
+        return "", "", None, 1
     human = next((m.get("value", "") for m in msg if m.get("from") == "human"), "")
     gpt = next((m.get("value", "") for m in msg if m.get("from") == "gpt"), "")
+    n_img = max(1, human.lower().count("<image>"))
     prefix = None
-    if "<image>" in human:
-        parts = human.split("<image>", 1)
-        rest = parts[-1].strip()
-        if len(parts) > 1 and "Focal length" in rest:
+    if "<image>" in human.lower():
+        import re
+        rest = re.sub(r"<image>\s*", "", human, flags=re.I).strip()
+        if "Focal length" in rest:
             idx = rest.find("Predict ")
             if idx == -1:
                 idx = rest.find("What ")
@@ -63,38 +67,58 @@ def _message_to_qa(msg: list) -> tuple[str, str, Optional[str]]:
                 human = rest
         else:
             human = rest
-    return human.strip(), gpt.strip(), prefix
+    return human.strip(), gpt.strip(), prefix, n_img
+
+
+def _conversations_from_row(row: dict) -> List[list]:
+    messages = row.get("messages")
+    if messages is None:
+        messages = []
+    if hasattr(messages, "tolist"):
+        messages = messages.tolist()
+    if not messages:
+        return []
+    if messages and isinstance(messages[0], dict):
+        return [messages]
+    if messages and isinstance(messages[0], list):
+        return messages
+    return []
 
 
 def explode_row(row: dict, task_name: str, *, base_order: int) -> List[TurnRecord]:
     """One preprocess row → one or more TurnRecords."""
     meta = row.get("metadata")
     records: List[TurnRecord] = []
+    convs = _conversations_from_row(row)
 
     if isinstance(meta, list) and meta:
         meta = meta[0]
     if isinstance(meta, dict) and meta.get("turns"):
         for i, turn in enumerate(meta["turns"]):
             tr = dict(turn)
+            vq, va, vp, vn = "", "", None, int(tr.get("image_placeholder_count") or 1)
+            if i < len(convs):
+                vq, va, vp, vn = _message_to_qa(convs[i])
             records.append(TurnRecord(
                 task_name=task_name,
                 row=row,
                 turn=tr,
                 source_order=base_order,
                 turn_index=i,
+                viz_question=vq,
+                viz_answer=va,
+                viz_prefix=vp,
+                viz_n_images=vn,
             ))
         return records
 
-    messages = row.get("messages") or []
     qtypes = row.get("question_types") or []
     tags = row.get("question_tags") or []
-
-    convs = messages if (messages and isinstance(messages[0], list)) else [messages]
 
     for i, conv in enumerate(convs):
         if not conv:
             continue
-        q_text, a_text, prefix = _message_to_qa(conv)
+        vq, va, vp, vn = _message_to_qa(conv)
         sub = "unknown"
         if isinstance(tags, list) and i < len(tags):
             tag0 = tags[i]
@@ -110,19 +134,20 @@ def explode_row(row: dict, task_name: str, *, base_order: int) -> List[TurnRecor
             "sub_task": sub,
             "question_type": qtype,
             "instruction_mode": "legacy",
-            "referent_mode": "legacy",
-            "question_text": q_text,
-            "answer_text": a_text,
-            "image_placeholder_count": 1,
+            "image_placeholder_count": vn,
         }
-        if prefix:
-            tr["question_prefix"] = prefix
+        if vp:
+            tr["question_prefix"] = vp
         records.append(TurnRecord(
             task_name=task_name,
             row=row,
             turn=tr,
             source_order=base_order,
             turn_index=i,
+            viz_question=vq,
+            viz_answer=va,
+            viz_prefix=vp,
+            viz_n_images=vn,
         ))
     return records
 

@@ -1,13 +1,14 @@
 """
 Position annotation task: height comparison & near/far (proximity).
 
-Templates: position.height_higher | height_lower | near_far (MCQ, direct: letter + option text)
+Templates: position.height_higher | height_lower | near_far (MCQ: direct / sentence / free)
 """
 
 import random
 import numpy as np
 from itertools import combinations
 from .core.base_annotation_task import BaseAnnotationTask
+from .core.sample_metadata import marked_surface_label
 from .core.visual_marker import MarkConfig
 from utils.box_utils import compute_box_3d_corners
 from .core.question_type import QuestionType
@@ -32,7 +33,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         self.task_name = args.get("task_name") or args.get("file_name", "position")
 
     def get_mark_config(self):
-        return MarkConfig(mark_types=["mask", "box"])
+        return MarkConfig(mark_types=["box", "point"])
 
     @staticmethod
     def _format_mcq_answer(letter: str, option_text: str) -> str:
@@ -44,9 +45,10 @@ class AnnotationGenerator(BaseAnnotationTask):
         return np.max(corners[:, -1])
 
     def height_comparison_prompt_func(self, A, B):
-        A_desc, A_node = A
-        B_desc, B_node = B
-        A_desc, B_desc = A_desc.lower(), B_desc.lower()
+        A_desc = marked_surface_label(A)
+        B_desc = marked_surface_label(B)
+        _, A_node = A
+        _, B_node = B
 
         is_above = self._get_z_max(A_node) > self._get_z_max(B_node)
 
@@ -64,13 +66,27 @@ class AnnotationGenerator(BaseAnnotationTask):
         option_text = opt_a if letter == "A" else opt_b
         answer = self._format_mcq_answer(letter, option_text)
 
+        higher_desc = A_desc if is_above else B_desc
+        lower_desc = B_desc if is_above else A_desc
+        if base_tpl == "position.height_higher":
+            premise = f"The {higher_desc} is at a higher elevation than the {lower_desc}"
+        else:
+            premise = f"The {lower_desc} is at a lower elevation than the {higher_desc}"
+
         prompt = self.render_structured_prompt(
-            base_tpl, shared={"O": options, "X": answer},
+            base_tpl,
+            shared={
+                "P": premise,
+                "A": A_desc,
+                "B": B_desc,
+                "O": options,
+                "X": answer,
+            },
         )
         return prompt, base_tpl
 
     def proximity_prompt_func(self, A, B, near_or_far):
-        A_desc, B_desc = A[0].lower(), B[0].lower()
+        A_desc, B_desc = marked_surface_label(A), marked_surface_label(B)
 
         labels = [self._NEAR_LABEL, self._FAR_LABEL]
         if random.random() < 0.5:
@@ -86,9 +102,20 @@ class AnnotationGenerator(BaseAnnotationTask):
         option_text = labels[0] if letter == "A" else labels[1]
         answer = self._format_mcq_answer(letter, option_text)
 
+        if near_or_far == "near":
+            premise = f"The {A_desc} and the {B_desc} are near each other"
+        else:
+            premise = f"The {A_desc} and the {B_desc} are far from each other"
+
         prompt = self.render_structured_prompt(
             tpl_name,
-            shared={"A": A_desc, "B": B_desc, "O": options, "X": answer},
+            shared={
+                "P": premise,
+                "A": A_desc,
+                "B": B_desc,
+                "O": options,
+                "X": answer,
+            },
         )
         return prompt, tpl_name
 
@@ -101,7 +128,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         qtype = QuestionType.MCQ
 
         if random.random() < 0.8:
-            processed_image, marked = self.mark_objects_for_qa(image, sampled, mark_prob=1.0)
+            processed_image, marked = self.mark_objects_for_qa(image, sampled)
         else:
             processed_image = {"bytes": convert_pil_to_bytes(image)}
             marked = [(n.tag, n) for n in sampled]
@@ -146,7 +173,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         if near_candidates:
             pair = random.choice(near_candidates)
             if random.random() < 0.5:
-                processed_image, marked = self.mark_objects_for_qa(image, list(pair), mark_prob=1.0)
+                processed_image, marked = self.mark_objects_for_qa(image, list(pair))
             else:
                 processed_image = {"bytes": convert_pil_to_bytes(image)}
                 marked = [(n.tag, n) for n in pair]
@@ -160,7 +187,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         if far_candidates:
             pair = random.choice(far_candidates)
             if random.random() < 0.5:
-                processed_image, marked = self.mark_objects_for_qa(image, list(pair), mark_prob=1.0)
+                processed_image, marked = self.mark_objects_for_qa(image, list(pair))
             else:
                 processed_image = {"bytes": convert_pil_to_bytes(image)}
                 marked = [(n.tag, n) for n in pair]

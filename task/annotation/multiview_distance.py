@@ -31,7 +31,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         return mode
 
     def get_mark_config(self):
-        return MarkConfig(type_weights={"mask": 0.3, "box": 0.7})
+        return MarkConfig(type_weights={"point": 0.3, "box": 0.7})
 
     # ─── Prompt Functions ─────────────────────────────────────────────
 

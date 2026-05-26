@@ -212,6 +212,7 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
 
     def _mark_per_view(self, meta, mark_type):
         """Mark one object per view image, return (processed_images, marked_infos)."""
+        graph = getattr(self._thread_local, "scene_graph", None)
         processed_images = []
         marked_infos = []
         per_view_specs = []
@@ -224,6 +225,21 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
             vi = view_indices[i] if i < len(view_indices) else i
             passthrough = nodes[i] if nodes and i < len(nodes) else meta["pointcloud"][i]
             obj = (meta["tag"][i], passthrough, meta["bbox_2d"][i], meta["mask"][i])
+            mark_nodes = [passthrough] if isinstance(passthrough, SceneNode) else []
+            enable = self.resolve_mark_enabled(
+                graph,
+                mark_nodes if mark_nodes else None,
+                view_idx=vi,
+                tag=meta["tag"][i] if not mark_nodes else None,
+            )
+            if not enable:
+                per_view_specs.append({
+                    "version": 2, "mark_kinds": [], "slots": [],
+                })
+                img = {"bytes": convert_pil_to_bytes(meta["image"][i])}
+                processed_images.append(img)
+                marked_infos.append((meta["tag"][i], passthrough))
+                continue
             if self.emit_marked_images:
                 img, info = self.marker.mark_objects(
                     meta["image"][i], [obj], mark_type=mark_type, view_idx=vi,
@@ -475,10 +491,12 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
 
     @staticmethod
     def _marked_prompt_items(meta: dict, marked_infos: list) -> list:
-        """Map (legacy_desc, SceneNode|…) to (desc, metric passthrough) for prompt funcs."""
+        """Map marked tuples to (semantic tag, metric passthrough) for prompt funcs."""
+        from .sample_metadata import marked_surface_label
+
         items = []
         for i, item in enumerate(marked_infos):
-            desc = item[0] if isinstance(item, (list, tuple)) else item
+            desc = marked_surface_label(item)
             passthrough = item[1] if isinstance(item, (list, tuple)) and len(item) > 1 else item
             if isinstance(passthrough, SceneNode):
                 passthrough = meta["pointcloud"][i]

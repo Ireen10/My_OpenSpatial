@@ -1,15 +1,40 @@
-"""Ensure messages human lines have <image> count matching each turn (annotation post-process)."""
+"""Build messages[] for visualization; align <image> counts with QA_images."""
 
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 IMAGE_TAG_RE = re.compile(r"<image>\s*", re.I)
 
 
+def build_messages_from_viz_turns(viz_turns: List[dict]) -> List[List[dict]]:
+    """
+    One conversation [human, gpt] per viz turn.
+
+    viz_turn dict keys: question, answer, question_prefix (optional), image_placeholder_count.
+    """
+    out: List[List[dict]] = []
+    for viz in viz_turns or []:
+        n = max(1, int(viz.get("image_placeholder_count") or 1))
+        prefix = (viz.get("question_prefix") or "").strip()
+        q = (viz.get("question") or "").strip()
+        body = q
+        if prefix and body.startswith(prefix):
+            body = body[len(prefix):].lstrip()
+        img_prefix = " ".join(["<image>"] * n) + " "
+        if prefix:
+            human_val = img_prefix + prefix + ("\n\n" + body if body else "")
+        else:
+            human_val = img_prefix + body
+        out.append([
+            {"from": "human", "value": human_val.strip()},
+            {"from": "gpt", "value": (viz.get("answer") or "").strip()},
+        ])
+    return out
+
+
 def _human_gpt_pair_indices(conv: List[dict]) -> List[tuple[int, int]]:
-    """Return (human_idx, gpt_idx) for each QA turn in a flat conversation."""
     pairs: List[tuple[int, int]] = []
     i = 0
     while i < len(conv):
@@ -62,6 +87,7 @@ def _fix_human_in_conversation(conv: List[dict], turn: dict) -> None:
     if pairs:
         _fix_human_at(conv, pairs[0][0], turn)
 
+
 def _placeholder_count_for_qa_item(item: Any) -> int:
     if isinstance(item, list):
         return max(1, len(item))
@@ -72,7 +98,7 @@ def sync_messages_with_qa_images(
     messages: Any,
     qa_images: List[Any],
 ) -> Any:
-    """Align <image> tags with QA_images length when turn_records are unavailable."""
+    """Align <image> tags with QA_images length when viz_turns were unavailable."""
     if not messages or not qa_images:
         return messages
     convs = [messages] if isinstance(messages[0], dict) else list(messages)
@@ -92,13 +118,7 @@ def sync_messages_with_turns(
     messages: Any,
     turn_records: List[dict],
 ) -> Any:
-    """
-    Post-process after create_messages_from_prompts.
-
-    Each conversation (one QA before flatten) gets <image> tags equal to
-    that turn's image_placeholder_count. Single-turn rows only need this at
-    annotation time; aggregate merge just concatenates already-valid turns.
-    """
+    """Legacy: only adjusts <image> counts from metadata turns (no Q/A text rewrite)."""
     if not messages or not turn_records:
         return messages
 

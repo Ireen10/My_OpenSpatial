@@ -1,4 +1,4 @@
-# Template IDs: position.height_higher | height_lower | near_far (MCQ, direct answer only)
+# Template IDs: position.height_higher | height_lower | near_far (MCQ: direct / sentence / free)
 
 position_introduction = [
     "Consider the real-world 3D locations of the objects.",
@@ -6,10 +6,6 @@ position_introduction = [
     "Looking at the real-world 3D arrangement.",
     "Considering the spatial layout.",
 ]
-
-from .register_structured import MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS
-
-position_mcq_direct_instructions = MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS
 
 height_higher_stems = [
     "Which object has a higher location? [O]",
@@ -32,12 +28,51 @@ near_far_stems = [
     "Would you describe the [A] and the [B] as near or far from one another? [O]",
 ]
 
-mcq_answers = ["[X]"]
+position_mcq_sentence_answers = [
+    "[P]. Therefore the correct option is [X].",
+    "[P]. So the answer is [X].",
+    "[P]. The correct option is [X].",
+]
 
-from .register_structured import register_mcq
+position_sentence_instructions = [
+    "Answer in a complete sentence.",
+    "Reply using a full sentence.",
+    "Please describe your answer in a complete sentence.",
+]
+
+from ..annotation.core.structured_prompt_template import AnswerInstructionProfile
+from .register_structured import (
+    EMPTY_QUESTION_INSTRUCTION,
+    MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS,
+    register_mcq,
+)
+
+position_mcq_direct_instructions = MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS
+
+_POSITION_MCQ_ANSWER_MODES = ("direct", "sentence", "free")
+
+
+def _position_mcq_profiles() -> dict:
+    return {
+        "direct": AnswerInstructionProfile(
+            "direct",
+            instruction_snippets=position_mcq_direct_instructions,
+            answer_templates=["[X]"],
+        ),
+        "sentence": AnswerInstructionProfile(
+            "sentence",
+            instruction_snippets=position_sentence_instructions,
+            answer_templates=position_mcq_sentence_answers,
+        ),
+        "free": AnswerInstructionProfile(
+            "free",
+            answer_templates=position_mcq_sentence_answers,
+        ),
+    }
 
 
 def register_structured_position_templates() -> None:
+    profiles = _position_mcq_profiles()
     for template_id, stems in (
         ("position.height_higher", height_higher_stems),
         ("position.height_lower", height_lower_stems),
@@ -46,9 +81,10 @@ def register_structured_position_templates() -> None:
         register_mcq(
             template_id,
             stems,
-            answers=mcq_answers,
             introduction=position_introduction,
-            question_instruction=position_mcq_direct_instructions,
+            question_instruction=EMPTY_QUESTION_INSTRUCTION,
+            answer_profiles=profiles,
+            enabled=list(_POSITION_MCQ_ANSWER_MODES),
         )
 
 

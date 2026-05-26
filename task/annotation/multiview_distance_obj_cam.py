@@ -16,7 +16,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
     }
 
     def get_mark_config(self):
-        return MarkConfig(mark_types=["mask", "box"])
+        return MarkConfig(mark_types=["box", "point"])
 
     def __init__(self, args):
         super().__init__(args)

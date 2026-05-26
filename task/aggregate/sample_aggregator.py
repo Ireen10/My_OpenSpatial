@@ -1,7 +1,7 @@
 """
 Aggregate annotation outputs: per-task dedup then merge by visual input group.
 
-Plan §4.2 — no turn semantic reordering (stable source order only).
+Plan §4.2 — stable order within non-grounding turns; 3D grounding turns pinned first.
 """
 
 from __future__ import annotations
@@ -17,9 +17,33 @@ import pandas as pd
 
 from task.base_task import BaseTask
 from task.aggregate.fingerprint import image_refs_from_row, pick_dedup_winner
-from task.aggregate.turn_io import TurnRecord, load_turns_from_parquet
+from task.aggregate.turn_io import (
+    TurnRecord,
+    _conversations_from_row,
+    _message_to_qa,
+    load_turns_from_parquet,
+)
 
 SCHEMA_VERSION = "1.1"
+
+
+def _is_grounding_turn(rec: TurnRecord) -> bool:
+    """True for 3D grounding annotation turns (task / sub_task / template)."""
+    tn = (rec.task_name or "").lower()
+    if "grounding" in tn:
+        return True
+    turn = rec.turn or {}
+    st = (turn.get("sub_task") or "").lower()
+    if st.startswith("grounding"):
+        return True
+    ps = turn.get("prompt_struct") if isinstance(turn.get("prompt_struct"), dict) else {}
+    tid = (ps.get("template_id") or ps.get("template_family") or "").lower()
+    return tid.startswith("grounding")
+
+
+def _turn_merge_sort_key(rec: TurnRecord) -> tuple:
+    """Grounding first, then original parquet order."""
+    return (0 if _is_grounding_turn(rec) else 1, rec.source_order, rec.turn_index)
 
 
 def _json_safe(obj: Any) -> Any:
@@ -81,7 +105,41 @@ class SampleAggregator(BaseTask):
         return load_turns_from_parquet(dataset, task_name)
 
     @staticmethod
-    def dedup_turns(records: List[TurnRecord], policy: str) -> tuple[List[TurnRecord], int]:
+    def _turn_match_signature(turn: dict) -> tuple:
+        ps = turn.get("prompt_struct") if isinstance(turn.get("prompt_struct"), dict) else {}
+        return (
+            turn.get("sub_task"),
+            turn.get("question_type"),
+            ps.get("template_id"),
+        )
+
+    @classmethod
+    def _pick_dedup_source_record(
+        cls, group: List[TurnRecord], winner_turn: dict,
+    ) -> TurnRecord:
+        sig = cls._turn_match_signature(winner_turn)
+        for rec in group:
+            if cls._turn_match_signature(rec.turn) == sig:
+                return rec
+        return group[0]
+
+    @staticmethod
+    def _refresh_viz_from_row(rec: TurnRecord) -> None:
+        convs = _conversations_from_row(rec.row)
+        idx = int(rec.turn_index)
+        if idx < 0 or idx >= len(convs):
+            return
+        vq, va, vp, vn = _message_to_qa(convs[idx])
+        if vq:
+            rec.viz_question = vq
+        if va:
+            rec.viz_answer = va
+        if vp:
+            rec.viz_prefix = vp
+        rec.viz_n_images = vn
+
+    @classmethod
+    def dedup_turns(cls, records: List[TurnRecord], policy: str) -> tuple[List[TurnRecord], int]:
         by_fp: Dict[str, List[TurnRecord]] = defaultdict(list)
         for rec in records:
             by_fp[rec.dedup_fingerprint].append(rec)
@@ -92,14 +150,22 @@ class SampleAggregator(BaseTask):
             if len(group) == 1:
                 kept.append(group[0])
             else:
+                winner_turn = pick_dedup_winner([g.turn for g in group], policy=policy)
+                src = cls._pick_dedup_source_record(group, winner_turn)
                 kept.append(TurnRecord(
                     task_name=group[0].task_name,
-                    row=group[0].row,
-                    turn=pick_dedup_winner([g.turn for g in group], policy=policy),
+                    row=src.row,
+                    turn=winner_turn,
                     source_order=min(g.source_order for g in group),
-                    turn_index=min(g.turn_index for g in group),
+                    turn_index=src.turn_index,
+                    viz_question=src.viz_question,
+                    viz_answer=src.viz_answer,
+                    viz_prefix=src.viz_prefix,
+                    viz_n_images=src.viz_n_images,
                 ))
                 kept[-1].enrich_keys()
+                if not (kept[-1].viz_question or kept[-1].viz_answer):
+                    cls._refresh_viz_from_row(kept[-1])
                 removed += len(group) - 1
         return kept, removed
 
@@ -111,7 +177,7 @@ class SampleAggregator(BaseTask):
 
         samples: List[dict] = []
         for merge_key, group in groups.items():
-            group.sort(key=lambda r: (r.source_order, r.turn_index))
+            group.sort(key=_turn_merge_sort_key)
             row0 = group[0].row
             image_refs = image_refs_from_row(row0)
             turns = []
@@ -157,18 +223,22 @@ class SampleAggregator(BaseTask):
 
     @staticmethod
     def _turns_to_messages(group: List[TurnRecord]) -> List[dict]:
-        """Stable source order → flat human/gpt list; each turn keeps its own <image> tags."""
+        """Concatenate per-turn visualization Q/A (from annotation messages)."""
         out: List[dict] = []
         for rec in group:
-            t = rec.turn
-            n_img = max(1, int(t.get("image_placeholder_count") or 1))
-            q = (t.get("question_text") or "").strip()
-            prefix = (t.get("question_prefix") or "").strip()
-            if prefix:
-                q = f"{prefix}\n\n{q}" if q else prefix
+            if not (rec.viz_question or rec.viz_answer):
+                SampleAggregator._refresh_viz_from_row(rec)
+            n_img = max(1, rec.viz_n_images or int(rec.turn.get("image_placeholder_count") or 1))
+            prefix = (rec.viz_prefix or rec.turn.get("question_prefix") or "").strip()
+            body = (rec.viz_question or "").strip()
+            if prefix and body.startswith(prefix):
+                body = body[len(prefix):].lstrip()
+            q = body
+            if prefix and not body.startswith(prefix):
+                q = f"{prefix}\n\n{body}" if body else prefix
             q = " ".join(["<image>"] * n_img) + " " + q
-            out.append({"from": "human", "value": q})
-            out.append({"from": "gpt", "value": t.get("answer_text") or ""})
+            out.append({"from": "human", "value": q.strip()})
+            out.append({"from": "gpt", "value": (rec.viz_answer or "").strip()})
         return out
 
     def run(self, dataset: pd.DataFrame) -> pd.DataFrame:

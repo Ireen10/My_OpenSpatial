@@ -23,7 +23,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
     _SUPERLATIVE_STYLES = ("direct", "sentence")
 
     def get_mark_config(self):
-        return MarkConfig(mark_types=["mask", "box"])
+        return MarkConfig(mark_types=["box", "point"])
 
     # ─── Helpers ──────────────────────────────────────────────────────
 

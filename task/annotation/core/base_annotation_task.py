@@ -26,6 +26,9 @@ import task.prompt_templates  # noqa: F401
 # Distinguish "caller did not pass mark_spec" from "this turn has no marks".
 _MARK_SPEC_UNSET = object()
 
+# Unique in-view tags: enable mark with this probability (else mark_spec omitted).
+OPTIONAL_MARK_ENABLE_PROB = 0.25
+
 
 class BaseAnnotationTask(BaseTask):
     """
@@ -96,6 +99,7 @@ class BaseAnnotationTask(BaseTask):
 
     def _init_example_context(self, example):
         self._thread_local.turn_records = []
+        self._thread_local.viz_turns = []
         self._thread_local.preprocess_row = example
         self._thread_local.last_prompt_render = None
 
@@ -112,7 +116,6 @@ class BaseAnnotationTask(BaseTask):
         sorted_semantic: Optional[List[str]] = None,
         answer_extra: Optional[Dict[str, str]] = None,
         coord_tags: Optional[List[str]] = None,
-        referent_mode: str = "semantic",
         instruction_mode: str = "legacy",
         question_prefix: Optional[str] = None,
         image_placeholder_count: int = 1,
@@ -137,7 +140,7 @@ class BaseAnnotationTask(BaseTask):
         render = getattr(self._thread_local, "last_prompt_render", None)
         if answer_text is None and " Answer: " in prompt:
             _, answer_text = split_prompt_qa(prompt)
-        turn = build_turn_record(
+        meta_turn, viz = build_turn_record(
             turn_id=len(records),
             task_name=self.task_name,
             sub_task=sub_task,
@@ -150,7 +153,6 @@ class BaseAnnotationTask(BaseTask):
             extra_slots=extra_slots,
             sorted_semantic=sorted_semantic,
             coord_tags=coord_tags,
-            referent_mode=referent_mode,
             instruction_mode=instruction_mode,
             question_prefix=question_prefix,
             image_placeholder_count=image_placeholder_count,
@@ -158,8 +160,11 @@ class BaseAnnotationTask(BaseTask):
             type_label=type_label or None,
         )
         if view_indices is not None:
-            turn["view_indices"] = list(view_indices)
-        records.append(turn)
+            meta_turn["view_indices"] = list(view_indices)
+        records.append(meta_turn)
+        viz_list = getattr(self._thread_local, "viz_turns", None)
+        if viz_list is not None:
+            viz_list.append(viz)
 
     @staticmethod
     def _slots_from_nodes(nodes: List[SceneNode], labels: Optional[List[str]] = None) -> Dict[str, dict]:
@@ -233,6 +238,52 @@ class BaseAnnotationTask(BaseTask):
         answer = "ABCD"[order.index(correct_idx)]
         return [candidates[j] for j in order], answer
 
+    @staticmethod
+    def _nodes_from_mark_inputs(objs) -> List[SceneNode]:
+        nodes: List[SceneNode] = []
+        if not objs:
+            return nodes
+        for item in objs:
+            if isinstance(item, SceneNode):
+                nodes.append(item)
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                node = item[1]
+                if isinstance(node, SceneNode):
+                    nodes.append(node)
+        return nodes
+
+    @staticmethod
+    def _marked_info_without_plan(objs) -> list:
+        out = []
+        for item in objs or []:
+            if isinstance(item, SceneNode):
+                out.append((item.tag, item))
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                out.append((item[0], item[1]))
+        return out
+
+    def resolve_mark_enabled(
+        self,
+        graph: Optional[SceneGraph],
+        objs=None,
+        view_idx: int = 0,
+        *,
+        tag: Optional[str] = None,
+    ) -> bool:
+        """Require mark when tag is ambiguous in-view; else sample optional mark."""
+        import random
+
+        if graph is not None:
+            nodes = self._nodes_from_mark_inputs(objs) if objs else []
+            if nodes and graph.requires_mark_for_nodes(nodes, view_idx):
+                return True
+            check_tag = tag
+            if not check_tag and nodes:
+                check_tag = nodes[0].tag
+            if check_tag and graph.count_tag_in_view(check_tag, view_idx) > 1:
+                return True
+        return random.random() < OPTIONAL_MARK_ENABLE_PROB
+
     def plan_mark_for_qa(
         self,
         image,
@@ -243,7 +294,14 @@ class BaseAnnotationTask(BaseTask):
         points=None,
         view_idx: int = 0,
     ):
-        """Plan mark_spec and return unmarked QA bytes unless emit_marked_images."""
+        """Plan mark_spec; return unmarked QA bytes unless emit_marked_images."""
+        graph = getattr(self._thread_local, "scene_graph", None)
+        if points is None and objs is not None:
+            if not self.resolve_mark_enabled(graph, objs, view_idx):
+                self.marker._last_mark_spec = None
+                marked = self._marked_info_without_plan(objs)
+                return {"bytes": convert_pil_to_bytes(image)}, marked
+
         row = getattr(self._thread_local, "preprocess_row", None)
         if self.emit_marked_images:
             from .mark_spec import render_mark
@@ -271,36 +329,22 @@ class BaseAnnotationTask(BaseTask):
         self.marker._last_mark_spec = spec
         return {"bytes": convert_pil_to_bytes(image)}, marked_info
 
-    def mark_objects_for_qa(self, image, objs, *, mark_prob: float = 1.0, mark_type=None, labels=None):
-        """Plan/render marks for QA; skip pixel render when emit_marked_images is false."""
-        import random
-        if random.random() >= mark_prob:
-            marked = [(n.tag, n) for n in objs] if objs and hasattr(objs[0], "tag") else list(objs)
-            return {"bytes": convert_pil_to_bytes(image)}, marked
+    def mark_objects_for_qa(
+        self,
+        image,
+        objs,
+        *,
+        mark_type=None,
+        labels=None,
+        view_idx: int = 0,
+    ):
         return self.plan_mark_for_qa(
-            image, objs=objs, mark_type=mark_type, labels=labels,
+            image,
+            objs=objs,
+            mark_type=mark_type,
+            labels=labels,
+            view_idx=view_idx,
         )
-
-    def mark_and_prompt(self, nodes, image, prompt_func, *,
-                        each=False, mark_prob=1.0, prompt_args=None,
-                        preprocess_row: Optional[dict] = None):
-        import random
-
-        if prompt_args is None:
-            prompt_args = {}
-        row = preprocess_row or getattr(self._thread_local, "preprocess_row", None)
-
-        if random.random() < mark_prob:
-            processed_image, marked = self.mark_objects_for_qa(image, nodes, mark_prob=1.0)
-        else:
-            processed_image = {"bytes": convert_pil_to_bytes(image)}
-            marked = [(n.tag, n) for n in nodes]
-
-        if each:
-            prompts = [prompt_func(m, **prompt_args) for m in marked]
-            return prompts, processed_image
-        prompt = prompt_func(*marked, **prompt_args)
-        return prompt, processed_image
 
     @staticmethod
     def _raw_image_bytes_single(graph) -> dict:
@@ -397,6 +441,7 @@ class BaseAnnotationTask(BaseTask):
         shared: dict = None,
         q_args: dict = None,
         a_args: dict = None,
+        is_metric_depth: bool = None,
     ) -> str:
         """M8: render from introduction/stem/q_instruction + answer instruction_type pools."""
         tpl = self.get_structured_template(template_id)
@@ -407,6 +452,7 @@ class BaseAnnotationTask(BaseTask):
             shared=shared,
             q_args=q_args,
             a_args=a_args,
+            is_metric_depth=is_metric_depth,
         )
         self._thread_local.last_prompt_render = rec
         return rec.to_prompt()
@@ -422,6 +468,7 @@ class BaseAnnotationTask(BaseTask):
         shared: dict = None,
         q_args: dict = None,
         a_args: dict = None,
+        is_metric_depth: bool = None,
     ) -> str:
         """MCQ: sample structured template, append options before Answer."""
         tpl = self.get_structured_template(template_id)
@@ -432,6 +479,7 @@ class BaseAnnotationTask(BaseTask):
             shared=shared,
             q_args=q_args,
             a_args=a_args,
+            is_metric_depth=is_metric_depth,
         )
         self._thread_local.last_prompt_render = rec
         return rec.question_text + options_suffix + " Answer: " + rec.answer_text
@@ -447,22 +495,24 @@ class BaseAnnotationTask(BaseTask):
         self.marker = VisualMarker(self.get_mark_config())
 
         graph = self.build_scene_graph(example)
+        self._thread_local.scene_graph = graph
         prompts, processed_images, question_tags, question_types = self.process(graph, example)
         if len(prompts) == 0:
             return None, False
 
         processed_images = self._resolve_qa_images(graph, processed_images)
-        messages = self.create_messages_from_prompts(prompts, processed_images)
+        viz_turns = getattr(self._thread_local, "viz_turns", []) or []
+        turn_records = getattr(self._thread_local, "turn_records", []) or []
 
         from .message_placeholders import (
+            build_messages_from_viz_turns,
             sync_messages_with_qa_images,
-            sync_messages_with_turns,
         )
 
-        turn_records = getattr(self._thread_local, "turn_records", []) or []
-        if turn_records:
-            messages = sync_messages_with_turns(messages, turn_records)
+        if viz_turns:
+            messages = build_messages_from_viz_turns(viz_turns)
         else:
+            messages = self.create_messages_from_prompts(prompts, processed_images)
             messages = sync_messages_with_qa_images(messages, processed_images)
 
         example["messages"] = messages

@@ -182,19 +182,14 @@ def _validate_turn(t: Any, path: str, errors: List[str], *, strict_m3: bool) -> 
     d = _require_dict(t, path, errors)
     if d is None:
         return
-    for key in ("turn_id", "task_name", "sub_task", "question_type", "instruction_mode",
-                "question_text", "answer_text"):
+    for key in ("turn_id", "task_name", "sub_task", "question_type", "instruction_mode"):
         if key not in d:
             errors.append(_err(path, f"missing {key}"))
-    mode = d.get("referent_mode", "semantic")
-    if mode not in REFERENT_MODES:
-        errors.append(_err(path, f"invalid referent_mode {mode!r}"))
-    if strict_m3 and mode == "semantic":
-        qt = d.get("question_text") or ""
-        if _LEGACY_MARKED_DESC.search(qt):
-            errors.append(_err(path, "semantic question_text must not contain legacy -(color mark) suffix"))
     if strict_m3 and "prompt_struct" not in d:
         errors.append(_err(path, "prompt_struct required (M3+)"))
+    mode = d.get("referent_mode")
+    if mode is not None and mode not in REFERENT_MODES:
+        errors.append(_err(path, f"invalid referent_mode {mode!r}"))
 
 
 def validate_sample_record(record: dict, *, strict_m3: bool = False) -> Tuple[bool, List[str]]:
@@ -284,10 +279,7 @@ def _fixture_minimal() -> dict:
                     "task_name": "distance",
                     "sub_task": "absolute_distance",
                     "question_type": "OE",
-                    "instruction_mode": "legacy",
-                    "referent_mode": "semantic",
-                    "question_text": "What is the distance between the chair and the table?",
-                    "answer_text": "The distance is 2.35 m.",
+                    "instruction_mode": "structured",
                     "image_placeholder_count": 1,
                     "prompt_struct": {
                         "template_id": "distance.absolute_m",
@@ -326,8 +318,7 @@ def _fixture_grounding_prefix() -> dict:
 
 def _fixture_invalid() -> dict:
     rec = _fixture_minimal()
-    rec["metadata"]["turns"][0]["question_text"] = "Distance between chair-(red box) and table?"
-    rec["metadata"]["turns"][0]["referent_mode"] = "semantic"
+    del rec["metadata"]["turns"][0]["prompt_struct"]
     return rec
 
 

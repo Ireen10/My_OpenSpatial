@@ -182,6 +182,30 @@ class SceneGraph:
         return [node for node in self.node_list
                 if node.view_appearances.get(view_idx) is not None]
 
+    def count_tag_in_view(self, tag: str, view_idx: int) -> int:
+        """How many detected objects share ``tag`` in one view (for mark necessity)."""
+        if not tag:
+            return 0
+        return sum(
+            1 for node in self.get_object_nodes(view_idx)
+            if node.tag == tag
+        )
+
+    def requires_mark_for_nodes(
+        self,
+        nodes: List['SceneNode'],
+        view_idx: int = None,
+    ) -> bool:
+        """True when any referenced tag is ambiguous in the given view."""
+        if not nodes:
+            return False
+        if view_idx is None:
+            view_idx = self.primary_view.view_index
+        for node in nodes:
+            if self.count_tag_in_view(node.tag, view_idx) > 1:
+                return True
+        return False
+
     def get_overlapping_nodes(self, min_views: int = 2) -> List['SceneNode']:
         """Return nodes visible in at least min_views views (multiview)."""
         return [node for node in self.node_list if len(node.view_appearances) >= min_views]

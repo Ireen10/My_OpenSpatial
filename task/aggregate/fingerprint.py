@@ -218,8 +218,9 @@ def compute_question_core_key(turn: dict) -> str:
             "question_type": turn.get("question_type", ""),
         }
         if turn.get("question_type") == "MCQ":
-            ans = turn.get("answer_text", "")
-            body["mcq_answer_target"] = _normalize_mcq_answer(ans)
+            ab = ps.get("answer_bindings") or {}
+            ans = ab.get("X") or ab.get("E") or turn.get("answer_text") or ""
+            body["mcq_answer_target"] = _normalize_mcq_answer(str(ans))
         return _sha256_hex(_canonical_json(body))
 
     q = turn.get("question_text") or ""
@@ -281,9 +282,8 @@ def pick_dedup_winner(candidates: List[dict], policy: str = "semantic_first") ->
         return candidates[0]
 
     def sort_key(t: dict):
-        mode = t.get("referent_mode", "legacy")
-        pri = REFERENT_PRIORITY.get(mode, 99)
+        has_struct = 0 if t.get("prompt_struct") else 1
         tpl = (t.get("prompt_struct") or {}).get("template_id") or ""
-        return (pri, tpl)
+        return (has_struct, tpl)
 
     return min(candidates, key=sort_key)

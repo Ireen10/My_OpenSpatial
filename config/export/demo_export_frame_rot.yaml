@@ -24,12 +24,14 @@ pipeline:
         method: DatasetExporter
         depends_on: ../base_pipeline_demo_aggregate_singleview_frame_rot/aggregate_stage/merged_samples
         output_dir: singleview
-        export_dir: export
+        view_scope: singleview
+        skip_parquet: true
         schema_version: "1.1"
       -
         file_name: dataset_exporter
         method: DatasetExporter
         depends_on: ../base_pipeline_demo_aggregate_multiview_frame_rot/aggregate_stage/merged_samples
         output_dir: multiview
-        export_dir: export
+        view_scope: multiview
+        skip_parquet: true
         schema_version: "1.1"

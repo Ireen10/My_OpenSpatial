@@ -163,11 +163,14 @@ def verify_m7(*, check_l2_bundle: bool = False) -> bool:
 
         export_root = REPO_ROOT / "output" / "frame_rot" / "base_pipeline_demo_export_frame_rot"
         for branch in ("singleview", "multiview"):
-            bundle = export_root / branch / "export"
-            if not (bundle / "samples.jsonl").is_file():
-                print(f"M7 FAIL: missing L2 bundle {bundle / 'samples.jsonl'}")
+            bundle = export_root / branch
+            sharded = bundle / "jsonl" / "metadata_000000.jsonl"
+            legacy = bundle / "export" / "samples.jsonl"
+            if not sharded.is_file() and not legacy.is_file():
+                print(f"M7 FAIL: missing L2 bundle under {bundle}")
                 return False
-            ok, errs = verify_bundle_roundtrip(bundle)
+            check_root = bundle if sharded.is_file() else bundle / "export"
+            ok, errs = verify_bundle_roundtrip(check_root)
             if not ok:
                 print(f"M7 FAIL: roundtrip {bundle}: {errs[:5]}")
                 return False

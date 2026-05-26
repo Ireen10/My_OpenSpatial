@@ -1,8 +1,8 @@
 """
 Sample-level metadata helpers (plan M3+).
 
-prompt_struct is filled from PromptRenderRecord at sample time — no reverse lookup,
-no default-first-template, no A/B/C alphabet assumptions for placeholder semantics.
+Canonical training surface: metadata.turns[].prompt_struct (+ mark_spec, anchors).
+Visualization surface only: parquet messages[] (marked Q/A matching on-image marks).
 """
 
 from __future__ import annotations
@@ -14,13 +14,12 @@ from .prompt_template import PLACEHOLDER_RE, PromptRenderRecord, PromptTemplate,
 
 import task.prompt_templates  # noqa: F401
 
-_SLOT_PATTERN_RE = re.compile(r"-\(\w+\s+(box|mask|point)\)", re.I)
-# Placeholders used for MCQ options / type labels — not scene-object referents.
+MARK_SUFFIX_RE = re.compile(r"-\(\w+\s+(box|mask|point)\)", re.I)
 _NON_OBJECT_PLACEHOLDERS = frozenset({"Y", "O", "Z", "T", "D"})
 
 
 def split_prompt_qa(prompt: str) -> Tuple[str, str]:
-    """Split canonical annotation prompt into question and answer (matches message_builder)."""
+    """Split legacy combined prompt string into question and answer."""
     for sep in (" Answer: ", "Answer: "):
         if sep in prompt:
             q, a = prompt.split(sep, 1)
@@ -40,31 +39,69 @@ def template_family_id(template_id: str) -> str:
     return template_id
 
 
-def slots_from_tag_bindings(bindings: Dict[str, Tuple[int, str]]) -> Dict[str, Dict[str, Any]]:
-    """bindings: slot_id -> (obj_idx, tag)."""
-    return {sid: {"obj_idx": idx, "tag": tag} for sid, (idx, tag) in bindings.items()}
+def has_mark_suffix(text: str) -> bool:
+    return bool(text and MARK_SUFFIX_RE.search(text))
 
 
-def slots_from_mark_spec(mark_spec: Optional[dict]) -> Dict[str, Dict[str, Any]]:
-    if not mark_spec:
-        return {}
+def display_label_from_mark_slot(slot: dict) -> str:
+    tag = str(slot.get("tag", "")).strip()
+    kind = slot.get("mark_kind")
+    color = slot.get("color_name")
+    if tag and kind and color:
+        return f"{tag}-({color} {kind})"
+    return tag
+
+
+def apply_mark_spec_labels_to_text(text: str, mark_spec: Optional[dict]) -> str:
+    """Upgrade bare object tags to marked surface forms wherever mark_spec defines a slot."""
+    if not text or not mark_spec:
+        return text or ""
     from .mark_spec import all_slots_flat
-    return {
-        s["slot_id"]: {"obj_idx": s["obj_idx"], "tag": s["tag"]}
-        for s in all_slots_flat(mark_spec)
-        if isinstance(s, dict) and s.get("slot_id")
-    }
+
+    out = text
+    for slot in all_slots_flat(mark_spec):
+        tag = str(slot.get("tag", "")).strip()
+        if not tag:
+            continue
+        label = display_label_from_mark_slot(slot)
+        if label == tag or label.lower() in out.lower():
+            continue
+        out = re.sub(
+            rf"\b{re.escape(tag)}\b(?!\s*-\()",
+            label,
+            out,
+            flags=re.IGNORECASE,
+        )
+    return re.sub(r"  +", " ", out).strip()
+
+
+def marked_surface_label(marked) -> str:
+    """Text shown when marks are on-image (tag or tag-(color box|point))."""
+    if not isinstance(marked, (list, tuple)) or len(marked) < 1:
+        return str(marked).strip().lower()
+    return str(marked[0]).strip().lower()
+
+
+def semantic_object_label(marked) -> str:
+    """Semantic tag only (for prompt_struct.referent_slots, not for messages)."""
+    from .scene_graph import SceneNode
+
+    if not isinstance(marked, (list, tuple)) or len(marked) < 2:
+        raw = str(marked).strip()
+        return raw.split("-(", 1)[0].strip().lower() if "-(" in raw else raw.lower()
+    desc, node = marked[0], marked[1]
+    if isinstance(node, SceneNode):
+        return node.tag.strip().lower()
+    raw = str(desc).strip()
+    if "-(" in raw:
+        return raw.split("-(", 1)[0].strip().lower()
+    return raw.lower()
 
 
 def align_referent_slots(
     question_line: str,
     bindings: Optional[Dict[str, Dict[str, Any]]],
 ) -> Dict[str, Dict[str, Any]]:
-    """
-    Map task-provided object bindings onto placeholder keys used in the sampled question.
-
-    Example: counting MCQ uses [X] in the template but tasks may pass {"A": {obj_idx, tag}}.
-    """
     if not bindings:
         return {}
     clean = {k: v for k, v in bindings.items() if isinstance(v, dict)}
@@ -99,7 +136,6 @@ def align_referent_slots(
 
 
 def _sanitize_bindings(line: str, bindings: Dict[str, str]) -> Dict[str, str]:
-    """Keep only placeholders present on the template line with filled literal values."""
     keys = set(PromptTemplate.placeholders_in_line(line))
     out: Dict[str, str] = {}
     for key, val in (bindings or {}).items():
@@ -132,18 +168,16 @@ def build_prompt_struct(
     referent_slots: Optional[Dict[str, Dict[str, Any]]] = None,
     mark_spec: Optional[dict] = None,
 ) -> dict:
-    """
-    Build prompt_struct from render-time provenance.
-
-    - question_pattern / answer_pattern: selected template lines (not index 0).
-    - question_bindings / answer_bindings: values used when filling [X], [Y], etc.
-    - referent_slots: scene-object referents keyed by placeholder letter in the question.
-    """
     refs = _sanitize_referent_slots(
         align_referent_slots(render.question_line, referent_slots)
     )
     if not refs and mark_spec:
-        refs = _sanitize_referent_slots(slots_from_mark_spec(mark_spec))
+        from .mark_spec import all_slots_flat
+        refs = _sanitize_referent_slots({
+            s["slot_id"]: {"obj_idx": s["obj_idx"], "tag": s["tag"]}
+            for s in all_slots_flat(mark_spec)
+            if isinstance(s, dict) and s.get("slot_id")
+        })
     object_ph = [
         k for k in PromptTemplate.placeholders_in_line(render.question_line)
         if k not in _NON_OBJECT_PLACEHOLDERS
@@ -173,34 +207,85 @@ def build_prompt_struct(
     return out
 
 
-def build_depth_prompt_struct(template_id: str, mark_spec: Optional[dict], **kwargs) -> dict:
-    """Deprecated alias; prefer build_prompt_struct(render=...)."""
-    raise NotImplementedError("Use build_prompt_struct(PromptRenderRecord, ...) instead")
+def build_viz_qa(
+    render: PromptRenderRecord,
+    *,
+    mark_spec: Optional[dict] = None,
+    question_prefix: Optional[str] = None,
+    answer_text: Optional[str] = None,
+    sorted_semantic: Optional[List[str]] = None,
+    image_placeholder_count: int = 1,
+) -> dict:
+    """
+  Marked Q/A strings for messages[] only (visualization / human review).
+
+  Uses render-time literals (including chair-(red box) when marks were planned).
+    """
+    q = (render.question_text or "").strip()
+    if answer_text is not None:
+        a = answer_text
+    elif sorted_semantic is not None:
+        a = render.answer_text if render.answer_text else ", ".join(str(t) for t in sorted_semantic)
+    else:
+        a = render.answer_text or ""
+    prefix = (question_prefix or "").strip() or None
+    if prefix:
+        q = f"{prefix}\n\n{q}" if q else prefix
+    return {
+        "question": apply_mark_spec_labels_to_text(q, mark_spec).strip(),
+        "answer": apply_mark_spec_labels_to_text(str(a), mark_spec).strip(),
+        "question_prefix": prefix,
+        "image_placeholder_count": max(1, int(image_placeholder_count)),
+    }
 
 
-def _strip_legacy_segments(text: str) -> str:
-    """Remove -(color box/mask/point) suffixes from a filled prompt fragment."""
-    out = _SLOT_PATTERN_RE.sub("", text)
-    return re.sub(r"  +", " ", out).strip()
-
-
-def materialize_pattern(
-    pattern: str,
-    slot_tags: Dict[str, str],
-    shared: Optional[Dict[str, str]] = None,
-) -> str:
-    """Fill {{K}} placeholders; slot_tags supply object names for referent keys."""
-    text = pattern
-    merged = dict(shared or {})
-    if slot_tags and "A" not in merged and "X" not in merged:
-        merged.setdefault("A", ", ".join(slot_tags[s] for s in sorted(slot_tags)))
-    if shared:
-        merged.update(shared)
-    for key, val in merged.items():
-        text = text.replace(f"{{{{{key}}}}}", str(val))
-    for sid, tag in slot_tags.items():
-        text = text.replace(f"{{{{{sid}}}}}", tag)
-    return text
+def build_metadata_turn(
+    *,
+    turn_id: int,
+    task_name: str,
+    sub_task: str,
+    question_type: str,
+    template_id: str,
+    render: PromptRenderRecord,
+    mark_spec: Optional[dict] = None,
+    referent_slots: Optional[Dict[str, Dict[str, Any]]] = None,
+    extra_slots: Optional[Dict[str, Dict[str, Any]]] = None,
+    coord_tags: Optional[List[str]] = None,
+    instruction_mode: str = "legacy",
+    question_prefix: Optional[str] = None,
+    image_placeholder_count: int = 1,
+    type_label: Optional[str] = None,
+) -> dict:
+    """Canonical turn payload for metadata (no rendered Q/A prose)."""
+    slot_bindings = referent_slots if referent_slots is not None else extra_slots
+    if slot_bindings is None and coord_tags is not None:
+        slot_bindings = {
+            chr(ord("A") + i): {"obj_idx": -1, "tag": str(t)}
+            for i, t in enumerate(coord_tags)
+        }
+    prompt_struct = build_prompt_struct(
+        render,
+        referent_slots=align_referent_slots(render.question_line, slot_bindings),
+        mark_spec=mark_spec,
+    )
+    turn: Dict[str, Any] = {
+        "turn_id": turn_id,
+        "task_name": task_name,
+        "sub_task": sub_task,
+        "question_type": question_type,
+        "instruction_mode": (
+            "structured" if render.instruction_type else instruction_mode
+        ),
+        "prompt_struct": prompt_struct,
+        "image_placeholder_count": image_placeholder_count,
+    }
+    if mark_spec is not None:
+        turn["mark_spec"] = mark_spec
+    if question_prefix:
+        turn["question_prefix"] = question_prefix
+    if type_label:
+        turn["type_label"] = type_label
+    return turn
 
 
 def build_turn_record(
@@ -213,8 +298,6 @@ def build_turn_record(
     prompt: str,
     render: Optional[PromptRenderRecord] = None,
     mark_spec: Optional[dict] = None,
-    referent_mode: str = "semantic",
-    instruction_mode: str = "legacy",
     referent_slots: Optional[Dict[str, Dict[str, Any]]] = None,
     extra_slots: Optional[Dict[str, Dict[str, Any]]] = None,
     question_prefix: Optional[str] = None,
@@ -223,7 +306,10 @@ def build_turn_record(
     sorted_semantic: Optional[List[str]] = None,
     coord_tags: Optional[List[str]] = None,
     type_label: Optional[str] = None,
-) -> dict:
+    instruction_mode: str = "legacy",
+    **_: Any,
+) -> Tuple[dict, dict]:
+    """Return (metadata_turn, viz_qa) — viz_qa is for messages[] only."""
     if render is None:
         q, a = split_prompt_qa(prompt)
         render = PromptRenderRecord(
@@ -237,92 +323,31 @@ def build_turn_record(
             question_bindings={},
             answer_bindings={},
         )
-
-    slot_bindings = referent_slots if referent_slots is not None else extra_slots
-    if slot_bindings is None and coord_tags is not None:
-        slot_bindings = {
-            chr(ord("A") + i): {"obj_idx": -1, "tag": str(t)}
-            for i, t in enumerate(coord_tags)
-        }
-    prompt_struct = build_prompt_struct(
-        render,
-        referent_slots=align_referent_slots(render.question_line, slot_bindings),
+    meta = build_metadata_turn(
+        turn_id=turn_id,
+        task_name=task_name,
+        sub_task=sub_task,
+        question_type=question_type,
+        template_id=template_id,
+        render=render,
         mark_spec=mark_spec,
+        referent_slots=referent_slots,
+        extra_slots=extra_slots,
+        coord_tags=coord_tags,
+        instruction_mode=instruction_mode,
+        question_prefix=question_prefix,
+        image_placeholder_count=image_placeholder_count,
+        type_label=type_label,
     )
-
-    if (
-        referent_mode == "semantic"
-        and _SLOT_PATTERN_RE.search(render.question_text)
-        and prompt_struct.get("referent_slots")
-    ):
-        refs = prompt_struct["referent_slots"]
-        object_ph = [
-            k for k in PromptTemplate.placeholders_in_line(render.question_line)
-            if k not in _NON_OBJECT_PLACEHOLDERS
-        ]
-        ref_keys = set(refs)
-        shared_fill = {}
-        for key, val in render.question_bindings.items():
-            if key in ref_keys and not (len(object_ph) == 1 and len(refs) > 1):
-                continue
-            # Keep legacy mark suffixes in display text (messages) so Q/A matches
-            # the fully marked visual style (e.g. "door-(red box)").
-            shared_fill[key] = str(val)
-        if len(object_ph) == 1 and len(refs) > 1:
-            ph = object_ph[0]
-            raw = render.question_bindings.get(ph)
-            if raw and not _SLOT_PATTERN_RE.search(str(raw)):
-                shared_fill[ph] = str(raw)
-            else:
-                ordered = sorted(refs.keys())
-                shared_fill[ph] = ", ".join(refs[k]["tag"] for k in ordered)
-        else:
-            for key, binding in refs.items():
-                if key in object_ph:
-                    shared_fill[key] = binding["tag"]
-        question_text = materialize_pattern(
-            prompt_struct["question_pattern"], {}, shared=shared_fill,
-        )
-    else:
-        question_text = render.question_text
-    if question_prefix:
-        question_text = f"{question_prefix.strip()}\n\n{question_text}"
-
-    if answer_text is not None:
-        final_answer = answer_text
-    elif sorted_semantic is not None:
-        # Prefer full template answer (e.g. depth ordering); comma-join is legacy fallback.
-        final_answer = (
-            render.answer_text
-            if render and render.answer_text
-            else ", ".join(str(t) for t in sorted_semantic)
-        )
-    else:
-        final_answer = render.answer_text
-
-    # semantic mode may intentionally keep legacy mark suffixes in display strings.
-
-    turn: Dict[str, Any] = {
-        "turn_id": turn_id,
-        "task_name": task_name,
-        "sub_task": sub_task,
-        "question_type": question_type,
-        "instruction_mode": (
-            "structured" if render and render.instruction_type else instruction_mode
-        ),
-        "referent_mode": referent_mode,
-        "prompt_struct": prompt_struct,
-        "question_text": question_text,
-        "answer_text": final_answer,
-        "image_placeholder_count": image_placeholder_count,
-    }
-    if mark_spec is not None:
-        turn["mark_spec"] = mark_spec
-    if question_prefix:
-        turn["question_prefix"] = question_prefix
-    if type_label:
-        turn["type_label"] = type_label
-    return turn
+    viz = build_viz_qa(
+        render,
+        mark_spec=mark_spec,
+        question_prefix=question_prefix,
+        answer_text=answer_text,
+        sorted_semantic=sorted_semantic,
+        image_placeholder_count=image_placeholder_count,
+    )
+    return meta, viz
 
 
 def build_visual_anchor(
@@ -331,6 +356,8 @@ def build_visual_anchor(
     raw_image_ref: Optional[str] = None,
     view_indices: Optional[List[int]] = None,
 ) -> dict:
+    from .dataset_source import infer_dataset_source
+
     parent_id = (
         example.get("parent_preprocess_id")
         or example.get("preprocess_id")
@@ -338,8 +365,17 @@ def build_visual_anchor(
         or example.get("scene_id")
     )
     img = example.get("image")
+    single_ref = raw_image_ref
+    if single_ref is None and not isinstance(img, list) and img:
+        single_ref = str(img)
     anchor: Dict[str, Any] = {
         "parent_preprocess_id": str(parent_id) if parent_id is not None else "unknown",
+        "dataset_source": infer_dataset_source(
+            explicit=example.get("dataset") or example.get("dataset_source"),
+            parent_preprocess_id=parent_id,
+            raw_image_ref=single_ref,
+            raw_image_refs=img if isinstance(img, list) else None,
+        ),
     }
     if isinstance(img, list):
         if view_indices is not None:
@@ -368,12 +404,6 @@ def _single_image_ref(example: dict) -> Optional[str]:
 
 
 def qa_image_refs_for_turn(example: dict, turn: dict) -> List[str]:
-    """
-    Canonical QA image paths for one turn (dict semantics: one ref per placeholder).
-
-    Priority: mark_spec.views[].image_ref → view_indices into scene list →
-    scene list when len matches placeholder count → single-image ref.
-    """
     from .mark_spec import mark_spec_views
 
     n = int(turn.get("image_placeholder_count") or 1)
@@ -400,7 +430,6 @@ def qa_image_refs_for_turn(example: dict, turn: dict) -> List[str]:
 
 
 def build_turn_metadata(example: dict, turn: dict) -> dict:
-    """Build export metadata for one QA turn (visual_anchor + mark_spec + turns)."""
     from .mark_spec import align_mark_spec_to_image_refs, mark_spec_views, wrap_single_view_mark_spec
 
     export_turn = {k: v for k, v in turn.items() if k not in ("mark_spec", "view_indices")}

@@ -10,13 +10,17 @@ Sub-tasks:
 Templates used (singleview):
     distance.absolute_{m,cm}.{direct,sentence}
     distance.relative_{far,close}.{direct,reasoning,free}
-      (reasoning/free require graph.is_metric_depth; else fallback to direct)
     distance.relative_{far,close}_mcq.{direct,reasoning,free}
+      (reasoning/free answers use is_metric_depth for metric vs semantic templates)
+
+Mark policy (see MARK_TASKS_MEMO.md): ambiguous tag in view → mark_spec required;
+else 25% optional mark_spec. QA images stay unmarked unless emit_marked_images.
 """
 
 import random
 
 from .core.base_annotation_task import BaseAnnotationTask
+from .core.sample_metadata import marked_surface_label
 from .core.visual_marker import MarkConfig
 from .core.question_type import QuestionType
 
@@ -39,7 +43,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         self.task_name = args.get("task_name") or args.get("file_name", "distance")
 
     def get_mark_config(self):
-        return MarkConfig(type_weights={"mask": 0.2, "box": 0.8})
+        return MarkConfig(type_weights={"point": 0.25, "box": 0.75})
 
     @staticmethod
     def _title_desc(desc: str) -> str:
@@ -52,17 +56,13 @@ class AnnotationGenerator(BaseAnnotationTask):
     def _fmt_dist_m(dist: float) -> str:
         return f"{dist:.2f} m"
 
-    def _pick_relative_mode(self, graph) -> str:
-        """Sample instruction mode; reasoning/free need metric depth, else use direct."""
-        mode = random.choice(self._RELATIVE_MODES)
-        if mode in ("reasoning", "free") and not graph.is_metric_depth:
-            return "direct"
-        return mode
+    def _pick_relative_mode(self) -> str:
+        return random.choice(self._RELATIVE_MODES)
 
     def _get_cleaned_cloud(self, marked):
         """Extract and clean pointcloud from a marked result (desc, node)."""
-        desc, cloud = self._get_cloud(marked)
-        return desc.lower(), self._clean_cloud(cloud)
+        _, cloud = self._get_cloud(marked)
+        return marked_surface_label(marked), self._clean_cloud(cloud)
 
     def _resolve_relative_distance(self, A, B, C):
         """Return descriptors, winner text/tags, and anchor distances (metres)."""
@@ -133,7 +133,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         else:
             polarity, winner = "close", closer
 
-        mode = self._pick_relative_mode(graph)
+        mode = self._pick_relative_mode()
         tpl = f"distance.relative_{polarity}.{mode}"
         shared = {
             "A": A_desc,
@@ -145,7 +145,9 @@ class AnnotationGenerator(BaseAnnotationTask):
             "X": self._title_desc(winner),
         }
 
-        prompt = self.render_structured_prompt(tpl, shared=shared)
+        prompt = self.render_structured_prompt(
+            tpl, shared=shared, is_metric_depth=graph.is_metric_depth,
+        )
         return prompt, tpl
 
     def relative_distance_mcq_prompt_func(self, A, B, C, *, graph):
@@ -165,11 +167,11 @@ class AnnotationGenerator(BaseAnnotationTask):
         options = f"\nOptions: A. {self._title_desc(A_desc)}  B. {self._title_desc(B_desc)}."
 
         if random.random() < 0.5:
-            polarity, target_tag = "far", farther_tag
+            polarity, target_tag, winner_desc = "far", farther_tag, farther
         else:
-            polarity, target_tag = "close", closer_tag
+            polarity, target_tag, winner_desc = "close", closer_tag, closer
 
-        mode = self._pick_relative_mode(graph)
+        mode = self._pick_relative_mode()
         tpl = f"distance.relative_{polarity}_mcq.{mode}"
         option_answer = self._mcq_option_label(
             target_tag, A_desc, B_desc,
@@ -180,11 +182,14 @@ class AnnotationGenerator(BaseAnnotationTask):
             "C": C_desc,
             "D": self._fmt_dist_m(dist_AC),
             "E": self._fmt_dist_m(dist_BC),
+            "F": self._title_desc(winner_desc),
             "O": options,
             "X": option_answer,
         }
 
-        prompt = self.render_structured_prompt(tpl, shared=shared)
+        prompt = self.render_structured_prompt(
+            tpl, shared=shared, is_metric_depth=graph.is_metric_depth,
+        )
         return prompt, tpl
 
     def _generate_absolute_distance(self, graph):
@@ -196,7 +201,7 @@ class AnnotationGenerator(BaseAnnotationTask):
             return None
         image = graph.primary_view.image
         sampled = random.sample(nodes, 2)
-        processed_image, marked = self.mark_objects_for_qa(image, sampled, mark_prob=1.0)
+        processed_image, marked = self.mark_objects_for_qa(image, sampled)
         A, B = marked
         prompt, tpl = self.absolute_distance_prompt_func(A, B)
         self._record_turn(
@@ -216,7 +221,7 @@ class AnnotationGenerator(BaseAnnotationTask):
             return None
         image = graph.primary_view.image
         sampled = random.sample(nodes, 3)
-        processed_image, marked = self.mark_objects_for_qa(image, sampled, mark_prob=1.0)
+        processed_image, marked = self.mark_objects_for_qa(image, sampled)
         A, B, C = marked
         slots = self._slots_from_marked(marked, labels=["A", "B", "C"])
         mark_spec = self.marker.last_mark_spec

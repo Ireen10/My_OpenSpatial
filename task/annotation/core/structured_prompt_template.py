@@ -43,6 +43,29 @@ def _fill(text: str, mapping: Optional[dict]) -> str:
     return out
 
 
+_TERMINAL_PUNCT = frozenset(".?!")
+
+
+def _ensure_terminal_punctuation(part: str) -> str:
+    part = part.strip()
+    if not part or part[-1] in _TERMINAL_PUNCT:
+        return part
+    return f"{part}."
+
+
+def _join_text_parts(parts: Sequence[str]) -> str:
+    """Join intro/stem/instruction (or answer snippets) with spaces; ensure periods between segments."""
+    cleaned = [p.strip() for p in parts if p and p.strip()]
+    if not cleaned:
+        return ""
+    normalized: List[str] = []
+    for i, part in enumerate(cleaned):
+        if i < len(cleaned) - 1:
+            part = _ensure_terminal_punctuation(part)
+        normalized.append(part)
+    return " ".join(normalized)
+
+
 def _bindings_for_line(line: str, shared: Optional[dict], line_args: Optional[dict]) -> Dict[str, str]:
     keys = set(PLACEHOLDER_RE.findall(line))
     out: Dict[str, str] = {}
@@ -55,6 +78,30 @@ def _bindings_for_line(line: str, shared: Optional[dict], line_args: Optional[di
     return out
 
 
+def _pick_answer_template(
+    profile: "AnswerInstructionProfile",
+    *,
+    is_metric_depth: Optional[bool],
+    label: str,
+) -> tuple[int, str]:
+    """Pick answer line; honor per-line ``answer_requires_metric`` when provided."""
+    pool = profile.answer_templates
+    flags = profile.answer_requires_metric
+    if not flags or is_metric_depth is None:
+        return _pick_required(pool, label=label)
+    if is_metric_depth:
+        indices = [i for i, req in enumerate(flags) if req]
+    else:
+        indices = [i for i, req in enumerate(flags) if not req]
+    if not indices:
+        raise ValueError(
+            f"{label}: no answer template for is_metric_depth={is_metric_depth!r}"
+        )
+    idx = random.randrange(len(indices))
+    chosen = indices[idx]
+    return chosen, pool[chosen].strip()
+
+
 @dataclass
 class AnswerInstructionProfile:
     """One answer instruction_type: how the model should format the reply."""
@@ -62,12 +109,20 @@ class AnswerInstructionProfile:
     instruction_type: str
     instruction_snippets: List[str] = field(default_factory=list)
     answer_templates: List[str] = field(default_factory=list)
+    # Parallel to answer_templates: True => needs metric depth ([D]/[E], etc.).
+    answer_requires_metric: Optional[List[bool]] = None
 
     def __post_init__(self) -> None:
         if not self.answer_templates:
             raise ValueError(
                 f"instruction_type {self.instruction_type!r}: answer_templates must be non-empty"
             )
+        if self.answer_requires_metric is not None:
+            if len(self.answer_requires_metric) != len(self.answer_templates):
+                raise ValueError(
+                    f"instruction_type {self.instruction_type!r}: "
+                    "answer_requires_metric length must match answer_templates"
+                )
 
 
 @dataclass
@@ -119,6 +174,7 @@ class StructuredPromptTemplate:
         shared: Optional[dict] = None,
         q_args: Optional[dict] = None,
         a_args: Optional[dict] = None,
+        is_metric_depth: Optional[bool] = None,
     ) -> PromptRenderRecord:
         intro_i, intro_line = _pick_optional(self.introduction)
         if stem_index is not None:
@@ -149,19 +205,18 @@ class StructuredPromptTemplate:
                 profile = self.answer_profiles[itype]
 
         instr_i, instr_line = _pick_optional(profile.instruction_snippets)
-        ans_i, ans_line = _pick_required(
-            profile.answer_templates, label=f"answer_templates[{itype}]"
+        ans_i, ans_line = _pick_answer_template(
+            profile,
+            is_metric_depth=is_metric_depth,
+            label=f"{self.template_id}.answer_templates[{itype}]",
         )
-        answer_line = instr_line
-        if answer_line and ans_line:
-            answer_line = f"{answer_line} {ans_line}".strip()
-        elif ans_line:
-            answer_line = ans_line
+        answer_parts = [p for p in (instr_line, ans_line) if p]
+        answer_line = _join_text_parts(answer_parts)
         answer_index = ans_i
         _ = instr_i
 
         q_parts = [p for p in (intro_line, stem_line, qinstr_line) if p]
-        q_text = " ".join(q_parts)
+        q_text = _join_text_parts(q_parts)
         a_text = answer_line
 
         if shared:

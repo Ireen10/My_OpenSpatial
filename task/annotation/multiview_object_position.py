@@ -29,7 +29,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
     }
 
     def get_mark_config(self):
-        return MarkConfig(mark_types=["mask", "box"])
+        return MarkConfig(mark_types=["box", "point"])
 
     _ANGLES = [0, 45, 90, 135, 180, -135, -90, -45]
     _DIR_FRAMES = ("object_relative", "viewer_at_anchor")

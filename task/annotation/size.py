@@ -8,6 +8,7 @@ Templates:
 
 import random
 from .core.base_annotation_task import BaseAnnotationTask
+from .core.sample_metadata import marked_surface_label
 from .core.visual_marker import MarkConfig
 from .core.question_type import QuestionType
 from utils.box_utils import RELATIVE_SIZE_DIAG_RATIO_MIN, box_3d_diag_extent
@@ -26,7 +27,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         self.task_name = args.get("task_name") or args.get("file_name", "size")
 
     def get_mark_config(self):
-        return MarkConfig(mark_types=["mask", "box", "point"], shuffle_colors=True)
+        return MarkConfig(mark_types=["box", "point"], shuffle_colors=True)
 
     def _get_node_extent(self, node):
         if node.box_3d_world is not None:
@@ -35,9 +36,10 @@ class AnnotationGenerator(BaseAnnotationTask):
         return cloud.get_axis_aligned_bounding_box().get_extent()
 
     def relative_size_prompt_func(self, A, B):
-        A_desc, A_node = A
-        B_desc, B_node = B
-        A_desc, B_desc = A_desc.lower(), B_desc.lower()
+        A_desc = marked_surface_label(A)
+        B_desc = marked_surface_label(B)
+        _, A_node = A
+        _, B_node = B
 
         d_A = box_3d_diag_extent(A_node.box_3d_world)
         d_B = box_3d_diag_extent(B_node.box_3d_world)
@@ -58,8 +60,8 @@ class AnnotationGenerator(BaseAnnotationTask):
         return prompt, tpl
 
     def absolute_size_prompt_func(self, marked, stem_kind, get_value):
-        desc, node = marked
-        A_desc = desc.lower()
+        A_desc = marked_surface_label(marked)
+        _, node = marked
         value = get_value(node)
 
         unit = random.choice(["cm", "m"])
@@ -115,7 +117,7 @@ class AnnotationGenerator(BaseAnnotationTask):
             return None
         image = graph.primary_view.image
         sampled = random.sample(nodes, 2)
-        processed_image, marked = self.mark_objects_for_qa(image, sampled, mark_prob=0.7)
+        processed_image, marked = self.mark_objects_for_qa(image, sampled)
         prompt, tpl = self.relative_size_prompt_func(marked[0], marked[1])
         if prompt is None:
             return None

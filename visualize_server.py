@@ -10,6 +10,9 @@ basename (e.g. base_pipeline_demo_singleview_all_frame_rot_m8l2).
 
 import argparse
 import ast
+import socket
+from typing import List
+
 import base64
 import copy
 import io
@@ -387,6 +390,39 @@ def _intrinsic_from_row(row):
     return None
 
 
+def _grounding_display_turns(parsed):
+    """Prefer 3D-grounding turns when a merged sample has many tasks."""
+    turns = parsed.get("turns") or []
+    grounding = [
+        t for t in turns
+        if isinstance(t, dict)
+        and (
+            "3d_grounding" in (t.get("task_name") or "").lower()
+            or str(t.get("sub_task") or "").startswith("grounding")
+        )
+    ]
+    return grounding if grounding else turns
+
+
+def _bbox_entries_from_prompt_struct(parsed):
+    """Upstream / merged rows may store camera-frame boxes only in prompt_struct."""
+    entries = []
+    meta = parsed.get("meta") or {}
+    for turn in meta.get("turns") or []:
+        if not isinstance(turn, dict):
+            continue
+        ps = turn.get("prompt_struct")
+        if not isinstance(ps, dict):
+            continue
+        for val in (ps.get("answer_bindings") or {}).values():
+            if val is None:
+                continue
+            entries.extend(_parse_bbox_entries_from_text(str(val)))
+        if entries:
+            return entries
+    return []
+
+
 def _parse_bbox_entries_from_text(text):
     if not text:
         return []
@@ -473,17 +509,20 @@ def _resolve_grounding_context(row, parsed):
     ref_size = None
 
     if not entries:
-        for turn in parsed.get("turns") or []:
+        for turn in _grounding_display_turns(parsed):
             entries = _parse_bbox_entries_from_text(turn.get("answer") or "")
             if entries:
                 break
+
+    if not entries:
+        entries = _bbox_entries_from_prompt_struct(parsed)
 
     if not entries:
         return None, None
 
     if intrinsic is None:
         cam = None
-        for turn in parsed.get("turns") or []:
+        for turn in _grounding_display_turns(parsed):
             cam = _parse_camera_from_text(turn.get("question_prefix") or "")
             if cam is None:
                 cam = _parse_camera_from_text(_turn_camera_text(turn))
@@ -546,6 +585,18 @@ def _strip_image_prefix(text: str) -> str:
 
 
 def _parse_messages_turns(messages):
+    if (
+        messages
+        and isinstance(messages[0], list)
+        and messages[0]
+        and isinstance(messages[0][0], dict)
+    ):
+        turns: list = []
+        for conv in messages:
+            if isinstance(conv, list):
+                turns.extend(_parse_messages_turns(conv))
+        return turns
+
     turns = []
     i = 0
     while i < len(messages):
@@ -806,6 +857,90 @@ def build_display_images(
     return out_images, has_3d, apply_marks
 
 
+def _turn_task_names(parsed: dict) -> set:
+    names: set = set()
+    for t in parsed.get("turns") or []:
+        if not isinstance(t, dict):
+            continue
+        for key in ("task_name", "sub_task"):
+            v = (t.get(key) or "").strip()
+            if v:
+                names.add(v)
+    meta = parsed.get("meta") or {}
+    prov = meta.get("provenance") or {}
+    for st in prov.get("source_tasks") or []:
+        v = str(st).strip()
+        if v:
+            names.add(v)
+    for tag in parsed.get("tags") or []:
+        v = str(tag).strip()
+        if v:
+            names.add(v)
+    return names
+
+
+def row_matches_display_filters(
+    parsed: dict,
+    *,
+    filter_task: str = "",
+    filter_turns: str = "",
+) -> bool:
+    turns = parsed.get("turns") or []
+    n = len(turns)
+    ft = (filter_turns or "").strip()
+    if ft == "1" and n != 1:
+        return False
+    if ft == "2" and n != 2:
+        return False
+    if ft == "3" and n != 3:
+        return False
+    if ft == "2+" and n < 2:
+        return False
+    if ft == "3+" and n < 3:
+        return False
+    task = (filter_task or "").strip()
+    if task and task not in _turn_task_names(parsed):
+        return False
+    return True
+
+
+def collect_dataset_task_names(path: str, *, max_rows: int = 5000) -> List[str]:
+    if not path or not os.path.exists(path):
+        return []
+    df = pd.read_parquet(path)
+    names: set = set()
+    for i in range(min(len(df), max_rows)):
+        row = df.iloc[i]
+        parsed = parse_row(row)
+        parsed["meta"] = _normalize_meta(row.get("metadata"))
+        names.update(_turn_task_names(parsed))
+    return sorted(names)
+
+
+def filtered_row_indices(
+    path: str,
+    *,
+    filter_task: str = "",
+    filter_turns: str = "",
+) -> List[int]:
+    if not path or not os.path.exists(path):
+        return []
+    if not (filter_task or "").strip() and not (filter_turns or "").strip():
+        df = pd.read_parquet(path)
+        return list(range(len(df)))
+    df = pd.read_parquet(path)
+    out: List[int] = []
+    for i in range(len(df)):
+        row = df.iloc[i]
+        parsed = parse_row(row)
+        parsed["meta"] = _normalize_meta(row.get("metadata"))
+        if row_matches_display_filters(
+            parsed, filter_task=filter_task, filter_turns=filter_turns,
+        ):
+            out.append(i)
+    return out
+
+
 # ──────────────────────────────────────────────────────────────────────
 # HTML Template
 # ──────────────────────────────────────────────────────────────────────
@@ -827,6 +962,9 @@ HTML_TEMPLATE = """
   .header select { padding: 8px 12px; border-radius: 6px; border: none; font-size: 14px; background: #16213e; color: white; cursor: pointer; min-width: 280px; }
   .header select option { background: #16213e; }
   .header .info { margin-left: auto; font-size: 13px; opacity: 0.8; }
+  .filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .filters label { font-size: 12px; opacity: 0.9; }
+  .filters select { padding: 6px 10px; border-radius: 6px; border: none; font-size: 13px; background: #16213e; color: white; }
   .nav { display: flex; align-items: center; gap: 8px; margin-left: 16px; }
   .nav button { padding: 6px 14px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.3); background: transparent; color: white; cursor: pointer; font-size: 13px; transition: all 0.2s; }
   .nav button:hover { background: rgba(255,255,255,0.15); }
@@ -882,6 +1020,13 @@ HTML_TEMPLATE = """
     <option value="{{ t.path }}" data-grounding="{{ '1' if t.grounding_3d else '0' }}" {{ 'selected' if t.path == selected_path else '' }}>{{ t.label }}</option>
     {% endfor %}
   </select>
+  <div class="filters">
+    <label>Task <select id="filterTask" onchange="applyFilters()"><option value="">All tasks</option></select></label>
+    <label>Turns <select id="filterTurns" onchange="applyFilters()">
+      <option value="">Any</option><option value="1">1</option><option value="2">2</option>
+      <option value="3">3</option><option value="2+">2+</option><option value="3+">3+</option>
+    </select></label>
+  </div>
   <div class="nav">
     <button id="prevBtn" onclick="navigate(-1)" disabled>&larr; Prev</button>
     <span id="pageInfo">-</span>
@@ -905,8 +1050,38 @@ HTML_TEMPLATE = """
 const PAGE_SIZE = 10;
 let currentPage = 0;
 let totalRows = 0;
+let filteredTotal = 0;
 let currentPath = '';
 let is3dTask = false;
+
+function filterParams() {
+  const p = new URLSearchParams();
+  const ft = document.getElementById('filterTask')?.value || '';
+  const fn = document.getElementById('filterTurns')?.value || '';
+  if (ft) p.set('filter_task', ft);
+  if (fn) p.set('filter_turns', fn);
+  return p;
+}
+
+function loadFilterTasks(path) {
+  const sel = document.getElementById('filterTask');
+  if (!sel) return;
+  const cur = sel.value;
+  fetch(`/api/filter_options?path=${encodeURIComponent(path)}`)
+    .then(r => r.json())
+    .then(data => {
+      const tasks = data.tasks || [];
+      sel.innerHTML = '<option value="">All tasks</option>' +
+        tasks.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+      if (cur && tasks.includes(cur)) sel.value = cur;
+    });
+}
+
+function applyFilters() {
+  if (!currentPath) return;
+  currentPage = 0;
+  fetchPage(currentPath, 0);
+}
 
 function loadTask() {
   const sel = document.getElementById('taskSelect');
@@ -914,6 +1089,7 @@ function loadTask() {
   is3dTask = sel.selectedOptions[0]?.dataset.grounding === '1';
   if (!currentPath) return;
   currentPage = 0;
+  loadFilterTasks(currentPath);
   fetchPage(currentPath, 0);
 }
 
@@ -924,10 +1100,15 @@ function navigate(delta) {
 }
 
 function fetchPage(path, page) {
-  fetch(`/api/data?path=${encodeURIComponent(path)}&page=${page}&page_size=${PAGE_SIZE}`)
+  const q = filterParams();
+  q.set('path', path);
+  q.set('page', String(page));
+  q.set('page_size', String(PAGE_SIZE));
+  fetch('/api/data?' + q.toString())
     .then(r => r.json())
     .then(data => {
       totalRows = data.total;
+      filteredTotal = data.filtered_total ?? data.total;
       currentPage = data.page;
       is3dTask = data.is_3d_task;
       renderRows(data.rows);
@@ -936,11 +1117,12 @@ function fetchPage(path, page) {
 }
 
 function updateNav() {
-  const totalPages = Math.ceil(totalRows / PAGE_SIZE);
+  const totalPages = Math.ceil(filteredTotal / PAGE_SIZE);
   document.getElementById('pageInfo').textContent = totalPages > 0 ? `${currentPage + 1} / ${totalPages}` : '-';
   document.getElementById('prevBtn').disabled = currentPage <= 0;
   document.getElementById('nextBtn').disabled = currentPage >= totalPages - 1;
-  document.getElementById('totalInfo').textContent = `${totalRows} rows total`;
+  const extra = filteredTotal !== totalRows ? ` (${filteredTotal} matched / ${totalRows})` : '';
+  document.getElementById('totalInfo').textContent = `${totalRows} rows${extra}`;
 }
 
 function renderRows(rows) {
@@ -974,13 +1156,13 @@ function renderRows(rows) {
           ? `view ${s.view_index} · ` : '';
         const alias = s.label_alias ? ` (${escapeHtml(s.label_alias)})` : '';
         const label = `${vf}${escapeHtml(s.slot_id)}${alias}: ${escapeHtml(s.tag)} (${escapeHtml(s.color_name)} ${escapeHtml(s.mark_kind)})`;
-        return `<label><input type="checkbox" class="mark-cb" data-row="${row.row_index}" data-slot-key="${escapeHtml(key)}" onchange="refreshImage(${row.row_index})" /> ${label}</label>`;
+        return `<label><input type="checkbox" class="mark-cb" data-row="${row.row_index}" data-slot-key="${escapeHtml(key)}" checked onchange="refreshImage(${row.row_index})" /> ${label}</label>`;
       }).join('');
       const modeHint = row.type_label ? ` Instruction mode: <strong>${escapeHtml(row.type_label)}</strong>.` : '';
       markHtml = `<div class="mark-panel">
         <div class="mark-hint">QA_images are stored unmarked (raw bytes).${modeHint} Overlay is client-side from mark_spec only when you check slots below:</div>
         <label style="display:block;margin-bottom:6px;font-weight:600;">
-          <input type="checkbox" class="mark-select-all" data-row="${row.row_index}" onchange="toggleAllMarks(${row.row_index}, this.checked)" /> Select all marks
+          <input type="checkbox" class="mark-select-all" data-row="${row.row_index}" checked onchange="toggleAllMarks(${row.row_index}, this.checked)" /> Select all marks
         </label>
         ${checks}
       </div>`;
@@ -1038,6 +1220,9 @@ function renderRows(rows) {
     </div>`;
   });
   container.innerHTML = html;
+  rows.forEach(row => {
+    if (row.mark_slots && row.mark_slots.length) refreshImage(row.row_index);
+  });
   window.scrollTo(0, 0);
 }
 
@@ -1165,31 +1350,44 @@ def _load_row(path, index):
     return df.iloc[index], df
 
 
+@app.route("/api/filter_options")
+def api_filter_options():
+    path = request.args.get("path", "")
+    return jsonify({"tasks": collect_dataset_task_names(path)})
+
+
 @app.route("/api/data")
 def api_data():
     path = request.args.get("path", "")
     page = int(request.args.get("page", 0))
     page_size = int(request.args.get("page_size", 10))
+    filter_task = request.args.get("filter_task", "")
+    filter_turns = request.args.get("filter_turns", "")
 
     if not path or not os.path.exists(path):
-        return jsonify({"total": 0, "page": 0, "rows": [], "is_3d_task": False})
+        return jsonify({
+            "total": 0, "filtered_total": 0, "page": 0, "rows": [], "is_3d_task": False,
+        })
 
     df = pd.read_parquet(path)
     total = len(df)
-    start = page * page_size
-    end = min(start + page_size, total)
+    indices = filtered_row_indices(
+        path, filter_task=filter_task, filter_turns=filter_turns,
+    )
+    filtered_total = len(indices)
+    page_indices = indices[page * page_size : (page + 1) * page_size]
     task_name = _task_name_from_parquet_path(path)
     is_3d = "3d_grounding" in task_name.lower()
 
     rows = []
-    for i in range(start, end):
+    for i in page_indices:
         row = df.iloc[i]
         parsed = parse_row(row)
         parsed["meta"] = _normalize_meta(row.get("metadata"))
 
         can_3d = _is_3d_grounding_task(task_name, parsed)
         images, _, marks_applied = build_display_images(
-            row, parsed, task_name, overlay_3d=can_3d, marks_mode="off",
+            row, parsed, task_name, overlay_3d=can_3d, marks_mode="all",
         )
 
         rows.append({
@@ -1205,7 +1403,13 @@ def api_data():
             "can_3d_overlay": can_3d,
         })
 
-    return jsonify({"total": total, "page": page, "rows": rows, "is_3d_task": is_3d})
+    return jsonify({
+        "total": total,
+        "filtered_total": filtered_total,
+        "page": page,
+        "rows": rows,
+        "is_3d_task": is_3d,
+    })
 
 
 @app.route("/api/render")
@@ -1254,10 +1458,57 @@ def api_raw_row():
 # Main
 # ──────────────────────────────────────────────────────────────────────
 
+def _lan_urls(port: int) -> List[str]:
+    seen: set = set()
+    urls: List[str] = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                seen.add(ip)
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127."):
+                seen.add(ip)
+    except OSError:
+        pass
+    for ip in sorted(seen):
+        urls.append(f"http://{ip}:{port}")
+    return urls
+
+
+def _print_listen_info(host: str, port: int) -> None:
+    print(f"\nListening on http://{host}:{port}")
+    print(f"  This machine: http://127.0.0.1:{port}")
+    if host in ("0.0.0.0", "::"):
+        lan = _lan_urls(port)
+        if lan:
+            print("  Other machines on the same network:")
+            for url in lan:
+                print(f"    {url}")
+        else:
+            print(f"  Other machines: use this PC's LAN IP, e.g. http://<your-ip>:{port}")
+        print(
+            f"  If remote browsers cannot connect, allow TCP port {port} in Windows Firewall."
+        )
+    elif host in ("127.0.0.1", "localhost"):
+        print("  WARNING: --host is loopback only; other machines cannot connect.")
+        print(f"  Restart with: --host 0.0.0.0 --port {port}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OpenSpatial Annotation Visualizer")
     parser.add_argument("--port", type=int, default=8888, help="Server port")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Server host")
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Bind address (default 0.0.0.0 = all interfaces, reachable on LAN)",
+    )
     parser.add_argument("--data_dir", type=str, default="output/debug", help="Root directory containing parquet outputs")
     args = parser.parse_args()
 
@@ -1267,6 +1518,6 @@ if __name__ == "__main__":
     print(f"Found {len(tasks)} task outputs:")
     for t in tasks:
         print(f"  {t['label']} -> {t['path']}")
-    print(f"\nStarting server at http://{args.host}:{args.port}")
+    _print_listen_info(args.host, args.port)
 
     app.run(host=args.host, port=args.port, debug=False)

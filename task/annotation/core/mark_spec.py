@@ -298,7 +298,7 @@ def _slot_id(index: int, labels: Optional[List[str]]) -> str:
     return chr(ord("A") + index) if index < 26 else str(index)
 
 
-def _legacy_desc(tag: str, color_name: str, mark_kind: str) -> str:
+def _marked_slot_label(tag: str, color_name: str, mark_kind: str) -> str:
     return f"{tag}-({color_name} {mark_kind})"
 
 
@@ -310,23 +310,6 @@ def _obj_idx_from_node(node) -> int:
         except (TypeError, ValueError):
             pass
     return 0
-
-
-def _mask_path_from_node(node, view_idx: int = 0) -> Optional[str]:
-    from .scene_graph import SceneNode
-    if isinstance(node, SceneNode):
-        app = node.view_appearances.get(view_idx)
-        if app and app.mask_path:
-            return str(app.mask_path).replace("\\", "/")
-    return None
-
-
-def build_mask_ref(node, *, view_idx: int = 0) -> Dict[str, Any]:
-    oid = _obj_idx_from_node(node)
-    path = _mask_path_from_node(node, view_idx)
-    if path and path.strip():
-        return {"source": "path", "path": path, "obj_idx": oid}
-    return {"source": "preprocess", "obj_idx": oid}
 
 
 def plan_object_marks(
@@ -352,18 +335,7 @@ def plan_object_marks(
         geometry: Dict[str, Any] = {}
         actual_kind = mark_type
 
-        if mark_type == "mask":
-            mref = build_mask_ref(passthrough, view_idx=view_idx)
-            if mref.get("source") == "path":
-                geometry["mask_ref"] = mref
-            elif mask_pil is not None:
-                geometry["mask_ref"] = mref
-            elif bbox is not None:
-                geometry["box_2d"] = bbox
-                actual_kind = "box"
-            else:
-                continue
-        elif mark_type == "point":
+        if mark_type == "point":
             if mask_pil is not None:
                 mask = np.array(mask_pil)
                 ys, xs = np.where(mask > 0)
@@ -380,13 +352,16 @@ def plan_object_marks(
         elif mark_type == "box":
             if bbox is not None:
                 geometry["box_2d"] = bbox
-            else:
-                mref = build_mask_ref(passthrough, view_idx=view_idx)
-                if mref.get("source") == "path":
-                    geometry["mask_ref"] = mref
-                    actual_kind = "mask"
-                else:
+            elif mask_pil is not None:
+                ys, xs = np.where(np.array(mask_pil) > 0)
+                if len(xs) == 0:
                     continue
+                cx, cy = int(np.mean(xs)), int(np.mean(ys))
+                nearest = np.argmin((xs - cx) ** 2 + (ys - cy) ** 2)
+                geometry = {"uv": [int(xs[nearest]), int(ys[nearest])]}
+                actual_kind = "point"
+            else:
+                continue
         else:
             continue
 
@@ -403,7 +378,7 @@ def plan_object_marks(
             "geometry": geometry,
         })
         mark_kinds.add(actual_kind)
-        marked_info.append((_legacy_desc(tag, color_name, actual_kind), passthrough))
+        marked_info.append((_marked_slot_label(tag, color_name, actual_kind), passthrough))
 
     render_hints = {"alpha": 0.3}
     if marker.config.type_weights:

@@ -200,19 +200,18 @@ def draw_points_on_image(image, points, colors, labels=None):
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
+_ALLOWED_MARK_TYPES = ("point", "box")
+
+
 @dataclass
 class MarkConfig:
     """
     Configuration for visual marking behavior.
 
-    Usage per task:
-        distance.py:  MarkConfig(type_weights={"mask": 0.2, "box": 0.8})
-        position.py:  MarkConfig(mark_types=["mask", "box"])
-        size.py:      MarkConfig(mark_types=["mask", "box", "point"], shuffle_colors=True)
-        multiview_*:  MarkConfig(mark_types=["mask", "box"])
+    Mask marks are disabled pipeline-wide; only ``point`` and ``box`` are used.
     """
-    mark_types: List[str] = None          # e.g., ["mask", "box"] or ["mask", "box", "point"]
-    type_weights: Optional[Dict[str, float]] = None   # e.g., {"mask": 0.2, "box": 0.8}
+    mark_types: List[str] = None          # e.g., ["box", "point"]
+    type_weights: Optional[Dict[str, float]] = None   # e.g., {"point": 0.3, "box": 0.7}
     shuffle_colors: bool = False          # size.py shuffles colors; others don't
 
 
@@ -241,21 +240,25 @@ class VisualMarker:
         name = self.color_queue.pop(0)
         return name, COLOR_MAP[name]
 
+    @staticmethod
+    def _allowed_types(types) -> List[str]:
+        return [t for t in types if t in _ALLOWED_MARK_TYPES]
+
     def choose_mark_type(self) -> str:
         """
-        Choose a mark type respecting configured weights.
-
-        - If type_weights is set, uses weighted random choice.
-        - If mark_types is set, uses uniform random choice.
-        - Default: 50/50 mask/box.
+        Choose a mark type respecting configured weights (point/box only).
         """
         if self.config.type_weights:
-            types = list(self.config.type_weights.keys())
-            weights = list(self.config.type_weights.values())
+            types = self._allowed_types(self.config.type_weights.keys())
+            if not types:
+                return "box"
+            weights = [self.config.type_weights[t] for t in types]
             return random.choices(types, weights=weights, k=1)[0]
         if self.config.mark_types:
-            return random.choice(self.config.mark_types)
-        return random.choice(["mask", "box"])
+            types = self._allowed_types(self.config.mark_types)
+            if types:
+                return random.choice(types)
+        return random.choice(["point", "box"])
 
     @staticmethod
     def _extract(obj, view_idx=0):

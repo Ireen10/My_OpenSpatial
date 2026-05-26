@@ -43,6 +43,24 @@ def default_profile(answers: Sequence[str]) -> Dict[str, AnswerInstructionProfil
     }
 
 
+def mixed_metric_default_profile(
+    metric_answers: Sequence[str],
+    semantic_answers: Sequence[str],
+    *,
+    instruction_type: str = "default",
+) -> Dict[str, AnswerInstructionProfile]:
+    """Metric + semantic lines in one pool; render picks via ``is_metric_depth``."""
+    templates = list(metric_answers) + list(semantic_answers)
+    flags = [True] * len(metric_answers) + [False] * len(semantic_answers)
+    return {
+        instruction_type: AnswerInstructionProfile(
+            instruction_type,
+            answer_templates=templates,
+            answer_requires_metric=flags,
+        ),
+    }
+
+
 def letter_only_profile(answers: Optional[Sequence[str]] = None) -> Dict[str, AnswerInstructionProfile]:
     pool = list(answers) if answers else ["[X]", "[X]."]
     return {
@@ -66,14 +84,19 @@ def true_false_profiles(
 def register_oe(
     template_id: str,
     stem: Sequence[str],
-    answers: Sequence[str],
+    answers: Optional[Sequence[str]] = None,
     *,
     introduction: Optional[Sequence[str]] = None,
     question_instruction: Optional[Sequence[str]] = None,
     instruction_types: Optional[List[str]] = None,
     answer_profiles: Optional[Dict[str, AnswerInstructionProfile]] = None,
 ) -> None:
-    profiles = answer_profiles or default_profile(answers)
+    if answer_profiles is None:
+        if not answers:
+            raise ValueError(f"{template_id}: answers or answer_profiles required")
+        profiles = default_profile(answers)
+    else:
+        profiles = answer_profiles
     enabled = instruction_types or list(profiles.keys())
     StructuredTemplateRegistry.register(
         StructuredPromptTemplate(
