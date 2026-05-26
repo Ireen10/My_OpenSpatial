@@ -1,0 +1,23 @@
+# M6: placeholder audit on merged aggregate output (L2).
+#
+# Usage:
+#   python run.py --config config/aggregate/demo_placeholder_audit_frame_rot.yaml --output_dir E:/GitRepo/OpenSpatial/output/frame_rot
+
+dataset:
+  modality: image
+  dataset_name: image_base
+  data_dir: E:/GitRepo/OpenSpatial/output/frame_rot/base_pipeline_demo_aggregate_singleview_frame_rot/aggregate_stage/merged_samples/data.parquet
+
+pipeline:
+  file_name: base_pipeline
+  class_name: BasePipeline
+  output_dir: E:/GitRepo/OpenSpatial/output/frame_rot/base_pipeline_demo_placeholder_audit_frame_rot
+
+  stages:
+    placeholder_audit_stage:
+      -
+        file_name: placeholder_audit
+        method: PlaceholderAuditPass
+        fix_placeholders: true
+        fail_on_error: false
+        output_dir: placeholder_audit_stage/merged_samples_audited

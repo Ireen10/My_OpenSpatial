@@ -7,14 +7,15 @@ Sub-tasks:
     relative_distance — given three objects A, B, C, ask which of A/B is farther from /
                         closer to C, in both open-ended and MCQ form.
 
-Templates used:
-    distance.absolute_m     — [A]/[B] object names, [X] distance in metres
-    distance.absolute_cm    — [A]/[B] object names, [X] distance in centimetres
-    distance.relative_far   — [A]/[B]/[C] names, [X] answer, [O] options (empty for OE)
-    distance.relative_close — [A]/[B]/[C] names, [X] answer, [O] options (empty for OE)
+Templates used (singleview):
+    distance.absolute_{m,cm}.{direct,sentence}
+    distance.relative_{far,close}.{direct,reasoning,free}
+      (reasoning/free require graph.is_metric_depth; else fallback to direct)
+    distance.relative_{far,close}_mcq.{direct,reasoning,free}
 """
 
 import random
+
 from .core.base_annotation_task import BaseAnnotationTask
 from .core.visual_marker import MarkConfig
 from .core.question_type import QuestionType
@@ -24,36 +25,47 @@ from utils.point_cloud_utils import compute_point_cloud_distance
 
 class AnnotationGenerator(BaseAnnotationTask):
 
-    QUESTION_TAG = "Distance"
+    QUESTION_TAG = "Singleview Distance"
     SUB_TASKS = {
-        "absolute_distance":  {"default": 1, "handler": "_generate_absolute_distance"},
-        "relative_distance":  {"default": 1, "handler": "_generate_relative_distance"},
+        "absolute_distance": {"default": 1, "handler": "_generate_absolute_distance"},
+        "relative_distance": {"default": 1, "handler": "_generate_relative_distance"},
     }
+
+    # free: question_instruction pool empty (project-wide M8 convention)
+    _RELATIVE_MODES = ("direct", "reasoning", "free")
+
+    def __init__(self, args):
+        super().__init__(args)
+        self.task_name = args.get("task_name") or args.get("file_name", "distance")
 
     def get_mark_config(self):
         return MarkConfig(type_weights={"mask": 0.2, "box": 0.8})
 
-    # ── helpers ──────────────────────────────────────────────────────
+    @staticmethod
+    def _title_desc(desc: str) -> str:
+        desc = (desc or "").strip()
+        if not desc:
+            return desc
+        return desc[0].upper() + desc[1:]
+
+    @staticmethod
+    def _fmt_dist_m(dist: float) -> str:
+        return f"{dist:.2f} m"
+
+    def _pick_relative_mode(self, graph) -> str:
+        """Sample instruction mode; reasoning/free need metric depth, else use direct."""
+        mode = random.choice(self._RELATIVE_MODES)
+        if mode in ("reasoning", "free") and not graph.is_metric_depth:
+            return "direct"
+        return mode
 
     def _get_cleaned_cloud(self, marked):
-        """Extract and clean pointcloud from a marked result (desc, node).
-
-        Returns (lowercased_desc, cleaned_pointcloud).
-        """
+        """Extract and clean pointcloud from a marked result (desc, node)."""
         desc, cloud = self._get_cloud(marked)
         return desc.lower(), self._clean_cloud(cloud)
 
     def _resolve_relative_distance(self, A, B, C):
-        """Compute relative distances and determine which is farther / closer.
-
-        Given three marked objects A, B, C, computes min-distance from A→C
-        and B→C, then returns descriptors and which is farther/closer to C.
-
-        Returns:
-            (A_desc, B_desc, C_desc, farther_desc, closer_desc,
-             farther_tag, closer_tag)
-            where tag is "A" or "B" (for MCQ option letters).
-        """
+        """Return descriptors, winner text/tags, and anchor distances (metres)."""
         A_desc, A_cloud = self._get_cleaned_cloud(A)
         B_desc, B_cloud = self._get_cleaned_cloud(B)
         C_desc, C_cloud = self._get_cleaned_cloud(C)
@@ -68,9 +80,22 @@ class AnnotationGenerator(BaseAnnotationTask):
             farther, closer = B_desc, A_desc
             farther_tag, closer_tag = "B", "A"
 
-        return A_desc, B_desc, C_desc, farther, closer, farther_tag, closer_tag
+        return (
+            A_desc,
+            B_desc,
+            C_desc,
+            farther,
+            closer,
+            farther_tag,
+            closer_tag,
+            dist_AC,
+            dist_BC,
+        )
 
-    # ── prompt functions (called by mark_and_prompt or handler) ─────
+    @staticmethod
+    def _mcq_option_label(tag: str, a_desc: str, b_desc: str) -> str:
+        desc = a_desc if tag == "A" else b_desc
+        return f"{tag}. {AnnotationGenerator._title_desc(desc)}"
 
     def absolute_distance_prompt_func(self, A, B):
         """Generate an absolute distance QA for two marked objects."""
@@ -80,54 +105,90 @@ class AnnotationGenerator(BaseAnnotationTask):
         unit = random.choice(["m", "cm"])
         dist = compute_point_cloud_distance(A_cloud, B_cloud)
         scaled = dist * self.scaling_factor * (100 if unit == "cm" else 1)
+        style = random.choice(["direct", "sentence"])
+        tpl = f"distance.absolute_{unit}.{style}"
 
-        return self.render_prompt(
-            f"distance.absolute_{unit}",
-            shared={"A": A_desc, "B": B_desc, "X": f"{scaled:.2f} {unit}"},
+        prompt = self.render_structured_prompt(
+            tpl,
+            shared={"A": A_desc, "B": B_desc, "X": f"{scaled:.2f}"},
         )
+        return prompt, tpl
 
-    def relative_distance_oe_prompt_func(self, A, B, C):
-        """Generate an open-ended relative distance QA.
-
-        Randomly asks "which is farther" or "which is closer" to C.
-        [O] is set to empty string (no options for OE).
-        """
-        A_desc, B_desc, C_desc, farther, closer, _, _ = self._resolve_relative_distance(A, B, C)
-
-        # randomly pick "farther" or "closer" question
-        if random.random() < 0.5:
-            return self.render_prompt("distance.relative_far", shared={"A": A_desc, "B": B_desc, "C": C_desc, "X": farther, "O": ""})
-        else:
-            return self.render_prompt("distance.relative_close", shared={"A": A_desc, "B": B_desc, "C": C_desc, "X": closer, "O": ""})
-
-    def relative_distance_mcq_prompt_func(self, A, B, C):
-        """Generate an MCQ relative distance QA.
-
-        Builds "Options: A. <name>  B. <name>." and randomly asks farther/closer.
-        Answer is the option letter (70% chance) or "letter. name" (30% chance).
-        """
-        A_desc, B_desc, C_desc, farther, closer, farther_tag, closer_tag = \
-            self._resolve_relative_distance(A, B, C)
-
-        options = f"\nOptions: A. {A_desc}  B. {B_desc}."
+    def relative_distance_oe_prompt_func(self, A, B, C, *, graph):
+        """Open-ended relative distance with instruction-constrained answer forms."""
+        (
+            A_desc,
+            B_desc,
+            C_desc,
+            farther,
+            closer,
+            _,
+            _,
+            dist_AC,
+            dist_BC,
+        ) = self._resolve_relative_distance(A, B, C)
 
         if random.random() < 0.5:
-            tpl_name, target_tag = "distance.relative_far", farther_tag
+            polarity, winner = "far", farther
         else:
-            tpl_name, target_tag = "distance.relative_close", closer_tag
+            polarity, winner = "close", closer
 
-        # 70% just letter, 30% letter + name for diversity
-        answer = target_tag if random.random() < 0.7 else f"{target_tag}. {farther if target_tag == farther_tag else closer}"
-        return self.render_prompt(tpl_name, shared={"A": A_desc, "B": B_desc, "C": C_desc, "X": answer, "O": options})
+        mode = self._pick_relative_mode(graph)
+        tpl = f"distance.relative_{polarity}.{mode}"
+        shared = {
+            "A": A_desc,
+            "B": B_desc,
+            "C": C_desc,
+            "D": self._fmt_dist_m(dist_AC),
+            "E": self._fmt_dist_m(dist_BC),
+            "O": "",
+            "X": self._title_desc(winner),
+        }
 
-    # ── handlers (dispatched by SUB_TASKS) ───────────────────────────
+        prompt = self.render_structured_prompt(tpl, shared=shared)
+        return prompt, tpl
+
+    def relative_distance_mcq_prompt_func(self, A, B, C, *, graph):
+        """MCQ relative distance with instruction-constrained answer forms."""
+        (
+            A_desc,
+            B_desc,
+            C_desc,
+            farther,
+            closer,
+            farther_tag,
+            closer_tag,
+            dist_AC,
+            dist_BC,
+        ) = self._resolve_relative_distance(A, B, C)
+
+        options = f"\nOptions: A. {self._title_desc(A_desc)}  B. {self._title_desc(B_desc)}."
+
+        if random.random() < 0.5:
+            polarity, target_tag = "far", farther_tag
+        else:
+            polarity, target_tag = "close", closer_tag
+
+        mode = self._pick_relative_mode(graph)
+        tpl = f"distance.relative_{polarity}_mcq.{mode}"
+        option_answer = self._mcq_option_label(
+            target_tag, A_desc, B_desc,
+        )
+        shared = {
+            "A": A_desc,
+            "B": B_desc,
+            "C": C_desc,
+            "D": self._fmt_dist_m(dist_AC),
+            "E": self._fmt_dist_m(dist_BC),
+            "O": options,
+            "X": option_answer,
+        }
+
+        prompt = self.render_structured_prompt(tpl, shared=shared)
+        return prompt, tpl
 
     def _generate_absolute_distance(self, graph):
-        """Measure the absolute distance between two objects.
-
-        Requires metric depth data.
-        Always marks both objects on the image (mark_prob=1.0).
-        """
+        """Measure the absolute distance between two objects."""
         if not graph.is_metric_depth:
             return None
         nodes = graph.get_object_nodes()
@@ -135,28 +196,51 @@ class AnnotationGenerator(BaseAnnotationTask):
             return None
         image = graph.primary_view.image
         sampled = random.sample(nodes, 2)
-        prompt, processed_image = self.mark_and_prompt(
-            sampled, image, self.absolute_distance_prompt_func, mark_prob=1.0
+        processed_image, marked = self.mark_objects_for_qa(image, sampled, mark_prob=1.0)
+        A, B = marked
+        prompt, tpl = self.absolute_distance_prompt_func(A, B)
+        self._record_turn(
+            "absolute_distance",
+            tpl,
+            prompt,
+            QuestionType.OPEN_ENDED,
+            mark_spec=self.marker.last_mark_spec,
+            extra_slots=self._slots_from_marked(marked),
         )
         return prompt, processed_image, QuestionType.OPEN_ENDED
 
     def _generate_relative_distance(self, graph):
-        """Sample three objects and ask relative distance to the third.
-
-        Generates both an OE and an MCQ prompt from the same triple.
-        Returns list[(prompt, image, qtype)] with correct types per prompt.
-        """
+        """Sample three objects and ask relative distance to the third."""
         nodes = graph.get_object_nodes()
         if len(graph.obj_tags) <= 2:
             return None
         image = graph.primary_view.image
         sampled = random.sample(nodes, 3)
-
-        # mark all three objects at once
-        processed_image, marked = self.marker.mark_objects(image, sampled)
+        processed_image, marked = self.mark_objects_for_qa(image, sampled, mark_prob=1.0)
         A, B, C = marked
+        slots = self._slots_from_marked(marked, labels=["A", "B", "C"])
+        mark_spec = self.marker.last_mark_spec
+
+        oe_prompt, oe_tpl = self.relative_distance_oe_prompt_func(A, B, C, graph=graph)
+        self._record_turn(
+            "relative_distance",
+            oe_tpl,
+            oe_prompt,
+            QuestionType.OPEN_ENDED,
+            mark_spec=mark_spec,
+            extra_slots=slots,
+        )
+        mcq_prompt, mcq_tpl = self.relative_distance_mcq_prompt_func(A, B, C, graph=graph)
+        self._record_turn(
+            "relative_distance",
+            mcq_tpl,
+            mcq_prompt,
+            QuestionType.MCQ,
+            mark_spec=mark_spec,
+            extra_slots=slots,
+        )
 
         return [
-            (self.relative_distance_oe_prompt_func(A, B, C), processed_image, QuestionType.OPEN_ENDED),
-            (self.relative_distance_mcq_prompt_func(A, B, C), processed_image, QuestionType.MCQ),
+            (oe_prompt, processed_image, QuestionType.OPEN_ENDED),
+            (mcq_prompt, processed_image, QuestionType.MCQ),
         ]

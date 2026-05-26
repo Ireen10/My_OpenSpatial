@@ -1,12 +1,25 @@
 """Compose separate dataset backends for load vs save."""
 
+from __future__ import annotations
+
 
 class ComposedDataset:
     """
-    Pipeline facade: input backend owns in-memory data and loads; output backend writes.
+    Pipeline facade: input backend loads; output backend writes.
 
-    When backends differ, save_data writes Parquet at ``data_path`` (for stage chaining)
-    and also runs the output backend (e.g. JSONL alongside ``data.jsonl``).
+    Typical M7 pattern (aggregate parquet → upstream bundle):
+
+        dataset:
+          input_dataset_name: image_base
+          output_dataset_name: jsonl_base
+          export_bundle: true
+          export_dir: export
+
+    When backends differ:
+      - input writes ``data.parquet`` (stage chaining / task summary)
+      - output writes upstream JSONL+tar under ``export_dir`` when ``export_bundle`` is set
+      - if output has ``export_bundle``, input still writes parquet unless
+        ``skip_input_parquet_on_export: true``
     """
 
     def __init__(self, input_backend, output_backend):
@@ -32,6 +45,11 @@ class ComposedDataset:
         if self._output is self._input:
             return self._output.save_data(data_path, data, **kwargs)
 
-        self._input.save_data(data_path, data, **kwargs)
+        skip_input = bool(
+            getattr(self._output, "export_bundle", False)
+            and getattr(self._output.cfg, "skip_input_parquet_on_export", False)
+        )
+        if not skip_input:
+            self._input.save_data(data_path, data, **kwargs)
         self._output.data = data
         return self._output.save_data(data_path, data, **kwargs)

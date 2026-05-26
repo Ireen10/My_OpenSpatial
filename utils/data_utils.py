@@ -128,6 +128,42 @@ def merge_overlapping_boxes(obj_tags, boxes, overlap_threshold=0.8):
     return boxes, obj_tags
 
 
+def strip_empty_structs(obj):
+    """Remove empty dicts so PyArrow can write nested metadata (e.g. mark_spec.render_hints)."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if isinstance(v, dict) and len(v) == 0:
+                continue
+            cleaned = strip_empty_structs(v)
+            if isinstance(cleaned, dict) and len(cleaned) == 0:
+                continue
+            out[k] = cleaned
+        return out
+    if isinstance(obj, list):
+        return [strip_empty_structs(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.integer, np.floating, np.bool_)):
+        return obj.item()
+    return obj
+
+
+def qa_image_paths_from_metadata(meta) -> list:
+    """QA frame paths from export metadata (visual_anchor), not full preprocess scene."""
+    if not isinstance(meta, dict):
+        return []
+    va = meta.get("visual_anchor") or {}
+    refs = va.get("raw_image_refs")
+    if refs is not None:
+        if hasattr(refs, "tolist"):
+            refs = refs.tolist()
+        return [str(r) for r in refs if r]
+    if va.get("raw_image_ref"):
+        return [str(va["raw_image_ref"])]
+    return []
+
+
 def flatten_annotations(data, keep_keys):
     """Flatten multi-QA annotation rows into one row per QA pair.
 
@@ -147,6 +183,14 @@ def flatten_annotations(data, keep_keys):
 
         for i in range(lengths[0]):
             new_example = {key: example[key][i] if key in example else None for key in keep_keys}
-            new_example["image"] = example["image"]
+            meta_i = None
+            if "metadata" in example and example["metadata"] is not None:
+                md = example["metadata"]
+                if isinstance(md, list) and i < len(md):
+                    meta_i = md[i]
+                elif isinstance(md, dict) and lengths[0] == 1:
+                    meta_i = md
+            qa_paths = qa_image_paths_from_metadata(meta_i)
+            new_example["image"] = qa_paths if qa_paths else example.get("image")
             new_data.append(new_example)
     return pd.DataFrame(new_data)

@@ -1,43 +1,55 @@
-height_higher_predicate_questions = [
-    "Consider the real-world 3D locations of the objects. Which object has a higher location? [O]",
-    "Based on the 3D positions of the objects, which one is placed at a higher elevation? [O]",
-    "Looking at the real-world 3D arrangement, which object is positioned higher? [O]",
-    "Considering the spatial positions of the objects in 3D space, which one sits higher? [O]",
+# Template IDs: position.height_higher | height_lower | near_far (MCQ, direct answer only)
+
+position_introduction = [
+    "Consider the real-world 3D locations of the objects.",
+    "Based on the 3D positions of the objects.",
+    "Looking at the real-world 3D arrangement.",
+    "Considering the spatial layout.",
 ]
 
-height_lower_predicate_questions = [
-    "Consider the real-world 3D locations of the objects. Which object has a lower location? [O]",
-    "Based on the 3D positions of the objects, which one is placed at a lower elevation? [O]",
-    "Looking at the real-world 3D arrangement, which object is positioned lower? [O]",
-    "Considering the spatial positions of the objects in 3D space, which one sits lower? [O]",
+from .register_structured import MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS
+
+position_mcq_direct_instructions = MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS
+
+height_higher_stems = [
+    "Which object has a higher location? [O]",
+    "Which one is placed at a higher elevation? [O]",
+    "Which object is positioned higher? [O]",
+    "Which one sits higher in 3D space? [O]",
 ]
 
-next_far_questions = [
-    "Consider the real-world 3D locations of the objects. Are the [A] and the [B] next to each other or far away from each other? [O]",
-    "Based on the 3D spatial arrangement, are the [A] and the [B] close together or far apart? [O]",
-    "Looking at the real-world positions of the objects, are the [A] and the [B] near each other or distant? [O]",
-    "Considering the spatial layout, would you say the [A] and the [B] are adjacent or separated by a large distance? [O]",
+height_lower_stems = [
+    "Which object has a lower location? [O]",
+    "Which one is placed at a lower elevation? [O]",
+    "Which object is positioned lower? [O]",
+    "Which one sits lower in 3D space? [O]",
 ]
 
-
-height_answers = [
-    "[X]",
+near_far_stems = [
+    "Are the [A] and the [B] close together or far apart? [O]",
+    "Would you characterize the spatial proximity of the [A] and the [B] as near or far? [O]",
+    "Are the [A] and the [B] near or far relative to one another? [O]",
+    "Would you describe the [A] and the [B] as near or far from one another? [O]",
 ]
 
-next_far_answers = [
-    "[X]",
-]
+mcq_answers = ["[X]"]
+
+from .register_structured import register_mcq
 
 
-# ─── Template Registration ───────────────────────────────────────────
-from ..annotation.core.prompt_template import TemplateRegistry, PromptTemplate
+def register_structured_position_templates() -> None:
+    for template_id, stems in (
+        ("position.height_higher", height_higher_stems),
+        ("position.height_lower", height_lower_stems),
+        ("position.near_far", near_far_stems),
+    ):
+        register_mcq(
+            template_id,
+            stems,
+            answers=mcq_answers,
+            introduction=position_introduction,
+            question_instruction=position_mcq_direct_instructions,
+        )
 
-TemplateRegistry.register("position.height_higher", PromptTemplate(
-    questions=height_higher_predicate_questions, answers=height_answers,
-))
-TemplateRegistry.register("position.height_lower", PromptTemplate(
-    questions=height_lower_predicate_questions, answers=height_answers,
-))
-TemplateRegistry.register("position.next_far", PromptTemplate(
-    questions=next_far_questions, answers=next_far_answers,
-))
+
+register_structured_position_templates()

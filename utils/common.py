@@ -23,6 +23,7 @@ def get_task_instance(stage_name, task_cfg, cfg):
         task_cfg_dict = task_cfg.__dict__.copy()
         if not task_cfg_dict.get("output_dir"):
             task_cfg_dict["output_dir"] = os.path.join(cfg.output_dir, stage_name)
+        task_cfg_dict["output_root"] = cfg.output_dir
         return cls(task_cfg_dict)
     except Exception as e:
         raise ImportError(f"Failed to import {module_path}.{task_cfg.method}: {e}")

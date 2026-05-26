@@ -152,6 +152,8 @@ class BasePipeline:
                                ["messages", "QA_images", "question_tags", "question_types"])
             self.dataset.save_data(os.path.join(output_path, "data.parquet"), processed_data,
                                   annotation_flag=True, batch_size=batch_size, keep_data_columns=keep_cols)
+        elif stage_name == "aggregate_stage":
+            self.dataset.save_data(os.path.join(output_path, "data.parquet"), processed_data)
         else:
             self.dataset.save_data(os.path.join(output_path, "data.parquet"), processed_data)
 

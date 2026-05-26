@@ -1,0 +1,122 @@
+# M8 L2 review — multiview annotation (structured templates).
+# Does NOT overwrite base_pipeline_demo_multiview_all_frame_rot.
+#
+# Output: output/frame_rot/base_pipeline_demo_multiview_all_frame_rot_m8l2/
+#
+# Usage:
+#   python run.py --config config/annotation/demo_multiview_all_frame_rot_m8l2.yaml --output_dir E:/GitRepo/OpenSpatial/output/frame_rot
+#   python visualize_server.py --data_dir output/frame_rot/base_pipeline_demo_multiview_all_frame_rot_m8l2 --port 8891
+
+dataset:
+  modality: image
+  dataset_name: image_base
+  data_dir: &multiview_input E:/GitRepo/OpenSpatial/output/frame_rot/base_pipeline_demo_preprocessing_embodiedscan/group_stage/group/data.parquet
+
+pipeline:
+  file_name: base_pipeline
+  class_name: BasePipeline
+
+  stages:
+    annotation_stage:
+      -
+        file_name: multiview_distance
+        method: AnnotationGenerator
+        depends_on: *multiview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          pair_absolute_distance: 1
+          multi_relative_distance: 1
+        emit_metadata: true
+        emit_marked_images: false
+        keep_data_columns: &mv_keep
+          - messages
+          - QA_images
+          - question_tags
+          - question_types
+          - metadata
+        max_num_views: 400
+        min_rot_angle: 15.0
+        min_translation: 0.0
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:
+
+      -
+        file_name: multiview_size
+        method: AnnotationGenerator
+        depends_on: *multiview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          pair_relative_size: 1
+          multi_relative_size: 1
+        emit_metadata: true
+        emit_marked_images: false
+        keep_data_columns: *mv_keep
+        max_num_views: 400
+        min_rot_angle: 15.0
+        min_translation: 0.0
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:
+
+      -
+        file_name: multiview_correspondence
+        method: AnnotationGenerator
+        depends_on: *multiview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          point_correspondence_oe: 1
+          point_correspondence_mcq: 1
+        emit_metadata: true
+        emit_marked_images: false
+        keep_data_columns: *mv_keep
+        max_num_views: 400
+        min_rot_angle: 15.0
+        min_translation: 0.0
+        overlap_dist: 0.003
+        min_overlap_points: 10
+        boundary_margin: 10
+        min_distractor_dist: 20
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:
+
+      -
+        file_name: multiview_distance_obj_cam
+        method: AnnotationGenerator
+        depends_on: *multiview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          object_camera_distance: 1
+        emit_metadata: true
+        emit_marked_images: false
+        keep_data_columns: *mv_keep
+        max_num_views: 400
+        min_rot_angle: 15.0
+        min_translation: 0.0
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:
+
+      -
+        file_name: multiview_object_position
+        method: AnnotationGenerator
+        depends_on: *multiview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          position_oe: 1
+          position_mcq: 1
+        emit_metadata: true
+        emit_marked_images: false
+        keep_data_columns: *mv_keep
+        max_num_views: 400
+        min_rot_angle: 15.0
+        min_translation: 0.0
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:

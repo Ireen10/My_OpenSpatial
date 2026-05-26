@@ -1,0 +1,21 @@
+dataset:
+  modality: image
+  dataset_name: image_base
+  data_dir: E:/GitRepo/OpenSpatial/output/lowres/base_pipeline_demo_singleview_all/annotation_stage/depth_annotation/data.parquet
+
+pipeline:
+  file_name: base_pipeline
+  class_name: BasePipeline
+  output_dir: E:/GitRepo/OpenSpatial/output/lowres/base_pipeline_demo_aggregate
+
+  stages:
+    aggregate_stage:
+      -
+        file_name: sample_aggregator
+        method: SampleAggregator
+        input_tasks:
+          - annotation_stage/depth_annotation
+        dedup_within_task: true
+        merge_by_visual_input_group: true
+        dedup_keep_policy: semantic_first
+        output_dir: aggregate_stage/merged_samples

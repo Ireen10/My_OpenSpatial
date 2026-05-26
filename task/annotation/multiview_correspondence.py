@@ -6,8 +6,8 @@ marks a query point on View 1, and asks the model to identify the
 corresponding point among labeled candidates on View 2.
 
 Sub-tasks:
-    point_correspondence_oe  — open-ended: model outputs a label (e.g. "point-B")
-    point_correspondence_mcq — multiple choice: model picks from A/B/C/D options
+    point_correspondence_oe  — open-ended: sentence or free (full-sentence answers with [L])
+    point_correspondence_mcq — MCQ: direct/sentence/free; direct uses [T], sentence uses [L] then [E]
 
 Algorithm (vectorized Open3D):
     1. Use _find_overlapping_views to find two diverse views sharing a common object.
@@ -20,8 +20,8 @@ Algorithm (vectorized Open3D):
     6. Shuffle GT + distractors, assign labels (A/B/C/D or 1/2/3/4).
 
 Templates used:
-    correspondence.point2point     — [A] query color, [B] candidate color, [T] answer label
-    correspondence.point2point_num — same, but with numeric labels (1/2/3/4)
+    multiview_correspondence.point2point[_{num}].oe.{sentence|free} — OE; same answer pool
+    multiview_correspondence.point2point[_{num}].mcq.{direct|sentence|free} — MCQ; options via [O]
 
 Configurable parameters (via YAML args):
     overlap_dist          — 3D distance threshold (meters) for two points to be
@@ -38,16 +38,20 @@ import random
 import numpy as np
 import open3d as o3d
 from .core.base_multiview_task import BaseMultiviewAnnotationTask
+from .core.mark_spec import assemble_per_view_mark_spec
 from .core.question_type import QuestionType
+from utils.image_utils import convert_pil_to_bytes
 
 
 class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
-    QUESTION_TAG = "Correspondence"
+    QUESTION_TAG = "Multiview Correspondence"
     SUB_TASKS = {
         "point_correspondence_oe":  {"default": 1, "handler": "_generate_point_correspondence_oe"},
         "point_correspondence_mcq": {"default": 1, "handler": "_generate_point_correspondence_mcq"},
     }
+    _OE_INSTRUCTION_MODES = ("sentence", "free")
+    _MCQ_INSTRUCTION_MODES = ("direct", "sentence", "free")
 
     def __init__(self, args):
         super().__init__(args)
@@ -58,45 +62,60 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
     # ─── Prompt Function ──────────────────────────────────────────────
 
+    @staticmethod
+    def _correspondence_option_markers(use_numeric_labels: bool):
+        """Option labels shared by MCQ options and OE answers (letter + point id)."""
+        if use_numeric_labels:
+            return [f"{letter}. point-{n}" for letter, n in zip("ABCD", "1234")]
+        return [f"{letter}. point-{letter}" for letter in "ABCD"]
+
     def point_correspondence_prompt_func(self, question_color, candidate_color, gt_answer, question_type=QuestionType.OPEN_ENDED):
         """Build a point correspondence QA string.
 
-        Args:
-            question_color:  color name of the query point on View 1 (e.g. "red").
-            candidate_color: color name of candidate points on View 2 (e.g. "blue").
-            gt_answer:       ground-truth label — "A"/"B"/"C"/"D" or "1"/"2"/"3"/"4".
-            question_type:   QuestionType.OPEN_ENDED uses render_prompt; QuestionType.MCQ uses render_qa
-                             with appended options string.
+        MCQ uses register_mcq templates with [O] (options in question, type MCQ).
+        OE uses register_oe templates without [O]; no question_instruction on OE.
 
         Returns:
-            Formatted "question Answer: answer" string.
+            (prompt, template_id)
         """
         is_num = gt_answer in ["1", "2", "3", "4"]
-        tpl_name = "correspondence.point2point_num" if is_num else "correspondence.point2point"
+        base = (
+            "multiview_correspondence.point2point_num"
+            if is_num
+            else "multiview_correspondence.point2point"
+        )
+        markers = self._correspondence_option_markers(is_num)
+        label_order = ["1", "2", "3", "4"] if is_num else ["A", "B", "C", "D"]
+        idx = label_order.index(gt_answer)
+        full_option = markers[idx]
+        option_letter = "ABCD"[idx]
+        point_label = f"point-{gt_answer}"
+        answer_slots = {
+            "L": point_label,
+            "E": option_letter,
+            "T": full_option,
+        }
 
         if question_type == QuestionType.MCQ:
-            # Build option markers and find the correct one
-            if is_num:
-                markers = ["A point-1", "B point-2", "C point-3", "D point-4"]
-                idx = ["1", "2", "3", "4"].index(gt_answer)
-            else:
-                markers = ["A point-A", "B point-B", "C point-C", "D point-D"]
-                idx = ["A", "B", "C", "D"].index(gt_answer)
-            question, answer = self.get_template(tpl_name).render_qa(
-                shared={"A": question_color, "B": candidate_color},
-                a_args={"T": markers[idx]},
+            mode = random.choice(self._MCQ_INSTRUCTION_MODES)
+            tpl_name = f"{base}.mcq.{mode}"
+            shared = {
+                "A": question_color,
+                "B": candidate_color,
+                "O": "\nOptions: " + " ".join(markers),
+            }
+            prompt = self.render_structured_prompt(
+                tpl_name, shared=shared, a_args=answer_slots,
             )
-            options = "\nOptions: " + " ".join(markers)
-            return question + " " + options + " Answer: " + answer
         else:
-            # Open-ended: 70% "point-X" format, 30% bare label (letter only)
-            if is_num:
-                target = "point-" + gt_answer
-            else:
-                target = ("point-" + gt_answer) if random.random() < 0.7 else gt_answer
-            return self.render_prompt(
-                tpl_name, shared={"A": question_color, "B": candidate_color, "T": target},
+            mode = random.choice(self._OE_INSTRUCTION_MODES)
+            tpl_name = f"{base}.oe.{mode}"
+            prompt = self.render_structured_prompt(
+                tpl_name,
+                shared={"A": question_color, "B": candidate_color},
+                a_args={"L": point_label},
             )
+        return prompt, tpl_name
 
     # ─── Point Correspondence Finder ──────────────────────────────────
 
@@ -205,7 +224,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
     # ─── Visual Marking ──────────────────────────────────────────────
 
-    def _draw_candidate_points(self, image1, image2, point1_uv, point2_uv, candidates_uv):
+    def _draw_candidate_points(self, image1, image2, point1_uv, point2_uv, candidates_uv, meta):
         """Draw query point on View 1 and labeled candidate points on View 2.
 
         View 1 gets a single unlabeled point (the query).
@@ -222,21 +241,45 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
              color_name1, color_name2, gt_answer)
             where gt_answer is the label assigned to the GT point after shuffling.
         """
-        # View 1: single query point (no label)
-        processed_image1, color_name1 = self.marker.mark_objects(image1, points=[point1_uv])
+        # Plan marks per view; merge so metadata retains query + candidate points (M2/M3).
+        self.marker.reset(shuffle=True)
+        spec1, color_name1 = self.marker.plan_mark(points=[point1_uv])
+        self.marker._last_mark_spec = spec1
 
-        # Shuffle GT among distractors so the model can't exploit position
         all_points = [point2_uv] + candidates_uv
         indices = list(range(len(all_points)))
         random.shuffle(indices)
         labels = ["1", "2", "3", "4"] if random.random() < 0.3 else ["A", "B", "C", "D"]
         shuffled = [all_points[i] for i in indices]
-        gt_answer = labels[indices.index(0)]  # label assigned to the GT point (index 0)
+        gt_answer = labels[indices.index(0)]
 
-        # View 2: labeled candidate points
-        processed_image2, color_name2 = self.marker.mark_objects(
-            image2, points=shuffled, labels=labels,
-        )
+        spec2, color_name2 = self.marker.plan_mark(points=shuffled, labels=labels)
+        row = getattr(self._thread_local, "preprocess_row", None)
+        refs = self._qa_image_refs(row, meta)
+        merged = assemble_per_view_mark_spec([
+            {
+                "view_index": 0,
+                "image_ref": refs[0] if refs else None,
+                "mark_kinds": spec1.get("mark_kinds", []),
+                "slots": spec1.get("slots", []),
+            },
+            {
+                "view_index": 1,
+                "image_ref": refs[1] if len(refs) > 1 else None,
+                "mark_kinds": spec2.get("mark_kinds", []),
+                "slots": spec2.get("slots", []),
+            },
+        ])
+        if merged:
+            self.marker._last_mark_spec = merged
+
+        if self.emit_marked_images:
+            from .core.mark_spec import render_mark
+            processed_image1 = render_mark(image1, merged, view_index=0)
+            processed_image2 = render_mark(image2, merged, view_index=1, labels=labels)
+        else:
+            processed_image1 = {"bytes": convert_pil_to_bytes(image1)}
+            processed_image2 = {"bytes": convert_pil_to_bytes(image2)}
 
         return processed_image1, processed_image2, color_name1, color_name2, gt_answer
 
@@ -260,11 +303,18 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
         self.marker.reset(shuffle=True)
         img1, img2, color1, color2, gt_answer = self._draw_candidate_points(
-            image1, image2, point1, point2, uv_candidates)
+            image1, image2, point1, point2, uv_candidates, meta,
+        )
 
-        prompt = self.point_correspondence_prompt_func(color1, color2, gt_answer, question_type)
+        prompt, tpl = self.point_correspondence_prompt_func(color1, color2, gt_answer, question_type)
         qtype = QuestionType.MCQ if question_type == QuestionType.MCQ else QuestionType.OPEN_ENDED
-
+        sub = "point_correspondence_mcq" if qtype == QuestionType.MCQ else "point_correspondence_oe"
+        self._record_turn(
+            sub, tpl, prompt, qtype,
+            mark_spec=self.marker.last_mark_spec,
+            image_placeholder_count=2,
+            view_indices=meta.get("view_idx"),
+        )
         return prompt, [img1, img2], qtype
 
     def _generate_point_correspondence_oe(self, graph):

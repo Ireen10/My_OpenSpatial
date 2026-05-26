@@ -19,6 +19,14 @@ pipeline:
           depth_ordering_mcq: 1
           depth_choice_oe: 1
           depth_choice_mcq: 1
+        emit_metadata: true
+        emit_marked_images: false
+        keep_data_columns:
+          - messages
+          - QA_images
+          - question_tags
+          - question_types
+          - metadata
         use_multi_processing: false
         num_workers: 8
         output_dir:

@@ -1,10 +1,7 @@
 """
 3D scene caption annotation task: generate spatial scene descriptions via LLM.
 
-Uses an external LLM API to produce 100-200 word spatial captions.
-Prompts are assembled from modular components (role, task, subject, technical,
-text, constraint, style) with per-module dropout for diversity.
-
+Dataset human prompts use role+task only; API prompts use all modules.
 Required config keys: api_key, base_url, model.
 """
 
@@ -15,19 +12,24 @@ from PIL import Image
 from openai import OpenAI
 
 from .core.base_annotation_task import BaseAnnotationTask
+from .core.message_placeholders import sync_messages_with_qa_images
+from .core.prompt_template import PromptRenderRecord
 from .core.question_type import QuestionType
 from ..prompt_templates.caption_prompt_templates import (
-    CAPTION_MODULES, CAPTION_DEFAULT_DROPOUT,
+    CAPTION_API_MODULES,
+    CAPTION_DATASET_KEYS,
+    CAPTION_DATASET_MODULES,
+    CAPTION_DEFAULT_DROPOUT,
 )
 from utils.image_utils import convert_pil_to_bytes
 
 REQUIRED_KEYS = ("api_key", "base_url", "model")
-QUESTION_KEYS = {"role", "task"}
 
 
 class CaptionGenerator(BaseAnnotationTask):
 
-    QUESTION_TAG = "3D Scene Caption"
+    QUESTION_TAG = "Singleview 3D Scene Caption"
+    DATASET_TEMPLATE_ID = "caption.open_ended"
 
     def __init__(self, args):
         super().__init__(args)
@@ -42,10 +44,7 @@ class CaptionGenerator(BaseAnnotationTask):
     def check_example(self, example) -> bool:
         return "image" in example
 
-    # ── helpers ──────────────────────────────────────────────────────
-
     def _call_api(self, prompt, image_path):
-        """Call LLM API with retry. Returns caption string or None."""
         with open(image_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("utf-8")
         for attempt in range(self.max_retries):
@@ -69,48 +68,88 @@ class CaptionGenerator(BaseAnnotationTask):
                     time.sleep(self.retry_delay)
         return None
 
-    # ── prompt function ──────────────────────────────────────────────
-
     @staticmethod
-    def sample_prompt(dropout=None):
-        """Assemble a (system_prompt, question_prompt) pair with random module dropout."""
-        if dropout is None:
-            dropout = CAPTION_DEFAULT_DROPOUT
-        system_parts, question_parts = [], []
-
-        for name, pool in CAPTION_MODULES.items():
+    def _sample_modules(modules, dropout, keys_filter=None):
+        parts = []
+        indices = {}
+        for name, pool in modules.items():
+            if keys_filter is not None and name not in keys_filter:
+                continue
             if random.random() < dropout.get(name, 0.0):
                 continue
-            choice = random.choice(pool)
-            system_parts.append(choice)
-            if name in QUESTION_KEYS:
-                question_parts.append(choice)
+            idx = random.randrange(len(pool))
+            parts.append(pool[idx])
+            indices[name] = idx
+        return parts, indices
 
-        if not system_parts:
-            system_parts = [random.choice(CAPTION_MODULES["role"]),
-                            random.choice(CAPTION_MODULES["task"])]
-            question_parts = list(system_parts)
+    @classmethod
+    def sample_dataset_prompt(cls, dropout=None):
+        if dropout is None:
+            dropout = CAPTION_DEFAULT_DROPOUT
+        parts, indices = cls._sample_modules(
+            CAPTION_DATASET_MODULES, dropout, keys_filter=CAPTION_DATASET_KEYS,
+        )
+        if not parts:
+            role_i = random.randrange(len(CAPTION_DATASET_MODULES["role"]))
+            task_i = random.randrange(len(CAPTION_DATASET_MODULES["task"]))
+            parts = [
+                CAPTION_DATASET_MODULES["role"][role_i],
+                CAPTION_DATASET_MODULES["task"][task_i],
+            ]
+            indices = {"role": role_i, "task": task_i}
+        return " ".join(parts), indices
 
-        return " ".join(system_parts), " ".join(question_parts)
+    @classmethod
+    def sample_api_prompt(cls, dropout=None):
+        if dropout is None:
+            dropout = CAPTION_DEFAULT_DROPOUT
+        parts, _ = cls._sample_modules(CAPTION_API_MODULES, dropout)
+        if not parts:
+            parts = [
+                random.choice(CAPTION_API_MODULES["role"]),
+                random.choice(CAPTION_API_MODULES["task"]),
+            ]
+        return " ".join(parts)
 
-    # ── apply_transform override ─────────────────────────────────────
+    def _dataset_render_record(self, question_text: str, indices: dict) -> PromptRenderRecord:
+        return PromptRenderRecord(
+            template_id=self.DATASET_TEMPLATE_ID,
+            question_index=indices.get("task", -1),
+            answer_index=-1,
+            question_line="",
+            answer_line="",
+            question_text=question_text.strip(),
+            answer_text="",
+            question_bindings={},
+            answer_bindings={},
+            question_type=QuestionType.OPEN_ENDED.value,
+            instruction_type="generative",
+            introduction_index=indices.get("role", -1),
+            question_instruction_index=-1,
+        )
 
     def apply_transform(self, example):
-        """Skip scene graph / marker — directly call LLM API for caption."""
         if not self.check_example(example):
             return None, False
 
         image_path = example["image"]
-        system_prompt, question_prompt = self.sample_prompt()
-        caption = self._call_api(system_prompt, image_path)
+        question_prompt, indices = self.sample_dataset_prompt()
+        api_prompt = self.sample_api_prompt()
+        caption = self._call_api(api_prompt, image_path)
         if caption is None:
             return None, False
 
-        example["messages"] = [[
+        self._thread_local.last_prompt_render = self._dataset_render_record(
+            question_prompt, indices,
+        )
+
+        qa_images = [{"bytes": convert_pil_to_bytes(Image.open(image_path))}]
+        messages = [[
             {"from": "human", "value": question_prompt},
             {"from": "gpt", "value": caption},
         ]]
-        example["QA_images"] = [{"bytes": convert_pil_to_bytes(Image.open(image_path))}]
+        example["messages"] = sync_messages_with_qa_images(messages, qa_images)
+        example["QA_images"] = qa_images
         example["question_tags"] = [[self.QUESTION_TAG]]
         example["question_types"] = [QuestionType.OPEN_ENDED]
         return example, True

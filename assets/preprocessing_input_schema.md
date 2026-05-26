@@ -291,7 +291,7 @@ EmbodiedScan 的 **merge**（仅数据准备阶段）会得到与 `group` 输出
 |------|----------|
 | Per-image 预处理 | `config/preprocessing/demo_preprocessing_hypersim.yaml` |
 | Per-scene 预处理 | `config/preprocessing/demo_preprocessing_scannetpp.yaml` |
-| Per-image 预处理（无 group） | `config/preprocessing/demo_preprocessing_embodiedscan.yaml` |
+| Per-image + group（EmbodiedScan / ARKit 等） | `config/preprocessing/demo_preprocessing_embodiedscan.yaml` |
 | 单视图标注输入 | `scene_fusion_stage/.../data.parquet` |
 | 多视图标注输入 | `group_stage/group/data.parquet`（per-image 管线 + group 之后） |
 

@@ -32,7 +32,7 @@ pip install -q -U flash-attn --no-build-isolation
 
 ```bash
 python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
-python -m pytest tests/ -x -q
+python -m pytest tests/ verification/dataset_pipeline/test_mark_spec_image_binding.py -x -q
 ```
 
 ---
@@ -271,7 +271,6 @@ Each stage is a list of tasks (the `-` items). A stage can contain multiple task
 | `config/annotation/demo_depth.yaml` | Depth | Depth ordering & comparison QA |
 | `config/annotation/demo_size.yaml` | Size | Absolute & relative size QA |
 | `config/annotation/demo_position.yaml` | Position | Height comparison & proximity QA |
-| `config/annotation/demo_counting.yaml` | Counting | Object counting QA |
 | `config/annotation/demo_3d_grounding.yaml` | 3D Grounding | 3D bounding box grounding QA |
 
 **Annotation (multiview):**
@@ -326,7 +325,7 @@ python run.py --config config/preprocessing/demo_preprocessing_scannetpp.yaml --
 
 ```bash
 # Singleview annotations
-for cfg in demo_distance demo_depth demo_size demo_position demo_counting demo_3d_grounding; do
+for cfg in demo_distance demo_depth demo_size demo_position demo_3d_grounding; do
     python run.py --config config/annotation/${cfg}.yaml --output_dir output/demo
 done
 

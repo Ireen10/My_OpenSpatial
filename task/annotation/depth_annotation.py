@@ -3,15 +3,14 @@ Depth estimation annotation task: depth ordering & depth choice.
 
 Sub-tasks:
     depth_ordering_oe  — sort 3-5 marked objects/points by depth (near→far), open-ended.
-    depth_ordering_mcq — same ordering task but as 4-option MCQ (permutation choices).
+    depth_ordering_mcq — same ordering task but as 4-option MCQ (exactly 4 points/objects).
     depth_choice_oe    — pick the closest / farthest / N-th closest object, open-ended.
     depth_choice_mcq   — same choice task but as 4-option MCQ.
 
 Visual annotation modes:
     random_sample (~10%) — sample 4-7 random pixels with distinct depths; returns
                            normalized [x, y] coordinate tags. No drawing on image.
-    object-based  (~90%) — select 3-5 nodes, draw point/mask/box via VisualMarker
-                           (same pattern as size / distance / position tasks),
+    object-based  (~90%) — select 3-5 nodes, draw point/mask/box via mark_spec,
                            then compute per-object depth from the depth_map.
 
 Depth estimation:
@@ -32,8 +31,10 @@ Templates used:
 import random
 import numpy as np
 from .core.base_annotation_task import BaseAnnotationTask
-from .core.visual_marker import MarkConfig
+from .core.mark_spec import plan_point_marks
+from .core.visual_marker import MarkConfig, VisualMarker
 from .core.question_type import QuestionType
+from .core.mark_spec import render_mark
 
 from utils.image_utils import convert_pil_to_bytes
 
@@ -43,10 +44,12 @@ ORDINALS = [
     "eleventh", "twelfth",
 ]
 
+TASK_NAME = "depth_annotation"
+
 
 class AnnotationGenerator(BaseAnnotationTask):
 
-    QUESTION_TAG = "Depth Estimation"
+    QUESTION_TAG = "Singleview Depth Estimation"
     SUB_TASKS = {
         "depth_ordering_oe":  {"default": 1, "handler": "_generate_depth_ordering_oe"},
         "depth_ordering_mcq": {"default": 1, "handler": "_generate_depth_ordering_mcq"},
@@ -55,6 +58,12 @@ class AnnotationGenerator(BaseAnnotationTask):
     }
 
     # ── config ────────────────────────────────────────────────────────
+
+    def __init__(self, args):
+        super().__init__(args)
+        self.task_name = TASK_NAME
+        self.emit_metadata = bool(args.get("emit_metadata", True))
+        self.emit_marked_images = bool(args.get("emit_marked_images", False))
 
     def get_mark_config(self):
         """50% point, 25% mask, 25% box — point is favoured because depth
@@ -93,23 +102,22 @@ class AnnotationGenerator(BaseAnnotationTask):
         k = max(1, int(len(depths) * 0.1))
         if k >= len(depths):
             return float(np.mean(depths))
-        # O(n) partial sort instead of O(n log n) full sort
         return float(np.mean(np.partition(depths, k)[:k]))
-
 
     # ── data preparation ─────────────────────────────────────────────
 
-    def _sample_random_points(self, image, depth_map):
+    def _sample_random_points(self, image, depth_map, *, num_points=None):
         """Generate coordinate-based tags by sampling random pixels.
 
-        Picks 4-7 pixels whose depths differ by > 0.05 from all previously
-        selected pixels. Coordinates are normalized to a [0, 1000] grid.
-        The original image is returned unchanged (no drawing).
+        Picks 4-7 pixels (or exactly ``num_points`` when set) whose depths differ
+        by > 0.05 from all previously selected pixels. Coordinates are normalized
+        to a [0, 1000] grid. The original image is returned unchanged (no drawing).
 
-        Returns (tags, depth_sorted_tags, image_bytes) or None on failure.
+        Returns (tags, depth_sorted_tags, image_bytes, mark_spec) or None on failure.
         """
         h, w = depth_map.shape
-        num_points = random.randint(4, 7)
+        if num_points is None:
+            num_points = random.randint(4, 7)
         points, selected_depths = [], []
         for _ in range(num_points):
             for _ in range(100):
@@ -123,29 +131,40 @@ class AnnotationGenerator(BaseAnnotationTask):
             return None
         sorted_pts = [points[i] for i in np.argsort(selected_depths)]
         norm = lambda p: str([int(p[0] / w * 1000), int(p[1] / h * 1000)])
+        self.marker.reset(shuffle=True)
+        mark_spec, _ = plan_point_marks(self.marker, points)
         return (
             [norm(p) for p in points],
             [norm(p) for p in sorted_pts],
             {"bytes": convert_pil_to_bytes(image)},
+            mark_spec,
         )
 
-    def _mark_and_sort(self, image, depth_map, nodes):
-        """Draw visual marks on 3-5 objects and sort them by depth.
+    def _mark_and_sort(self, image, depth_map, nodes, *, num_objects=None):
+        """Plan mark_spec, optionally render, sort objects by depth.
 
-        Delegates drawing to self.marker (VisualMarker), then computes
-        per-object depth from the depth_map. Objects whose mask yields
-        no valid depth are silently dropped.
-
-        Returns (tags_with_color, depth_sorted_tags, image_bytes) or None.
+        Returns (legacy_tags, semantic_tags, depth_sorted_semantic, image_bytes, mark_spec)
+        or None.
         """
-        num = random.randint(3, min(5, len(nodes)))
+        if num_objects is None:
+            num = random.randint(3, min(5, len(nodes)))
+        else:
+            num = min(num_objects, len(nodes))
         sampled = random.sample(nodes, num)
 
         self.marker.reset(shuffle=True)
-        processed_image, marked = self.marker.mark_objects(image, sampled)
+        mark_type = self.marker.choose_mark_type()
+        spec, marked_info = self.marker.plan_mark(sampled, mark_type=mark_type)
+        self.marker._last_mark_spec = spec
+        preprocess_row = getattr(self._thread_local, "preprocess_row", None)
+        if self.emit_marked_images:
+            processed_image = render_mark(image, spec, preprocess_row=preprocess_row)
+        else:
+            processed_image = {"bytes": convert_pil_to_bytes(image)}
 
-        tags, depths = [], []
-        for desc, node in marked:
+        tags_legacy, tags_sem, depths = [], [], []
+        kept_slots = []
+        for (desc, node), slot in zip(marked_info, spec["slots"]):
             app = node.view_appearances.get(0)
             if app is None:
                 continue
@@ -153,48 +172,53 @@ class AnnotationGenerator(BaseAnnotationTask):
             depth = self._compute_depth(mask, depth_map)
             if depth is None:
                 continue
-            tags.append(desc)
+            tags_legacy.append(desc)
+            tags_sem.append(slot["tag"])
             depths.append(depth)
+            kept_slots.append(slot)
 
-        if len(tags) < 2:
+        if len(tags_legacy) < 2:
             return None
 
-        sorted_tags = [tags[i] for i in np.argsort(depths)]
-        return (tags, sorted_tags, processed_image)
+        spec = {**spec, "slots": kept_slots}
+        order = np.argsort(depths)
+        sorted_legacy = [tags_legacy[i] for i in order]
+        sorted_sem = [tags_sem[i] for i in order]
+        return tags_legacy, tags_sem, sorted_sem, processed_image, spec
 
     def _prepare_marked_data(self, image, depth_map, nodes, qtype):
         """Top-level entry: choose annotation mode, produce depth-sorted tags.
 
         ~10% chance of random pixel sampling; otherwise object-based marking.
-        If random sampling fails (too few distinct-depth pixels), falls
-        through to object-based marking automatically.
         MCQ format requires >= 4 tags; returns None if insufficient.
 
-        Returns (tags, depth_sorted_tags, image_bytes, t_label) or None.
-        t_label is "points:" for random samples, "objects:" for node-based.
+        Returns (legacy_tags, semantic_tags, sorted_sem, image_bytes, t_label, mark_spec)
+        or None.
         """
-        if random.random() < 0.1:
-            result = self._sample_random_points(image, depth_map)
-            if result is not None:
-                tags, sorted_tags, image_bytes = result
-                if qtype == QuestionType.MCQ and len(tags) < 4:
-                    return None
-                return tags, sorted_tags, image_bytes, "points:"
+        mcq_n = 4 if qtype == QuestionType.MCQ else None
 
-        result = self._mark_and_sort(image, depth_map, nodes)
+        if random.random() < 0.1:
+            result = self._sample_random_points(
+                image, depth_map, num_points=mcq_n or random.randint(4, 7),
+            )
+            if result is not None:
+                tags, sorted_tags, image_bytes, mark_spec = result
+                if qtype == QuestionType.MCQ and len(tags) != 4:
+                    return None
+                return tags, tags, sorted_tags, image_bytes, "points:", mark_spec
+
+        result = self._mark_and_sort(
+            image, depth_map, nodes, num_objects=mcq_n,
+        )
         if result is None:
             return None
-        tags, sorted_tags, image_bytes = result
-        if qtype == QuestionType.MCQ and len(tags) < 4:
+        tags_legacy, tags_sem, sorted_sem, image_bytes, mark_spec = result
+        if qtype == QuestionType.MCQ and len(tags_legacy) != 4:
             return None
-        return tags, sorted_tags, image_bytes, "objects:"
+        return tags_legacy, tags_sem, sorted_sem, image_bytes, "objects:", mark_spec
 
     def _prepare(self, graph):
-        """Extract depth_map, image, and mask-bearing nodes from the graph.
-
-        Returns (depth_map, image, filtered_nodes) or None when no nodes
-        have masks in the primary view.
-        """
+        """Extract depth_map, image, and mask-bearing nodes from the graph."""
         view = graph.primary_view
         depth_map = view.depth_map
         image = view.image
@@ -210,87 +234,100 @@ class AnnotationGenerator(BaseAnnotationTask):
 
     # ── prompt generation ────────────────────────────────────────────
 
-    def _build_ordering_prompt(self, depth_map, image, nodes, qtype):
-        """Build a depth-ordering QA pair.
-
-        OE format:  question lists objects → answer is the near-to-far ordering.
-        MCQ format: question lists objects + 4 permutation options (A-D) →
-                    answer is the correct option letter.
-
-        Returns (prompt_str, image_bytes) or (None, None).
-        """
+    def _build_ordering_prompt(self, depth_map, image, nodes, qtype, sub_task):
+        """Build a depth-ordering QA pair."""
         marked = self._prepare_marked_data(image, depth_map, nodes, qtype)
         if marked is None:
             return None, None
-        tags, sorted_tags, image_bytes, t_label = marked
+        tags, tags_sem, sorted_sem, image_bytes, t_label, mark_spec = marked
+        qtype_str = "OE" if qtype == QuestionType.OPEN_ENDED else "MCQ"
+        is_points = t_label.startswith("points")
 
         if qtype == QuestionType.OPEN_ENDED:
-            prompt = self.render_prompt(
-                "depth.ordering",
-                shared={"T": t_label, "A": ', '.join(tags), "X": ', '.join(sorted_tags)},
+            tpl = "depth.ordering"
+            prompt = self.render_structured_prompt(
+                tpl,
+                shared={
+                    "T": t_label,
+                    "A": ', '.join(tags),
+                    "X": ', '.join(sorted_sem),
+                },
+            )
+            self._record_turn(
+                sub_task, tpl, prompt, qtype,
+                mark_spec=mark_spec,
+                coord_tags=tags_sem if is_points else None,
+                referent_mode="legacy",
+                sorted_semantic=sorted_sem,
             )
         else:
-            # generate 3 distinct wrong orderings by random shuffling
+            tpl = "depth.ordering_mcq"
             wrong_perms = []
             for _ in range(50):
-                perm = sorted_tags[:]
+                perm = list(sorted_sem)
                 random.shuffle(perm)
-                if perm != sorted_tags and perm not in wrong_perms:
+                if perm != sorted_sem and perm not in wrong_perms:
                     wrong_perms.append(perm)
                     if len(wrong_perms) == 3:
                         break
             if len(wrong_perms) < 3:
                 return None, None
 
-            candidates = [sorted_tags] + wrong_perms
+            candidates = [sorted_sem] + wrong_perms
             shuffled, answer_option = self._shuffle_mcq(candidates)
             options = [f"{'ABCD'[i]}:{str(list(shuffled[i]))}" for i in range(4)]
 
-            prompt = self.render_prompt(
-                "depth.ordering_mcq",
+            prompt = self.render_structured_prompt(
+                tpl,
                 shared={"T": t_label, "Y": '\n'.join(options)},
                 q_args={"X": ', '.join(tags)},
                 a_args={"X": answer_option},
             )
+            self._record_turn(
+                sub_task, tpl, prompt, qtype,
+                mark_spec=mark_spec,
+                coord_tags=tags_sem if is_points else None,
+                referent_mode="legacy",
+            )
         return prompt, image_bytes
 
-    def _build_choice_prompt(self, depth_map, image, nodes, qtype):
-        """Build a depth-choice QA pair.
-
-        Randomly selects one of three question types:
-            farthest (40%) — which object is farthest from the camera?
-            closest  (40%) — which object is closest to the camera?
-            choice   (20%) — which object is the N-th closest?
-
-        Returns (prompt_str, image_bytes) or (None, None).
-        """
-        r = random.random()
-        question_type = "farthest" if r < 0.4 else ("closest" if r < 0.8 else "choice")
-        tpl_name = f"depth.{question_type}" + ("_mcq" if qtype == QuestionType.MCQ else "")
-
+    def _build_choice_prompt(self, depth_map, image, nodes, qtype, sub_task):
+        """Build a depth-choice QA pair."""
         marked = self._prepare_marked_data(image, depth_map, nodes, qtype)
         if marked is None:
             return None, None
-        tags, sorted_tags, image_bytes, t_label = marked
+        tags, tags_sem, sorted_sem, image_bytes, t_label, mark_spec = marked
+        qtype_str = "OE" if qtype == QuestionType.OPEN_ENDED else "MCQ"
+        is_points = t_label.startswith("points")
+
+        r = random.random()
+        question_type = "farthest" if r < 0.4 else ("closest" if r < 0.8 else "choice")
+        tpl_name = f"depth.{question_type}" + ("_mcq" if qtype == QuestionType.MCQ else "")
         obj_str = ', '.join(tags)
 
-        # correct answer position in the depth-sorted list
         if question_type == "farthest":
-            correct_idx = len(sorted_tags) - 1
+            correct_idx = len(sorted_sem) - 1
         elif question_type == "closest":
             correct_idx = 0
         else:
-            correct_idx = random.randint(0, len(sorted_tags) - 1)
+            correct_idx = random.randint(0, len(sorted_sem) - 1)
 
         if qtype == QuestionType.OPEN_ENDED:
-            shared = {"T": t_label, "A": obj_str, "X": str(sorted_tags[correct_idx])}
+            shared = {"T": t_label, "A": obj_str, "X": str(sorted_sem[correct_idx])}
             if question_type == "choice":
                 shared["B"] = ORDINALS[correct_idx]
-            prompt = self.render_prompt(tpl_name, shared=shared)
+            prompt = self.render_structured_prompt(tpl_name, shared=shared)
+            self._record_turn(
+                sub_task, tpl_name, prompt, qtype,
+                mark_spec=mark_spec,
+                type_label=t_label,
+                sorted_semantic=[sorted_sem[correct_idx]],
+                coord_tags=tags_sem if is_points else None,
+                referent_mode="legacy",
+            )
         else:
-            # build A-D options: correct answer + 3 random wrong answers
-            wrong_idx = [i for i in range(len(sorted_tags)) if i != correct_idx]
-            candidates = [sorted_tags[correct_idx]] + [sorted_tags[i] for i in random.sample(wrong_idx, 3)]
+            wrong_idx = [i for i in range(len(sorted_sem)) if i != correct_idx]
+            candidates = [sorted_sem[correct_idx]] + [sorted_sem[i] for i in random.sample(wrong_idx, 3)]
             shuffled, answer_option = self._shuffle_mcq(candidates)
             options = [f"{'ABCD'[i]}:{str(shuffled[i])}" for i in range(4)]
 
@@ -301,37 +338,43 @@ class AnnotationGenerator(BaseAnnotationTask):
             else:
                 shared["Y"] = '\n'.join(options)
 
-            prompt = self.render_prompt(
+            prompt = self.render_structured_prompt(
                 tpl_name, shared=shared,
                 q_args={"X": obj_str}, a_args={"X": answer_option},
+            )
+            self._record_turn(
+                sub_task, tpl_name, prompt, qtype,
+                mark_spec=mark_spec,
+                type_label=t_label,
+                answer_extra={"answer": answer_option},
+                coord_tags=tags_sem if is_points else None,
+                referent_mode="legacy",
             )
         return prompt, image_bytes
 
     # ── handlers (dispatched by SUB_TASKS) ───────────────────────────
 
-    def _dispatch(self, graph, task_kind, qtype):
-        """Shared handler logic: prepare graph → build prompt → return result.
-
-        Returns (prompt, image_bytes, QuestionType) or None.
-        """
+    def _dispatch(self, graph, task_kind, qtype, sub_task):
+        """Shared handler logic: prepare graph → build prompt → return result."""
         prepared = self._prepare(graph)
         if prepared is None:
             return None
         depth_map, image, nodes = prepared
         builder = self._build_ordering_prompt if task_kind == "ordering" else self._build_choice_prompt
-        prompt, image_bytes = builder(depth_map, image, nodes, qtype)
+        prompt, image_bytes = builder(depth_map, image, nodes, qtype, sub_task)
         if prompt is None:
             return None
         return prompt, image_bytes, qtype
 
     def _generate_depth_ordering_oe(self, graph):
-        return self._dispatch(graph, "ordering", QuestionType.OPEN_ENDED)
+        return self._dispatch(graph, "ordering", QuestionType.OPEN_ENDED, "depth_ordering_oe")
 
     def _generate_depth_ordering_mcq(self, graph):
-        return self._dispatch(graph, "ordering", QuestionType.MCQ)
+        return self._dispatch(graph, "ordering", QuestionType.MCQ, "depth_ordering_mcq")
 
     def _generate_depth_choice_oe(self, graph):
-        return self._dispatch(graph, "choice", QuestionType.OPEN_ENDED)
+        return self._dispatch(graph, "choice", QuestionType.OPEN_ENDED, "depth_choice_oe")
 
     def _generate_depth_choice_mcq(self, graph):
-        return self._dispatch(graph, "choice", QuestionType.MCQ)
+        return self._dispatch(graph, "choice", QuestionType.MCQ, "depth_choice_mcq")
+

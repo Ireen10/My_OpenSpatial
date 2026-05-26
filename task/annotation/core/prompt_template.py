@@ -1,7 +1,33 @@
 import random
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
+
+PLACEHOLDER_RE = re.compile(r"\[([A-Z])\]")
+
+
+@dataclass(frozen=True)
+class PromptRenderRecord:
+    """Provenance captured at template sample + fill time (single source of truth)."""
+
+    template_id: str
+    question_index: int
+    answer_index: int
+    question_line: str
+    answer_line: str
+    question_text: str
+    answer_text: str
+    question_bindings: Dict[str, str]
+    answer_bindings: Dict[str, str]
+    # M8 structured render (empty when using legacy flat PromptTemplate only)
+    question_type: str = ""
+    instruction_type: str = ""
+    introduction_index: int = -1
+    question_instruction_index: int = -1
+
+    def to_prompt(self) -> str:
+        return f"{self.question_text} Answer: {self.answer_text}"
 
 
 @dataclass
@@ -12,30 +38,37 @@ class PromptTemplate:
     true_answers: Optional[List[str]] = None
     false_answers: Optional[List[str]] = None
 
-    def sample(self, condition: bool = None) -> Tuple[str, str]:
-        """Randomly sample a (question_template, answer_template) pair.
-
-        When ``condition`` is not None, the template **must** have both
-        ``true_answers`` and ``false_answers`` populated (non-empty).
-        If either list is empty or None the call raises ``ValueError``
-        rather than silently falling back to ``self.answers``.
-        """
-        q = random.choice(self.questions)
+    def sample_pair(self, condition: bool = None) -> Tuple[int, int, str, str]:
+        """Return (question_index, answer_index, question_line, answer_line)."""
+        qi = random.randrange(len(self.questions))
+        q = self.questions[qi]
         if condition is not None:
             if self.true_answers and self.false_answers:
-                a = random.choice(self.true_answers if condition else self.false_answers)
+                pool = self.true_answers if condition else self.false_answers
+                ai = random.randrange(len(pool))
+                a = pool[ai]
+                answer_index = ai
             else:
                 raise ValueError(
                     "sample(condition=...) requires both true_answers and "
-                    "false_answers to be non-empty. Got "
-                    f"true_answers={self.true_answers!r}, "
-                    f"false_answers={self.false_answers!r}"
+                    "false_answers to be non-empty."
                 )
         elif self.answers:
-            a = random.choice(self.answers)
+            ai = random.randrange(len(self.answers))
+            a = self.answers[ai]
+            answer_index = ai
         else:
+            answer_index = 0
             a = ""
+        return qi, answer_index, q, a
+
+    def sample(self, condition: bool = None) -> Tuple[str, str]:
+        _, _, q, a = self.sample_pair(condition)
         return q, a
+
+    @staticmethod
+    def placeholders_in_line(line: str) -> List[str]:
+        return PLACEHOLDER_RE.findall(line)
 
     @staticmethod
     def _fill(text: str, mapping: dict) -> str:
@@ -43,50 +76,71 @@ class PromptTemplate:
             text = text.replace(f"[{key}]", str(val))
         return text
 
+    @staticmethod
+    def _bindings_applied_to_line(
+        line: str,
+        shared: Optional[dict],
+        line_args: Optional[dict],
+    ) -> Dict[str, str]:
+        """Record placeholder values that apply to this line (shared then line-specific)."""
+        keys = set(PLACEHOLDER_RE.findall(line))
+        out: Dict[str, str] = {}
+        for src in (shared, line_args):
+            if not src:
+                continue
+            for key, val in src.items():
+                if key in keys and val is not None:
+                    out[key] = str(val)
+        return out
+
+    def render_provenance(
+        self,
+        template_id: str,
+        condition: bool = None,
+        *,
+        shared: dict = None,
+        q_args: dict = None,
+        a_args: dict = None,
+    ) -> PromptRenderRecord:
+        """Sample template lines, fill placeholders, return structured provenance."""
+        qi, ai, q_line, a_line = self.sample_pair(condition)
+        q_text = q_line
+        a_text = a_line
+        if shared:
+            q_text = self._fill(q_text, shared)
+            a_text = self._fill(a_text, shared)
+        if q_args:
+            q_text = self._fill(q_text, q_args)
+        if a_args:
+            a_text = self._fill(a_text, a_args)
+        return PromptRenderRecord(
+            template_id=template_id,
+            question_index=qi,
+            answer_index=ai,
+            question_line=q_line,
+            answer_line=a_line,
+            question_text=q_text.strip(),
+            answer_text=a_text.strip(),
+            question_bindings=self._bindings_applied_to_line(q_line, shared, q_args),
+            answer_bindings=self._bindings_applied_to_line(a_line, shared, a_args),
+        )
+
     def render(self, condition: bool = None, *,
                shared: dict = None, q_args: dict = None, a_args: dict = None) -> str:
-        """Sample + fill placeholders + join as 'question Answer: answer'.
-
-        Args:
-            shared:  Placeholders applied to both Q and A (same value both sides).
-                     Typical keys: A/B/C (object names), T (type label), D (disclaimer).
-            q_args:  Question-only placeholders (applied after shared).
-            a_args:  Answer-only placeholders (applied after shared).
-                     Use q_args/a_args when a key (e.g. X) has different meaning
-                     in question vs answer.
-        """
-        q, a = self.sample(condition)
-        if shared:
-            q = self._fill(q, shared)
-            a = self._fill(a, shared)
-        if q_args:
-            q = self._fill(q, q_args)
-        if a_args:
-            a = self._fill(a, a_args)
-        return q + " Answer: " + a
+        return self.render_provenance(
+            "", condition, shared=shared, q_args=q_args, a_args=a_args,
+        ).to_prompt()
 
     def render_qa(self, condition: bool = None, *,
                   shared: dict = None, q_args: dict = None, a_args: dict = None) -> Tuple[str, str]:
-        """Sample + fill placeholders, return (question, answer) separately."""
-        q, a = self.sample(condition)
-        if shared:
-            q = self._fill(q, shared)
-            a = self._fill(a, shared)
-        if q_args:
-            q = self._fill(q, q_args)
-        if a_args:
-            a = self._fill(a, a_args)
-        return q, a
+        rec = self.render_provenance(
+            "", condition, shared=shared, q_args=q_args, a_args=a_args,
+        )
+        return rec.question_text, rec.answer_text
 
 
 class TemplateRegistry:
-    """Global template registry keyed by 'task.variant' names.
-
-    Thread-safe: a lock protects ``register()`` so concurrent imports
-    from different threads cannot corrupt ``_store``.  Read-only methods
-    (``get`` / ``keys``) do not need the lock because Python's GIL
-    guarantees dict reads are atomic once the write is complete.
-    """
+    """Global template registry keyed by 'task.variant' names."""
     _store: Dict[str, PromptTemplate] = {}
     _lock: threading.Lock = threading.Lock()
 

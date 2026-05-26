@@ -8,7 +8,7 @@ import pandas as pd
 from datasets import Dataset, load_dataset
 from PIL import Image as PILImage
 
-from utils.data_utils import flatten_annotations
+from utils.data_utils import flatten_annotations, strip_empty_structs
 
 HF_REPO_PATTERN = re.compile(r'^[\w-]+/[\w-]+$')
 
@@ -168,10 +168,34 @@ class ImageBaseDataset:
                 "messages", "QA_images", "question_tags", "question_types"]
             data = flatten_annotations(data, keep_keys=keep_data_columns)
             if len(data) > batch_size:
+                data = self._parquet_safe_frame(data)
                 self._save_batches(data_path, data, batch_size)
                 return
+            data = self._parquet_safe_frame(data)
+            data.to_parquet(data_path, engine="pyarrow")
+            return
 
+        data = self._parquet_safe_frame(data)
         data.to_parquet(data_path, engine="pyarrow")
+
+    @staticmethod
+    def _parquet_safe_frame(data: pd.DataFrame) -> pd.DataFrame:
+        """Coerce nested metadata / list cells for PyArrow (empty structs, numpy scalars)."""
+        if "metadata" not in data.columns:
+            return data
+        out = data.copy()
+
+        def _clean_meta(m):
+            if m is None or (isinstance(m, float) and pd.isna(m)):
+                return m
+            if isinstance(m, list) and m and isinstance(m[0], dict):
+                return [strip_empty_structs(x) for x in m]
+            if isinstance(m, dict):
+                return strip_empty_structs(m)
+            return m
+
+        out["metadata"] = out["metadata"].apply(_clean_meta)
+        return out
 
     @staticmethod
     def _save_batches(data_path, data, batch_size):

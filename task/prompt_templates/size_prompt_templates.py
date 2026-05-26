@@ -1,17 +1,19 @@
+# size.* / size.{big,small}.single_view — singleview (no multiview introduction)
+# multiview_size.* — multiview pair judgment + N-ary superlative (all with introduction)
 
 #### Size Predicate Templates for single-view images ####
 
 size_predicate_questions_single_view = [
-    "What is the length of the dimension that is largest in size (length, width, or height) of the [A]? [D]",
-    "What is the measurement for the longest side (length, width, or height) of the [A]? [D]",
-    "Can you provide the size of the [A]'s largest dimension (length, width, or height)? [D]",
-    "What is the length of the dimension that is maximum (length, width, or height) of the [A]? [D]",
-    "What is the length of the dimension that is the greatest (length, width, or height) of the [A]? [D]",
-    "What is the measurement of the [A]'s longest dimension (length, width, or height)? [D]",
-    "Can you tell me the size of the [A]'s maximum dimension (length, width, or height)? [D]",
-    "What is the length of the dimension that is the most extensive (length, width, or height) of the [A]? [D]",
-    "What is the measurement of the [A]'s greatest dimension (length, width, or height)? [D]",
-    "Can you provide the size of the [A]'s most significant dimension (length, width, or height)? [D]",
+    "What is the length of the dimension that is largest in size (length, width, or height) of the [A]?",
+    "What is the measurement for the longest side (length, width, or height) of the [A]?",
+    "Can you provide the size of the [A]'s largest dimension (length, width, or height)?",
+    "What is the length of the dimension that is maximum (length, width, or height) of the [A]?",
+    "What is the length of the dimension that is the greatest (length, width, or height) of the [A]?",
+    "What is the measurement of the [A]'s longest dimension (length, width, or height)?",
+    "Can you tell me the size of the [A]'s maximum dimension (length, width, or height)?",
+    "What is the length of the dimension that is the most extensive (length, width, or height) of the [A]?",
+    "What is the measurement of the [A]'s greatest dimension (length, width, or height)?",
+    "Can you provide the size of the [A]'s most significant dimension (length, width, or height)?",
 ]
 
 size_answers_single_view = [
@@ -21,15 +23,15 @@ size_answers_single_view = [
 ]
 
 height_predicate_questions_single_view = [
-    "Could you estimate the height of the [A]? [D]",
-    "What is the vertical measurement of the [A]? [D]",
-    "Can you provide the height dimension of the [A]? [D]",
-    "How tall does the [A] stand? [D]",
-    "What is the height of the [A]? [D]",
-    "Could you tell me the vertical size of the [A]? [D]",
-    "What is the measurement of the [A]'s height? [D]",
-    "Can you estimate how high the [A] is? [D]",
-    "What is the vertical dimension of the [A]? [D]",
+    "Could you estimate the height of the [A]?",
+    "What is the vertical measurement of the [A]?",
+    "Can you provide the height dimension of the [A]?",
+    "How tall does the [A] stand?",
+    "What is the height of the [A]?",
+    "Could you tell me the vertical size of the [A]?",
+    "What is the measurement of the [A]'s height?",
+    "Can you estimate how high the [A] is?",
+    "What is the vertical dimension of the [A]?",
 ]
 
 height_answers_single_view = [
@@ -108,12 +110,20 @@ small_false_responses_single_view = [
 ]
 
 
-#### Size Predicate Templates for multi-view images ####
+#### Multiview size (pair judgment + N-ary superlative) ####
+
+multiview_size_introduction = [
+    "The images show the same scene captured from different viewpoints.",
+    "You are viewing multiple perspectives of one shared scene.",
+    "These multi-view images depict the same environment from different camera poses.",
+    "The provided views are different angles of the same space.",
+    "All images represent the same scene under different viewpoints.",
+]
 
 big_predicate_questions_multi_view = [
-    "Given two different views, Is the [A] bigger than the [B]?",
-    "As shown in different views, does the [A] have a larger size compared to the [B]?",
-    "After reviewing the images, can you confirm if the [A] is bigger than the [B]?",
+    "Is the [A] bigger than the [B]?",
+    "Does the [A] have a larger size compared to the [B]?",
+    "Can you confirm if the [A] is bigger than the [B]?",
 ]
 
 big_true_responses_multi_view = [
@@ -133,9 +143,9 @@ big_false_responses_multi_view = [
 ]
 
 small_predicate_questions_multi_view = [
-    "Based on the given images, is the [A] smaller than the [B]?",
-    "Considering the different perspectives of the scene, does the [A] have a smaller size compared to the [B]?",
-    "After reviewing the images, can you confirm if the [A] is smaller than the [B]?",
+    "Is the [A] smaller than the [B]?",
+    "Does the [A] have a smaller size compared to the [B]?",
+    "Can you confirm if the [A] is smaller than the [B]?",
 ]
 
 small_true_responses_multi_view = [
@@ -156,69 +166,119 @@ small_false_responses_multi_view = [
 
 
 
-size_biggest_questions = [
-    "Given the multi-view images and the objects: [T], which one is the biggest?",
-    "Considering the set of objects: [T] in the multi-view images, identify the one with the largest size.",
-    "From the provided objects: [T] in different perspectives, which object has the greatest size?",
-    "Out of the objects: [T], which one is the largest in size?",
-    "From the collection of objects: [T] in different views, determine which is the biggest.",
+multiview_size_biggest_questions = [
+    "Among the objects [T], which one is the biggest?",
+    "Considering the set of objects [T], which has the largest size?",
+    "From the objects [T], which one has the greatest size?",
+    "Out of the objects [T], which one is the largest in size?",
+    "Which object in [T] is the biggest?",
 ]
 
-size_biggest_answers = [
-    "[X]",
+multiview_size_biggest_direct_answers = [
+    "[X].",
+]
+
+multiview_size_biggest_sentence_answers = [
     "The [X] is the biggest among the objects.",
     "Out of all the objects, the [X] has the largest size.",
     "In terms of size, the [X] is the biggest one.",
 ]
 
-size_smallest_questions = [
-    "Given the multi-view images and the objects: [T], which one is the smallest?",
-    "Considering the set of objects: [T] in the multi-view images, identify the one with the smallest size.",
-    "From the provided objects: [T] in different perspectives, which object has the least size?",
-    "Out of the objects: [T], which one is the smallest in size?",
-    "From the collection of objects: [T] in different views, determine which is the smallest.",
+multiview_size_smallest_questions = [
+    "Among the objects [T], which one is the smallest?",
+    "Considering the set of objects [T], which has the smallest size?",
+    "From the objects [T], which one has the least size?",
+    "Out of the objects [T], which one is the smallest in size?",
+    "Which object in [T] is the smallest?",
 ]
 
-size_smallest_answers = [
-    "[X]",
+multiview_size_smallest_direct_answers = [
+    "[X].",
+]
+
+multiview_size_smallest_sentence_answers = [
     "The [X] is the smallest among the objects.",
     "Out of all the objects, the [X] has the least size.",
     "In terms of size, the [X] is the smallest one.",
 ]
+from .register_structured import EMPTY_QUESTION_INSTRUCTION, register_judgment, register_oe
+
+_UNCONSTRAINED = EMPTY_QUESTION_INSTRUCTION
 
 
-# ─── Template Registration ───────────────────────────────────────────
-from ..annotation.core.prompt_template import TemplateRegistry, PromptTemplate
+def register_structured_size_templates() -> None:
+    for unit, instr in (("cm", unit_centimeter_disclaimer), ("m", unit_meter_disclaimer)):
+        register_oe(
+            f"size.absolute.single_view.{unit}",
+            size_predicate_questions_single_view,
+            size_answers_single_view,
+            question_instruction=instr,
+        )
+        register_oe(
+            f"size.height.single_view.{unit}",
+            height_predicate_questions_single_view,
+            height_answers_single_view,
+            question_instruction=instr,
+        )
 
-TemplateRegistry.register("size.absolute.single_view", PromptTemplate(
-    questions=size_predicate_questions_single_view, answers=size_answers_single_view,
-))
-TemplateRegistry.register("size.height.single_view", PromptTemplate(
-    questions=height_predicate_questions_single_view, answers=height_answers_single_view,
-))
-TemplateRegistry.register("size.big.single_view", PromptTemplate(
-    questions=big_predicate_questions_single_view,
-    true_answers=big_true_responses_single_view,
-    false_answers=big_false_responses_single_view,
-))
-TemplateRegistry.register("size.small.single_view", PromptTemplate(
-    questions=small_predicate_questions_single_view,
-    true_answers=small_true_responses_single_view,
-    false_answers=small_false_responses_single_view,
-))
-TemplateRegistry.register("size.big.multi_view", PromptTemplate(
-    questions=big_predicate_questions_multi_view,
-    true_answers=big_true_responses_multi_view,
-    false_answers=big_false_responses_multi_view,
-))
-TemplateRegistry.register("size.small.multi_view", PromptTemplate(
-    questions=small_predicate_questions_multi_view,
-    true_answers=small_true_responses_multi_view,
-    false_answers=small_false_responses_multi_view,
-))
-TemplateRegistry.register("size.biggest", PromptTemplate(
-    questions=size_biggest_questions, answers=size_biggest_answers,
-))
-TemplateRegistry.register("size.smallest", PromptTemplate(
-    questions=size_smallest_questions, answers=size_smallest_answers,
-))
+    register_judgment(
+        "size.big.single_view",
+        big_predicate_questions_single_view,
+        big_true_responses_single_view,
+        big_false_responses_single_view,
+        question_instruction=_UNCONSTRAINED,
+    )
+    register_judgment(
+        "size.small.single_view",
+        small_predicate_questions_single_view,
+        small_true_responses_single_view,
+        small_false_responses_single_view,
+        question_instruction=_UNCONSTRAINED,
+    )
+    register_judgment(
+        "multiview_size.big.pair",
+        big_predicate_questions_multi_view,
+        big_true_responses_multi_view,
+        big_false_responses_multi_view,
+        introduction=multiview_size_introduction,
+        question_instruction=_UNCONSTRAINED,
+    )
+    register_judgment(
+        "multiview_size.small.pair",
+        small_predicate_questions_multi_view,
+        small_true_responses_multi_view,
+        small_false_responses_multi_view,
+        introduction=multiview_size_introduction,
+        question_instruction=_UNCONSTRAINED,
+    )
+    for polarity, stems, direct_ans, sentence_ans in (
+        (
+            "biggest",
+            multiview_size_biggest_questions,
+            multiview_size_biggest_direct_answers,
+            multiview_size_biggest_sentence_answers,
+        ),
+        (
+            "smallest",
+            multiview_size_smallest_questions,
+            multiview_size_smallest_direct_answers,
+            multiview_size_smallest_sentence_answers,
+        ),
+    ):
+        register_oe(
+            f"multiview_size.{polarity}.direct",
+            stems,
+            direct_ans,
+            introduction=multiview_size_introduction,
+            question_instruction=_UNCONSTRAINED,
+        )
+        register_oe(
+            f"multiview_size.{polarity}.sentence",
+            stems,
+            sentence_ans,
+            introduction=multiview_size_introduction,
+            question_instruction=_UNCONSTRAINED,
+        )
+
+
+register_structured_size_templates()

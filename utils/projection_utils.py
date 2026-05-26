@@ -3,6 +3,12 @@
 import numpy as np
 
 
+def intrinsic_matrix_3x3(intrinsic):
+    """Upper-left 3x3 from 4x4 or 3x3 intrinsic."""
+    k = np.asarray(intrinsic, dtype=np.float64)
+    return k[:3, :3] if k.shape[0] >= 3 else k
+
+
 def compute_fov_from_intrinsic(intrinsic, img_dim):
     """Compute horizontal and vertical field of view from intrinsic matrix.
 

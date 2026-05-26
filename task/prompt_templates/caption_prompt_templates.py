@@ -102,6 +102,13 @@ CAPTION_MODULES = {
     "style": caption_style_modules,
 }
 
+CAPTION_DATASET_KEYS = frozenset({"role", "task"})
+CAPTION_DATASET_MODULES = {
+    "role": caption_role_modules,
+    "task": caption_task_modules,
+}
+CAPTION_API_MODULES = CAPTION_MODULES
+
 CAPTION_DEFAULT_DROPOUT = {
     "role": 0.1,
     "task": 0.0,
@@ -111,3 +118,23 @@ CAPTION_DEFAULT_DROPOUT = {
     "constraint": 0.4,
     "style": 0.2,
 }
+
+
+from ..annotation.core.structured_prompt_template import AnswerInstructionProfile
+from .register_structured import register_oe
+
+
+def register_structured_caption_templates() -> None:
+    register_oe(
+        "caption.open_ended",
+        caption_task_modules,
+        [""],
+        introduction=caption_role_modules,
+        answer_profiles={
+            "generative": AnswerInstructionProfile("generative", answer_templates=[""]),
+        },
+        instruction_types=["generative"],
+    )
+
+
+register_structured_caption_templates()

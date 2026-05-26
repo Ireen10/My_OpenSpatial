@@ -7,14 +7,17 @@ Extends BaseAnnotationTask with multiview-specific logic:
 """
 
 import random
+from typing import List, Optional
 import numpy as np
 import open3d as o3d
 
 from .base_annotation_task import BaseAnnotationTask
-from .scene_graph import SceneGraph
+from .scene_graph import SceneGraph, SceneNode
+from .mark_spec import assemble_per_view_mark_spec, merge_mark_specs
 from .message_builder import create_multiview_messages
 
 from utils.projection_utils import backproject_depth_to_3d, project_points_3d_to_2d, transform_points_camera_to_world
+from utils.image_utils import convert_pil_to_bytes
 
 
 class BaseMultiviewAnnotationTask(BaseAnnotationTask):
@@ -35,6 +38,8 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
         self.max_num_views = args.get("max_num_views", 400)
         self.min_rot_angle = args.get("min_rot_angle", 15.0)
         self.min_translation = args.get("min_translation", 0.0)
+        if not getattr(self, "task_name", None):
+            self.task_name = args.get("task_name") or args.get("file_name", "multiview")
 
     def build_scene_graph(self, example) -> SceneGraph:
         """Build a multiview SceneGraph."""
@@ -166,22 +171,122 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
                 return False
         return True
 
-    def _mark_per_view(self, meta, mark_type):
-        """Mark one object per view image, return (processed_images, marked_infos).
+    def _raw_images_for_meta(self, meta) -> list:
+        return [{"bytes": convert_pil_to_bytes(meta["image"][i])} for i in range(len(meta["image"]))]
 
-        Common loop used by multiview distance, size, and similar tasks.
-        Each view gets one object marked with a unique color.
-        """
+    @staticmethod
+    def _qa_image_refs(preprocess_row: Optional[dict], meta: dict) -> List[str]:
+        """Pipeline image paths for each QA frame (ordered like meta['image'])."""
+        if not preprocess_row or not isinstance(preprocess_row.get("image"), list):
+            return []
+        scene_paths = preprocess_row["image"]
+        view_indices = meta.get("view_idx") or list(range(len(meta.get("image", []))))
+        refs = []
+        for i, vi in enumerate(view_indices):
+            if vi < len(scene_paths):
+                refs.append(str(scene_paths[vi]).replace("\\", "/"))
+            else:
+                refs.append("")
+        return refs
+
+    def _record_multiview_turn(
+        self,
+        sub_task: str,
+        template_id: str,
+        prompt: str,
+        question_type,
+        meta: dict,
+        *,
+        mark_spec: Optional[dict] = None,
+        extra_slots: Optional[dict] = None,
+    ):
+        n_views = len(meta.get("image", []))
+        view_indices = meta.get("view_idx")
+        self._record_turn(
+            sub_task, template_id, prompt, question_type,
+            mark_spec=mark_spec,
+            extra_slots=extra_slots,
+            image_placeholder_count=n_views,
+            view_indices=view_indices,
+        )
+
+    def _mark_per_view(self, meta, mark_type):
+        """Mark one object per view image, return (processed_images, marked_infos)."""
         processed_images = []
         marked_infos = []
+        per_view_specs = []
         self.marker.reset(shuffle=True)
+        row = getattr(self._thread_local, "preprocess_row", None)
+        view_indices = meta.get("view_idx") or list(range(len(meta["image"])))
+        image_refs = self._qa_image_refs(row, meta)
+        nodes = meta.get("node")
         for i in range(len(meta["image"])):
-            obj = (meta["tag"][i], meta["pointcloud"][i],
-                   meta["bbox_2d"][i], meta["mask"][i])
-            img, info = self.marker.mark_objects(meta["image"][i], [obj], mark_type=mark_type)
+            vi = view_indices[i] if i < len(view_indices) else i
+            passthrough = nodes[i] if nodes and i < len(nodes) else meta["pointcloud"][i]
+            obj = (meta["tag"][i], passthrough, meta["bbox_2d"][i], meta["mask"][i])
+            if self.emit_marked_images:
+                img, info = self.marker.mark_objects(
+                    meta["image"][i], [obj], mark_type=mark_type, view_idx=vi,
+                    preprocess_row=row,
+                )
+                per_view_specs.append(self.marker.last_mark_spec)
+            else:
+                spec, info = self.marker.plan_mark(
+                    [obj], mark_type=mark_type, view_idx=vi,
+                )
+                per_view_specs.append(spec)
+                img = {"bytes": convert_pil_to_bytes(meta["image"][i])}
             processed_images.append(img)
             marked_infos.append(info[0])
+        merged = merge_mark_specs(
+            per_view_specs,
+            view_indices=list(range(len(meta["image"]))),
+            image_refs=image_refs,
+        )
+        if merged:
+            self.marker._last_mark_spec = merged
         return processed_images, marked_infos
+
+    def _resolve_qa_images(self, graph, processed_images: list) -> list:
+        """Map handler outputs to QA_images (M3: unmarked bytes unless emit_marked_images)."""
+        if self.emit_marked_images:
+            return processed_images
+        if not processed_images:
+            return processed_images
+
+        example = getattr(self._thread_local, "preprocess_row", None)
+        scene_images = example.get("image") if example and isinstance(example.get("image"), list) else []
+        scene_n = len(scene_images)
+
+        def _to_bytes(im) -> dict:
+            if isinstance(im, dict) and im.get("bytes") is not None:
+                return im
+            return {"bytes": convert_pil_to_bytes(im)}
+
+        resolved = []
+        for item in processed_images:
+            if isinstance(item, list):
+                # Per-QA view list (e.g. correspondence: 2 views). Do not expand to full scene.
+                if scene_n and 0 < len(item) < scene_n:
+                    resolved.append([_to_bytes(im) for im in item])
+                    continue
+                # Legacy: inner list spans entire scene (len == scene_n).
+                if scene_n and len(item) == scene_n:
+                    resolved.append([_to_bytes(im) for im in item])
+                    continue
+                resolved.append([_to_bytes(im) for im in item])
+                continue
+            if isinstance(item, dict):
+                resolved.append(item)
+            else:
+                resolved.append(_to_bytes(item))
+
+        if resolved:
+            return resolved
+
+        if scene_n and len(processed_images) == scene_n:
+            return [_to_bytes(im) for im in scene_images]
+        return super()._resolve_qa_images(graph, processed_images)
 
     def _find_chain_and_mark(self, graph, num_views, retries=5):
         """Retry _find_view_chain, build meta, mark per view.
@@ -327,7 +432,9 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
 
         return collected
 
-    _ALL_META_FIELDS = ["image", "mask", "tag", "view_idx", "pointcloud", "bbox_2d", "box_3d_world"]
+    _ALL_META_FIELDS = [
+        "image", "mask", "tag", "view_idx", "pointcloud", "bbox_2d", "box_3d_world", "node",
+    ]
 
     def _build_view_meta(self, graph, node_views, *, fields=None):
         """Build meta_dict from (node, view_idx) entries.
@@ -361,5 +468,19 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
                 meta["bbox_2d"].append(app.bbox_2d)
             if "box_3d_world" in meta:
                 meta["box_3d_world"].append(node.box_3d_world)
+            if "node" in meta:
+                meta["node"].append(node)
 
         return meta
+
+    @staticmethod
+    def _marked_prompt_items(meta: dict, marked_infos: list) -> list:
+        """Map (legacy_desc, SceneNode|…) to (desc, metric passthrough) for prompt funcs."""
+        items = []
+        for i, item in enumerate(marked_infos):
+            desc = item[0] if isinstance(item, (list, tuple)) else item
+            passthrough = item[1] if isinstance(item, (list, tuple)) and len(item) > 1 else item
+            if isinstance(passthrough, SceneNode):
+                passthrough = meta["pointcloud"][i]
+            items.append((desc, passthrough))
+        return items

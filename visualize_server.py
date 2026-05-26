@@ -4,12 +4,14 @@ Visualization server for OpenSpatial annotation outputs.
 Usage:
     python visualize_server.py --port 8888 --data_dir output/debug
 
-Then open http://<host>:8888 in browser.
+Then open http://<host>:8888 in browser. The page header shows the data root
+basename (e.g. base_pipeline_demo_singleview_all_frame_rot_m8l2).
 """
 
 import argparse
 import ast
 import base64
+import copy
 import io
 import json
 import os
@@ -21,6 +23,13 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, render_template_string, request, jsonify
 
+from task.annotation.core.mark_spec import (
+    encode_slot_key,
+    mark_spec_views,
+    render_mark,
+    slot_ids_for_frame,
+    view_mark_spec_slice,
+)
 from utils.box_utils import (
     compute_box_3d_corners_from_params,
     convert_box_3d_world_to_camera,
@@ -29,9 +38,19 @@ from utils.box_utils import (
 app = Flask(__name__)
 DATA_DIR = "output/debug"
 
+
+def data_root_name():
+    """Basename of the browsed --data_dir root (e.g. base_pipeline_demo_*_m8l2)."""
+    return os.path.basename(os.path.normpath(DATA_DIR or "."))
+
+# Fields / keys whose byte payloads are omitted in the raw-row viewer.
+_RAW_OMIT_KEYS = frozenset({"QA_images", "qa_images"})
+_BYTES_PLACEHOLDER = "<omitted image bytes>"
+
 # ──────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────
+
 
 def discover_parquets(data_dir):
     """Scan data_dir for all data.parquet files, return list of (display_name, path)."""
@@ -39,13 +58,17 @@ def discover_parquets(data_dir):
     for pq_path in sorted(glob.glob(os.path.join(data_dir, "**/data.parquet"), recursive=True)):
         rel = os.path.relpath(pq_path, data_dir)
         parts = rel.split(os.sep)
-        # e.g. base_pipeline_debug_counting/annotation_stage/counting/data.parquet
-        # display as: counting  (singleview) or multiview_distance (multiview)
-        task_name = parts[-2] if len(parts) >= 2 else rel
         pipeline_name = parts[0] if parts else ""
-        is_multiview = "multiview" in task_name
-        is_3d_grounding = "3d_grounding" in task_name.lower()
-        label = f"{'[Multi] ' if is_multiview else '[Single] '}{task_name}"
+        if "merged_samples" in parts or "aggregate_stage" in parts:
+            task_name = "merged_samples"
+            label = "[Merged] all tasks"
+            is_multiview = False
+            is_3d_grounding = False
+        else:
+            task_name = parts[-2] if len(parts) >= 2 else rel
+            is_multiview = "multiview" in task_name
+            is_3d_grounding = "3d_grounding" in task_name.lower()
+            label = f"{'[Multi] ' if is_multiview else '[Single] '}{task_name}"
         if is_3d_grounding:
             label += " (3D boxes)"
         results.append({
@@ -88,13 +111,152 @@ def load_original_image(image_field):
     if isinstance(image_field, (bytes, dict)):
         return image_from_bytes(image_field)
     if isinstance(image_field, np.ndarray):
-        # multiview: list of image paths
         imgs = []
         for item in image_field:
             if isinstance(item, str) and os.path.exists(item):
                 imgs.append(Image.open(item))
+            elif isinstance(item, (bytes, dict)):
+                img = image_from_bytes(item)
+                if img:
+                    imgs.append(img)
+        return imgs if imgs else None
+    if isinstance(image_field, list):
+        imgs = []
+        for item in image_field:
+            if isinstance(item, str) and os.path.exists(item):
+                imgs.append(Image.open(item))
+            elif isinstance(item, (bytes, dict)):
+                img = image_from_bytes(item)
+                if img:
+                    imgs.append(img)
         return imgs if imgs else None
     return None
+
+
+def _normalize_meta(meta):
+    if meta is None or (isinstance(meta, float) and np.isnan(meta)):
+        return None
+    if isinstance(meta, list) and meta:
+        meta = meta[0]
+    if not isinstance(meta, dict):
+        return None
+    meta = dict(meta)
+    turns = meta.get("turns")
+    if isinstance(turns, np.ndarray):
+        meta["turns"] = turns.tolist()
+    elif hasattr(turns, "tolist") and not isinstance(turns, list):
+        meta["turns"] = turns.tolist()
+    ms = meta.get("mark_spec")
+    if isinstance(ms, dict):
+        ms = dict(ms)
+        if isinstance(ms.get("mark_kinds"), np.ndarray):
+            ms["mark_kinds"] = ms["mark_kinds"].tolist()
+        if isinstance(ms.get("slots"), np.ndarray):
+            ms["slots"] = ms["slots"].tolist()
+        views = ms.get("views")
+        if isinstance(views, np.ndarray):
+            ms["views"] = views.tolist()
+        elif views is not None and not isinstance(views, list):
+            views = _to_list(views)
+            if views:
+                ms["views"] = views
+        meta["mark_spec"] = ms
+    return meta
+
+
+def _to_list(val):
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return []
+    if isinstance(val, np.ndarray):
+        return val.tolist()
+    if hasattr(val, "tolist") and not isinstance(val, (list, str, dict)):
+        return val.tolist()
+    if isinstance(val, list):
+        return val
+    return [val]
+
+
+def _numpy_to_python(obj):
+    """Recursively convert numpy scalars/arrays for JSON serialization."""
+    if obj is None or (isinstance(obj, float) and np.isnan(obj)):
+        return None
+    if isinstance(obj, np.ndarray):
+        return _numpy_to_python(obj.tolist())
+    if isinstance(obj, (np.integer, np.floating)):
+        return obj.item()
+    if isinstance(obj, dict):
+        return {str(k): _numpy_to_python(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_numpy_to_python(v) for v in obj]
+    if isinstance(obj, bytes):
+        return _BYTES_PLACEHOLDER
+    return obj
+
+
+def _strip_image_payload(val, key=None):
+    """Remove bulky image bytes; keep paths and text intact."""
+    if key in _RAW_OMIT_KEYS:
+        return "<omitted>"
+    if isinstance(val, bytes):
+        return _BYTES_PLACEHOLDER
+    if isinstance(val, dict):
+        if "bytes" in val and isinstance(val["bytes"], (bytes, bytearray)):
+            out = {k: v for k, v in val.items() if k != "bytes"}
+            out["bytes"] = _BYTES_PLACEHOLDER
+            return _strip_image_payload(out)
+        return {k: _strip_image_payload(v, k) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_strip_image_payload(v) for v in val]
+    if isinstance(val, np.ndarray):
+        return _strip_image_payload(val.tolist())
+    if isinstance(val, str) and len(val) > 2000 and re.match(r"^[A-Za-z0-9+/=\s]+$", val[:200]):
+        return _BYTES_PLACEHOLDER
+    return val
+
+
+def serialize_row_raw(row_series):
+    """Full parquet row as JSON-safe dict (no image byte blobs)."""
+    d = row_series.to_dict()
+    cleaned = {}
+    for k, v in d.items():
+        py = _numpy_to_python(v)
+        cleaned[k] = _strip_image_payload(py, k)
+    meta = _normalize_meta(d.get("metadata"))
+    n_qa = _image_placeholder_count({"turns": (meta or {}).get("turns") or [], "meta": meta}, row_series)
+    img = cleaned.get("image")
+    if isinstance(img, list) and n_qa > 0 and len(img) != n_qa:
+        refs = []
+        if meta:
+            va = meta.get("visual_anchor") or {}
+            refs = list(va.get("raw_image_refs") or [])
+            if not refs and va.get("raw_image_ref"):
+                refs = [va["raw_image_ref"]]
+        cleaned["_qa_summary"] = {
+            "image_placeholder_count": n_qa,
+            "preprocess_image_count": len(img),
+            "note": (
+                "image[] is the full preprocess scene; this QA row only uses "
+                f"{n_qa} frame(s) in QA_images / messages <image> tags."
+            ),
+            "qa_image_paths": refs,
+        }
+    return cleaned
+
+
+def _row_as_preprocess_dict(row_series):
+    """Dict suitable for render_mark mask_ref resolution."""
+    d = row_series.to_dict()
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, np.ndarray):
+            out[k] = v.tolist() if v.ndim > 0 else v.item()
+        else:
+            out[k] = v
+    masks = out.get("masks")
+    if masks is not None and not isinstance(masks, list):
+        if hasattr(masks, "tolist"):
+            out["masks"] = masks.tolist()
+    return out
 
 
 # 3D grounding visualization (camera-frame boxes, zxy euler)
@@ -116,26 +278,47 @@ def _is_3d_grounding_task(task_name, parsed):
     if any("3D Grounding" in str(t) for t in tags):
         return True
     for turn in parsed.get("turns") or []:
+        prefix = turn.get("question_prefix") or ""
         q = turn.get("question") or ""
         a = turn.get("answer") or ""
-        if "Camera intrinsic parameters" in q and "bbox_3d" in a:
-            return True
+        if "Camera intrinsic parameters" in prefix or "Camera intrinsic parameters" in q:
+            if "bbox_3d" in a:
+                return True
         if "bbox_3d" in a:
             return True
     return False
 
 
 def _parse_float_token(s):
-    """Parse a numeric token; tolerate trailing sentence punctuation (e.g. '48.49.')."""
     return float(s.strip().rstrip("."))
 
 
 def _parse_camera_from_text(text):
-    """Parse hfov, vfov, width, height from grounding_3d camera system prompt."""
+    """Parse camera params from grounding_3d question prefix (f_x/f_y or legacy hfov)."""
     if not text:
         return None
-    # vfov is often followed by '.' before "Image width" — avoid greedy [0-9.]+ swallowing it
     num = r"[0-9]+(?:\.[0-9]+)?"
+    m = re.search(
+        rf"f_x\s*=\s*({num}).*?f_y\s*=\s*({num}).*?"
+        rf"c_x\s*=\s*({num}).*?c_y\s*=\s*({num}).*?"
+        rf"width\s*(\d+).*?height\s*(\d+)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        try:
+            fx = _parse_float_token(m.group(1))
+            fy = _parse_float_token(m.group(2))
+            cx = _parse_float_token(m.group(3))
+            cy = _parse_float_token(m.group(4))
+            w, h = int(m.group(5)), int(m.group(6))
+        except ValueError:
+            return None
+        k = np.eye(4, dtype=np.float64)
+        k[0, 0], k[1, 1] = fx, fy
+        k[0, 2], k[1, 2] = cx, cy
+        return {"intrinsic": k, "width": w, "height": h}
+
     m = re.search(
         rf"hfov\s*=\s*({num}).*?vfov\s*=\s*({num}).*?"
         rf"(?:Image\s+)?width\s*=\s*(\d+).*?(?:Image\s+)?height\s*=\s*(\d+)",
@@ -164,7 +347,6 @@ def _intrinsic_from_fov(hfov_deg, vfov_deg, width, height):
 
 
 def _scale_intrinsic_to_image(intrinsic, ref_size, img_size):
-    """Scale K from reference (W,H) in the prompt to the actual PIL image size."""
     ref_w, ref_h = ref_size
     img_w, img_h = img_size
     if ref_w <= 0 or ref_h <= 0:
@@ -206,7 +388,6 @@ def _intrinsic_from_row(row):
 
 
 def _parse_bbox_entries_from_text(text):
-    """Extract [{'bbox_3d': [...], 'label': ...}, ...] from an answer string."""
     if not text:
         return []
     m = re.search(r"(\[\s*\{.*\}\s*\])", text, flags=re.DOTALL)
@@ -235,7 +416,6 @@ def _parse_bbox_entries_from_text(text):
 
 
 def _bbox_entries_from_row(row):
-    """Use world-frame boxes + pose when present in parquet (pre-flatten rows)."""
     boxes_world = row.get("bboxes_3d_world_coords", None)
     if boxes_world is None or (isinstance(boxes_world, float) and np.isnan(boxes_world)):
         return []
@@ -279,8 +459,15 @@ def _project_cam_to_2d(points_cam, intrinsic):
     return uv, valid
 
 
+def _turn_camera_text(turn):
+    prefix = (turn.get("question_prefix") or "").strip()
+    question = (turn.get("question") or "").strip()
+    if prefix:
+        return prefix + "\n" + question
+    return question
+
+
 def _resolve_grounding_context(row, parsed):
-    """Return (bbox_entries, intrinsic_4x4) or (None, None) if overlay cannot be built."""
     entries = _bbox_entries_from_row(row)
     intrinsic = _intrinsic_from_row(row)
     ref_size = None
@@ -297,19 +484,23 @@ def _resolve_grounding_context(row, parsed):
     if intrinsic is None:
         cam = None
         for turn in parsed.get("turns") or []:
-            cam = _parse_camera_from_text(turn.get("question") or "")
+            cam = _parse_camera_from_text(turn.get("question_prefix") or "")
+            if cam is None:
+                cam = _parse_camera_from_text(_turn_camera_text(turn))
             if cam:
                 break
         if cam is None:
             return entries, None
-        intrinsic = _intrinsic_from_fov(cam["hfov"], cam["vfov"], cam["width"], cam["height"])
         ref_size = (cam["width"], cam["height"])
+        if "intrinsic" in cam:
+            intrinsic = cam["intrinsic"]
+        else:
+            intrinsic = _intrinsic_from_fov(cam["hfov"], cam["vfov"], cam["width"], cam["height"])
 
     return entries, (intrinsic, ref_size)
 
 
 def draw_3d_boxes_on_image(img, entries, intrinsic, ref_size=None):
-    """Draw projected 3D box wireframes on a PIL image (in-place copy)."""
     if not entries or intrinsic is None:
         return img
     out = img.convert("RGB")
@@ -344,17 +535,17 @@ def draw_3d_boxes_on_image(img, entries, intrinsic, ref_size=None):
     return out
 
 
-def parse_row(row):
-    """Parse a single parquet row into a display-friendly dict.
+def _strip_image_prefix(text: str) -> str:
+    if not text:
+        return ""
+    t = str(text).strip()
+    # Human turns may start with multiple "<image>" placeholders.
+    while t.startswith("<image>"):
+        t = t[len("<image>") :].strip()
+    return t
 
-    Supports both single-turn (2 messages) and multi-turn (4+ messages) conversations.
-    Returns a list of (question, answer) turns.
-    """
-    messages = row.get("messages", [])
-    if isinstance(messages, np.ndarray):
-        messages = messages.tolist()
 
-    # Parse all turns as (question, answer) pairs
+def _parse_messages_turns(messages):
     turns = []
     i = 0
     while i < len(messages):
@@ -367,33 +558,252 @@ def parse_row(row):
                 if isinstance(next_msg, dict) and next_msg.get("from") == "gpt":
                     a = next_msg.get("value", "")
                     i += 1
-            turns.append({"question": q, "answer": a})
+            # Display should use the fully rendered message text verbatim.
+            # Downstream training-data conversion should rely on metadata.prompt_struct,
+            # not on UI-normalized strings.
+            turns.append({"question": str(q), "answer": str(a)})
         i += 1
+    return turns
 
-    # QA images
-    qa_images_raw = row.get("QA_images", None)
-    qa_images = []
-    if isinstance(qa_images_raw, dict):
-        img = image_from_bytes(qa_images_raw)
-        if img:
-            qa_images.append(img)
-    elif isinstance(qa_images_raw, (list, np.ndarray)):
-        for item in qa_images_raw:
-            img = image_from_bytes(item)
-            if img:
-                qa_images.append(img)
+
+def _metadata_turns_to_display(meta_turns, msg_turns=None):
+    out = []
+    for i, tr in enumerate(meta_turns):
+        if not isinstance(tr, dict):
+            continue
+        prefix = (tr.get("question_prefix") or "").strip()
+        q_text = (tr.get("question_text") or "").strip()
+        answer = tr.get("answer_text") or ""
+        if msg_turns and i < len(msg_turns):
+            msg_q = (msg_turns[i].get("question") or "").strip()
+            msg_a = (msg_turns[i].get("answer") or "").strip()
+            # Display: prefer fully rendered messages verbatim when present.
+            if msg_q:
+                q_text = msg_q
+            if msg_a:
+                answer = msg_a
+        question = q_text
+        if prefix:
+            question = f"{prefix}\n\n{q_text}" if q_text else prefix
+        out.append({
+            "turn_id": tr.get("turn_id"),
+            "task_name": tr.get("task_name", ""),
+            "question": question,
+            "question_prefix": prefix,
+            "question_text": q_text,
+            "answer": answer,
+            "question_type": tr.get("question_type", ""),
+            "sub_task": tr.get("sub_task", ""),
+            "image_placeholder_count": int(tr.get("image_placeholder_count") or 0),
+        })
+    return out
+
+
+def _find_active_turn_index(meta_turns, msg_turns):
+    if not meta_turns or not msg_turns:
+        return None
+    msg_a = (msg_turns[-1].get("answer") or "").strip()
+    for i, tr in enumerate(meta_turns):
+        if not isinstance(tr, dict):
+            continue
+        if (tr.get("answer_text") or "").strip() == msg_a:
+            return i
+    return len(meta_turns) - 1 if len(meta_turns) == len(msg_turns) else 0
+
+
+def parse_row(row):
+    """Parse a parquet row: prefer metadata.turns, fallback to messages."""
+    meta = _normalize_meta(row.get("metadata"))
+    messages = _to_list(row.get("messages", []))
+    msg_turns = _parse_messages_turns(messages)
+
+    turns = []
+    active_turn_index = None
+    if meta and meta.get("turns"):
+        meta_turns = meta["turns"]
+        turns = _metadata_turns_to_display(meta_turns, msg_turns)
+        active_turn_index = _find_active_turn_index(meta_turns, msg_turns)
+    if not turns:
+        turns = msg_turns
 
     tags = row.get("question_tags", [])
     if isinstance(tags, np.ndarray):
         tags = tags.tolist()
     qtype = row.get("question_types", "")
 
+    type_label = ""
+    if meta and meta.get("turns") and isinstance(meta["turns"], list) and meta["turns"]:
+        type_label = (meta["turns"][0].get("type_label") or "").strip()
+
+    mark_slots = []
+    if meta and meta.get("mark_spec"):
+        for v in mark_spec_views(meta["mark_spec"]):
+            vi = v.get("view_index", 0)
+            for s in v.get("slots") or []:
+                if not isinstance(s, dict):
+                    continue
+                sid = s.get("slot_id", "")
+                mark_slots.append({
+                    "slot_id": sid,
+                    "slot_key": encode_slot_key(vi, sid),
+                    "tag": s.get("tag", ""),
+                    "mark_kind": s.get("mark_kind", ""),
+                    "color_name": s.get("color_name", ""),
+                    "label_alias": s.get("label_alias"),
+                    "view_index": vi,
+                })
+
     return {
         "turns": turns,
-        "qa_images": qa_images,
+        "active_turn_index": active_turn_index,
         "tags": tags,
         "question_type": qtype,
+        "meta": meta,
+        "mark_slots": mark_slots,
+        "type_label": type_label,
     }
+
+
+def _filter_mark_spec(mark_spec, slot_ids, view_index: int = 0):
+    if not mark_spec or not slot_ids:
+        return None
+    wanted = set(slot_ids)
+    slots = [
+        s for s in view_mark_spec_slice(mark_spec, view_index).get("slots", [])
+        if s.get("slot_id") in wanted
+    ]
+    if not slots:
+        return None
+    kinds = sorted({s.get("mark_kind") for s in slots if s.get("mark_kind")})
+    return {"version": 2, "mark_kinds": kinds, "slots": slots}
+
+
+def _apply_marks_to_image(img, mark_spec, slot_ids, preprocess_row, view_index: int = 0):
+    if not slot_ids or not mark_spec:
+        return img
+    filtered = _filter_mark_spec(mark_spec, slot_ids, view_index=view_index)
+    if not filtered:
+        return img
+    rendered = render_mark(
+        img, filtered, preprocess_row=preprocess_row, view_index=view_index,
+    )
+    out = image_from_bytes(rendered)
+    return out if out is not None else img
+
+
+def _image_placeholder_count(parsed, row_series) -> int:
+    """How many QA images this row uses (<image> placeholders)."""
+    n = 0
+    for turn in parsed.get("turns") or []:
+        if isinstance(turn, dict):
+            n = max(n, int(turn.get("image_placeholder_count") or 0))
+    meta = parsed.get("meta") or {}
+    for turn in meta.get("turns") or []:
+        if isinstance(turn, dict):
+            n = max(n, int(turn.get("image_placeholder_count") or 0))
+    if n <= 0:
+        for m in _to_list(row_series.get("messages")):
+            if isinstance(m, dict) and m.get("from") == "human":
+                n = str(m.get("value", "")).count("<image>")
+                break
+    if n <= 0:
+        qa = row_series.get("QA_images")
+        if qa is not None and hasattr(qa, "__len__") and not isinstance(qa, (str, bytes)):
+            try:
+                n = len(qa)
+            except TypeError:
+                pass
+    return n
+
+
+def build_display_images(
+    row_series,
+    parsed,
+    task_name,
+    slot_ids=None,
+    overlay_3d=False,
+    *,
+    overlay_marks: bool = False,
+    marks_mode: str = "off",
+):
+    """Original image(s) with optional mark overlays and 3D box overlay.
+
+    marks_mode:
+      - ``off``: raw QA frames only (list page default)
+      - ``selected``: only ``slot_ids`` (keys ``view:slot``); empty list → no marks
+      - ``all``: every slot on each frame
+    """
+    if marks_mode not in ("off", "selected", "all"):
+        marks_mode = "off"
+    apply_marks = marks_mode in ("selected", "all")
+    n_place = _image_placeholder_count(parsed, row_series)
+
+    def _images_from_qa_field(qa_raw):
+        if qa_raw is None:
+            return None
+        if isinstance(qa_raw, dict):
+            img = image_from_bytes(qa_raw)
+            return [img] if img else None
+        imgs = []
+        for item in _to_list(qa_raw):
+            img = image_from_bytes(item)
+            if img:
+                imgs.append(img)
+        return imgs if imgs else None
+
+    orig = None
+    qa_raw = row_series.get("QA_images")
+    qa_imgs = _images_from_qa_field(qa_raw)
+    if qa_imgs and n_place > 0 and len(qa_imgs) == n_place:
+        orig = qa_imgs
+    if orig is None:
+        orig = load_original_image(row_series.get("image"))
+    if orig is None:
+        orig = qa_imgs
+
+    if orig is None:
+        return [], False
+
+    if not isinstance(orig, list):
+        images = [orig]
+    else:
+        images = orig
+
+    meta = parsed.get("meta") or {}
+    mark_spec = meta.get("mark_spec")
+    preprocess = _row_as_preprocess_dict(row_series)
+    n_frames = len(images)
+    out_images = []
+    for fi, img in enumerate(images):
+        frame = img.copy()
+        if apply_marks and mark_spec:
+            if marks_mode == "all":
+                user_slots = None
+            else:
+                user_slots = list(slot_ids or [])
+            use_ids = slot_ids_for_frame(
+                mark_spec, fi, n_frames=n_frames, user_slot_ids=user_slots,
+            )
+            if use_ids:
+                frame = _apply_marks_to_image(
+                    frame, mark_spec, use_ids, preprocess, view_index=fi,
+                )
+        out_images.append(frame)
+
+    has_3d = False
+    if overlay_3d and _is_3d_grounding_task(task_name, parsed):
+        try:
+            entries, ctx = _resolve_grounding_context(row_series.to_dict(), parsed)
+            if entries and ctx is not None:
+                intrinsic, ref_size = ctx
+                out_images[0] = draw_3d_boxes_on_image(
+                    out_images[0], entries, intrinsic, ref_size=ref_size,
+                )
+                has_3d = True
+        except Exception as exc:
+            print(f"[3d_grounding] overlay failed: {exc}")
+
+    return out_images, has_3d, apply_marks
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -410,8 +820,10 @@ HTML_TEMPLATE = """
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; }
-  .header { background: #1a1a2e; color: white; padding: 16px 24px; display: flex; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 100; }
+  .header { background: #1a1a2e; color: white; padding: 16px 24px; display: flex; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 100; flex-wrap: wrap; }
+  .header-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .header h1 { font-size: 20px; font-weight: 600; }
+  .data-root-name { font-size: 13px; font-weight: 500; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: rgba(255,255,255,0.85); word-break: break-all; }
   .header select { padding: 8px 12px; border-radius: 6px; border: none; font-size: 14px; background: #16213e; color: white; cursor: pointer; min-width: 280px; }
   .header select option { background: #16213e; }
   .header .info { margin-left: auto; font-size: 13px; opacity: 0.8; }
@@ -422,14 +834,18 @@ HTML_TEMPLATE = """
   .nav span { color: rgba(255,255,255,0.7); font-size: 13px; min-width: 80px; text-align: center; }
   .container { max-width: 1200px; margin: 24px auto; padding: 0 24px; }
   .card { background: white; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 20px; overflow: hidden; }
-  .card-header { padding: 14px 20px; background: #f8f9fa; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 10px; }
+  .card-header { padding: 14px 20px; background: #f8f9fa; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .tag { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
   .tag-task { background: #e3f2fd; color: #1565c0; }
   .tag-type { background: #f3e5f5; color: #7b1fa2; }
+  .tag-active { background: #fff8e1; color: #f57f17; }
   .card-body { padding: 20px; }
   .images-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
   .images-row img { border-radius: 8px; border: 1px solid #eee; cursor: pointer; transition: transform 0.2s; max-height: 400px; object-fit: contain; }
   .images-row img:hover { transform: scale(1.02); }
+  .mark-panel { margin-bottom: 14px; padding: 12px; background: #fafafa; border-radius: 8px; border: 1px solid #eee; }
+  .mark-panel label { display: inline-flex; align-items: center; gap: 6px; margin-right: 14px; margin-bottom: 6px; font-size: 13px; cursor: pointer; }
+  .mark-hint { font-size: 12px; color: #888; margin-bottom: 8px; }
   .qa-block { margin-top: 12px; }
   .qa-label { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
   .qa-label.q { color: #1565c0; }
@@ -437,10 +853,15 @@ HTML_TEMPLATE = """
   .qa-text { padding: 12px 16px; border-radius: 8px; font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
   .qa-text.q { background: #e3f2fd; }
   .qa-text.a { background: #e8f5e9; }
+  .qa-text.prefix { background: #eceff1; font-size: 13px; color: #455a64; margin-bottom: 8px; }
   .turn-divider { border: none; border-top: 1px dashed #ddd; margin: 12px 0; }
   .turn-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; background: #fff3e0; color: #e65100; margin-left: 6px; }
+  .turn-active { border-left: 3px solid #ff9800; padding-left: 12px; }
   .multi-turn-label { font-size: 12px; color: #888; margin-bottom: 4px; }
-  /* Lightbox */
+  .btn-raw { padding: 4px 12px; border-radius: 6px; border: 1px solid #ccc; background: white; font-size: 12px; cursor: pointer; margin-left: auto; }
+  .btn-raw:hover { background: #f0f0f0; }
+  .raw-panel { display: none; margin-top: 14px; max-height: 480px; overflow: auto; background: #263238; color: #eceff1; padding: 12px; border-radius: 8px; font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+  .raw-panel.open { display: block; }
   .lightbox { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 200; justify-content: center; align-items: center; cursor: zoom-out; }
   .lightbox.active { display: flex; }
   .lightbox img { max-width: 95vw; max-height: 95vh; object-fit: contain; border-radius: 8px; }
@@ -451,11 +872,14 @@ HTML_TEMPLATE = """
 <body>
 
 <div class="header">
-  <h1>OpenSpatial Visualizer</h1>
+  <div class="header-title">
+    <h1>OpenSpatial Visualizer</h1>
+    <span class="data-root-name" title="--data_dir root">{{ data_root_name }}</span>
+  </div>
   <select id="taskSelect" onchange="loadTask()">
     <option value="">-- Select a task --</option>
     {% for t in tasks %}
-    <option value="{{ t.path }}" {{ 'selected' if t.path == selected_path else '' }}>{{ t.label }}</option>
+    <option value="{{ t.path }}" data-grounding="{{ '1' if t.grounding_3d else '0' }}" {{ 'selected' if t.path == selected_path else '' }}>{{ t.label }}</option>
     {% endfor %}
   </select>
   <div class="nav">
@@ -473,7 +897,6 @@ HTML_TEMPLATE = """
   </div>
 </div>
 
-<!-- Lightbox -->
 <div class="lightbox" id="lightbox" onclick="closeLightbox()">
   <img id="lightboxImg" src="" />
 </div>
@@ -482,19 +905,22 @@ HTML_TEMPLATE = """
 const PAGE_SIZE = 10;
 let currentPage = 0;
 let totalRows = 0;
+let currentPath = '';
+let is3dTask = false;
 
 function loadTask() {
-  const path = document.getElementById('taskSelect').value;
-  if (!path) return;
+  const sel = document.getElementById('taskSelect');
+  currentPath = sel.value;
+  is3dTask = sel.selectedOptions[0]?.dataset.grounding === '1';
+  if (!currentPath) return;
   currentPage = 0;
-  fetchPage(path, 0);
+  fetchPage(currentPath, 0);
 }
 
 function navigate(delta) {
-  const path = document.getElementById('taskSelect').value;
-  if (!path) return;
+  if (!currentPath) return;
   currentPage += delta;
-  fetchPage(path, currentPage);
+  fetchPage(currentPath, currentPage);
 }
 
 function fetchPage(path, page) {
@@ -503,6 +929,7 @@ function fetchPage(path, page) {
     .then(data => {
       totalRows = data.total;
       currentPage = data.page;
+      is3dTask = data.is_3d_task;
       renderRows(data.rows);
       updateNav();
     });
@@ -525,31 +952,67 @@ function renderRows(rows) {
   let html = '';
   rows.forEach((row, idx) => {
     const globalIdx = currentPage * PAGE_SIZE + idx;
-    const tagsHtml = (row.tags || []).map(t => `<span class="tag tag-task">${t}</span>`).join(' ');
-    const typeHtml = row.question_type ? `<span class="tag tag-type">${row.question_type}</span>` : '';
+    const tagsHtml = (row.tags || []).map(t => `<span class="tag tag-task">${escapeHtml(t)}</span>`).join(' ');
+    const typeHtml = row.question_type ? `<span class="tag tag-type">${escapeHtml(row.question_type)}</span>` : '';
     const isMultiTurn = row.turns && row.turns.length > 1;
-    const turnBadge = isMultiTurn ? `<span class="turn-badge">${row.turns.length} turns</span>` : '';
-    const overlayBadge = row.has_3d_overlay ? '<span class="tag tag-type">3D bbox overlay</span>' : '';
+    const turnBadge = isMultiTurn ? `<span class="turn-badge">${row.turns.length} turns (sample)</span>` : '';
 
+    const imgId = `img-${row.row_index}`;
     let imagesHtml = '';
-    if (row.qa_images && row.qa_images.length > 0) {
-      const imgTags = row.qa_images.map(src =>
-        `<img src="${src}" onclick="openLightbox('${src}')" style="max-width:${row.qa_images.length > 1 ? Math.floor(100/Math.min(row.qa_images.length, 4)) - 2 : 100}%;" />`
+    if (row.display_images && row.display_images.length > 0) {
+      const imgTags = row.display_images.map((src, i) =>
+        `<img id="${imgId}-${i}" src="${src}" onclick="openLightbox(this.src)" style="max-width:${row.display_images.length > 1 ? Math.floor(100/Math.min(row.display_images.length, 4)) - 2 : 100}%;" />`
       ).join('');
-      imagesHtml = `<div class="images-row">${imgTags}</div>`;
+      imagesHtml = `<div class="images-row" id="${imgId}-row">${imgTags}</div>`;
+    }
+
+    let markHtml = '';
+    if (row.mark_slots && row.mark_slots.length > 0) {
+      const checks = row.mark_slots.map(s => {
+        const key = s.slot_key || (String(s.view_index) + ':' + s.slot_id);
+        const vf = (s.view_index !== undefined && s.view_index !== null && s.view_index !== '')
+          ? `view ${s.view_index} · ` : '';
+        const alias = s.label_alias ? ` (${escapeHtml(s.label_alias)})` : '';
+        const label = `${vf}${escapeHtml(s.slot_id)}${alias}: ${escapeHtml(s.tag)} (${escapeHtml(s.color_name)} ${escapeHtml(s.mark_kind)})`;
+        return `<label><input type="checkbox" class="mark-cb" data-row="${row.row_index}" data-slot-key="${escapeHtml(key)}" onchange="refreshImage(${row.row_index})" /> ${label}</label>`;
+      }).join('');
+      const modeHint = row.type_label ? ` Instruction mode: <strong>${escapeHtml(row.type_label)}</strong>.` : '';
+      markHtml = `<div class="mark-panel">
+        <div class="mark-hint">QA_images are stored unmarked (raw bytes).${modeHint} Overlay is client-side from mark_spec only when you check slots below:</div>
+        <label style="display:block;margin-bottom:6px;font-weight:600;">
+          <input type="checkbox" class="mark-select-all" data-row="${row.row_index}" onchange="toggleAllMarks(${row.row_index}, this.checked)" /> Select all marks
+        </label>
+        ${checks}
+      </div>`;
+    }
+
+    let overlay3dHtml = '';
+    if (row.can_3d_overlay) {
+      overlay3dHtml = `<label style="font-size:13px;margin-bottom:10px;display:block;">
+        <input type="checkbox" class="overlay-3d-cb" data-row="${row.row_index}" checked onchange="refreshImage(${row.row_index})" /> Show 3D bbox overlay
+      </label>`;
     }
 
     let turnsHtml = '';
     if (row.turns && row.turns.length > 0) {
       row.turns.forEach((turn, tIdx) => {
-        const cleanQ = (turn.question || '').replace(/<image>\s*/g, '').trim();
-        const turnLabel = isMultiTurn ? `<span class="multi-turn-label">Turn ${tIdx + 1}</span>` : '';
+        const isActive = row.active_turn_index === tIdx;
+        const activeCls = isActive ? ' turn-active' : '';
+        const activeBadge = isActive ? '<span class="tag tag-active">this row</span>' : '';
+        const prefix = (turn.question_prefix || '').trim();
+        const qBody = (turn.question_text || turn.question || '').replace(/<image>\s*/g, '').trim();
+        const turnLabel = isMultiTurn ? `<span class="multi-turn-label">Turn ${tIdx + 1}${turn.turn_id != null ? ' (id ' + turn.turn_id + ')' : ''} ${activeBadge}</span>` : '';
         if (tIdx > 0) turnsHtml += '<hr class="turn-divider">';
+        let prefixHtml = '';
+        if (prefix && prefix !== qBody) {
+          prefixHtml = `<div class="qa-text prefix">${escapeHtml(prefix)}</div>`;
+        }
         turnsHtml += `
-          ${turnLabel}
-          <div class="qa-block">
+          <div class="qa-block${activeCls}">
+            ${turnLabel}
             <div class="qa-label q">Question</div>
-            <div class="qa-text q">${escapeHtml(cleanQ)}</div>
+            ${prefixHtml}
+            <div class="qa-text q">${escapeHtml(qBody || turn.question || '')}</div>
           </div>
           <div class="qa-block" style="margin-top: 10px;">
             <div class="qa-label a">Answer</div>
@@ -559,14 +1022,18 @@ function renderRows(rows) {
     }
 
     html += `
-    <div class="card">
+    <div class="card" data-row-index="${row.row_index}">
       <div class="card-header">
         <strong>#${globalIdx + 1}</strong>
-        ${tagsHtml} ${typeHtml} ${overlayBadge} ${turnBadge}
+        ${tagsHtml} ${typeHtml} ${turnBadge}
+        <button type="button" class="btn-raw" onclick="toggleRaw(${row.row_index}, this)">Raw row</button>
       </div>
       <div class="card-body">
+        ${overlay3dHtml}
+        ${markHtml}
         ${imagesHtml}
         ${turnsHtml}
+        <pre class="raw-panel" id="raw-${row.row_index}"></pre>
       </div>
     </div>`;
   });
@@ -574,9 +1041,74 @@ function renderRows(rows) {
   window.scrollTo(0, 0);
 }
 
+function cardForRow(rowIndex) {
+  return document.querySelector(`.card[data-row-index="${rowIndex}"]`);
+}
+
+function selectedSlots(rowIndex) {
+  const card = cardForRow(rowIndex);
+  if (!card) return [];
+  return Array.from(card.querySelectorAll('.mark-cb:checked')).map(b => b.dataset.slotKey);
+}
+
+function toggleAllMarks(rowIndex, checked) {
+  const card = cardForRow(rowIndex);
+  if (!card) return;
+  card.querySelectorAll('.mark-cb').forEach(cb => { cb.checked = checked; });
+  const master = card.querySelector('.mark-select-all');
+  if (master) master.checked = checked;
+  refreshImage(rowIndex);
+}
+
+function refreshImage(rowIndex) {
+  const card = cardForRow(rowIndex);
+  if (!card) return;
+  const slots = selectedSlots(rowIndex);
+  const allCbs = card.querySelectorAll('.mark-cb');
+  const master = card.querySelector('.mark-select-all');
+  if (master && allCbs.length) {
+    master.checked = slots.length === allCbs.length;
+    master.indeterminate = slots.length > 0 && slots.length < allCbs.length;
+  }
+  const overlay3d = card.querySelector('.overlay-3d-cb')?.checked || false;
+  const params = new URLSearchParams({
+    path: currentPath,
+    index: String(rowIndex),
+    slots: slots.join(','),
+    marks_mode: slots.length ? 'selected' : 'off',
+    overlay_3d: overlay3d ? '1' : '0',
+  });
+  fetch('/api/render?' + params)
+    .then(r => r.json())
+    .then(data => {
+      const imgs = card.querySelectorAll('.images-row img');
+      (data.images || []).forEach((src, i) => {
+        if (imgs[i]) imgs[i].src = src;
+      });
+    });
+}
+
+function toggleRaw(rowIndex, btn) {
+  const panel = document.getElementById('raw-' + rowIndex);
+  if (panel.classList.contains('open')) {
+    panel.classList.remove('open');
+    btn.textContent = 'Raw row';
+    return;
+  }
+  btn.textContent = 'Hide raw';
+  panel.classList.add('open');
+  panel.textContent = 'Loading...';
+  fetch(`/api/raw_row?path=${encodeURIComponent(currentPath)}&index=${rowIndex}`)
+    .then(r => r.json())
+    .then(data => {
+      panel.textContent = JSON.stringify(data.row, null, 2);
+    })
+    .catch(() => { panel.textContent = 'Failed to load raw row.'; });
+}
+
 function escapeHtml(text) {
   const div = document.createElement('div');
-  div.textContent = text;
+  div.textContent = text == null ? '' : String(text);
   return div.innerHTML;
 }
 
@@ -593,7 +1125,6 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowRight') navigate(1);
 });
 
-// Auto-load if a task is pre-selected
 window.onload = () => {
   const sel = document.getElementById('taskSelect');
   if (sel.value) loadTask();
@@ -612,12 +1143,26 @@ window.onload = () => {
 def index():
     tasks = discover_parquets(DATA_DIR)
     selected = request.args.get("task", "")
-    return render_template_string(HTML_TEMPLATE, tasks=tasks, selected_path=selected)
+    return render_template_string(
+        HTML_TEMPLATE,
+        tasks=tasks,
+        selected_path=selected,
+        data_root_name=data_root_name(),
+    )
 
 
 def _task_name_from_parquet_path(path):
     parts = os.path.normpath(path).split(os.sep)
     return parts[-2] if len(parts) >= 2 else ""
+
+
+def _load_row(path, index):
+    if not path or not os.path.exists(path):
+        return None, None
+    df = pd.read_parquet(path)
+    if index < 0 or index >= len(df):
+        return None, df
+    return df.iloc[index], df
 
 
 @app.route("/api/data")
@@ -627,53 +1172,82 @@ def api_data():
     page_size = int(request.args.get("page_size", 10))
 
     if not path or not os.path.exists(path):
-        return jsonify({"total": 0, "page": 0, "rows": []})
+        return jsonify({"total": 0, "page": 0, "rows": [], "is_3d_task": False})
 
     df = pd.read_parquet(path)
     total = len(df)
     start = page * page_size
     end = min(start + page_size, total)
     task_name = _task_name_from_parquet_path(path)
+    is_3d = "3d_grounding" in task_name.lower()
 
     rows = []
     for i in range(start, end):
         row = df.iloc[i]
         parsed = parse_row(row)
-        qa_images = list(parsed["qa_images"])
-        has_3d_overlay = False
+        parsed["meta"] = _normalize_meta(row.get("metadata"))
 
-        if _is_3d_grounding_task(task_name, parsed):
-            try:
-                entries, ctx = _resolve_grounding_context(row, parsed)
-                if entries and ctx is not None:
-                    intrinsic, ref_size = ctx
-                    if qa_images:
-                        qa_images[0] = draw_3d_boxes_on_image(
-                            qa_images[0], entries, intrinsic, ref_size=ref_size,
-                        )
-                        has_3d_overlay = True
-                    else:
-                        orig = load_original_image(row.get("image"))
-                        if orig is not None and not isinstance(orig, list):
-                            qa_images = [
-                                draw_3d_boxes_on_image(
-                                    orig, entries, intrinsic, ref_size=ref_size,
-                                ),
-                            ]
-                            has_3d_overlay = True
-            except Exception as exc:
-                print(f"[3d_grounding] row {start + i} overlay failed: {exc}")
+        can_3d = _is_3d_grounding_task(task_name, parsed)
+        images, _, marks_applied = build_display_images(
+            row, parsed, task_name, overlay_3d=can_3d, marks_mode="off",
+        )
 
-        img_b64_list = [pil_to_base64(img) for img in qa_images]
         rows.append({
+            "row_index": i,
             "turns": parsed["turns"],
-            "qa_images": img_b64_list,
+            "active_turn_index": parsed["active_turn_index"],
+            "display_images": [pil_to_base64(img) for img in images],
+            "marks_overlay_applied": marks_applied,
             "tags": parsed["tags"] if isinstance(parsed["tags"], list) else [parsed["tags"]],
             "question_type": parsed["question_type"],
-            "has_3d_overlay": has_3d_overlay,
+            "mark_slots": parsed["mark_slots"],
+            "type_label": parsed.get("type_label", ""),
+            "can_3d_overlay": can_3d,
         })
 
-    return jsonify({"total": total, "page": page, "rows": rows})
+    return jsonify({"total": total, "page": page, "rows": rows, "is_3d_task": is_3d})
+
+
+@app.route("/api/render")
+def api_render():
+    path = request.args.get("path", "")
+    index = int(request.args.get("index", 0))
+    slots_raw = request.args.get("slots", "")
+    marks_mode = request.args.get("marks_mode", "off")
+    overlay_3d = request.args.get("overlay_3d", "0") == "1"
+    slot_ids = [s.strip() for s in slots_raw.split(",") if s.strip()]
+    if marks_mode not in ("off", "selected", "all"):
+        marks_mode = "all" if not slot_ids and request.args.get("slots") is None else "selected"
+    if marks_mode == "selected" and not slot_ids:
+        marks_mode = "off"
+
+    row, _ = _load_row(path, index)
+    if row is None:
+        return jsonify({"images": []})
+
+    task_name = _task_name_from_parquet_path(path)
+    parsed = parse_row(row)
+    parsed["meta"] = _normalize_meta(row.get("metadata"))
+    images, _, marks_applied = build_display_images(
+        row, parsed, task_name,
+        slot_ids=slot_ids,
+        overlay_3d=overlay_3d,
+        marks_mode=marks_mode,
+    )
+    return jsonify({
+        "images": [pil_to_base64(img) for img in images],
+        "marks_overlay_applied": marks_applied,
+    })
+
+
+@app.route("/api/raw_row")
+def api_raw_row():
+    path = request.args.get("path", "")
+    index = int(request.args.get("index", 0))
+    row, _ = _load_row(path, index)
+    if row is None:
+        return jsonify({"row": {}})
+    return jsonify({"row": serialize_row_raw(row)})
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -687,9 +1261,10 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="output/debug", help="Root directory containing parquet outputs")
     args = parser.parse_args()
 
-    DATA_DIR = args.data_dir
+    DATA_DIR = os.path.abspath(args.data_dir)
     tasks = discover_parquets(DATA_DIR)
-    print(f"Found {len(tasks)} task outputs in {DATA_DIR}:")
+    print(f"Data root: {data_root_name()} ({DATA_DIR})")
+    print(f"Found {len(tasks)} task outputs:")
     for t in tasks:
         print(f"  {t['label']} -> {t['path']}")
     print(f"\nStarting server at http://{args.host}:{args.port}")

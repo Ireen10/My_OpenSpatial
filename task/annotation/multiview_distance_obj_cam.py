@@ -2,13 +2,15 @@ import random
 import numpy as np
 import open3d as o3d
 from .core.base_multiview_task import BaseMultiviewAnnotationTask
+from .core.prompt_template import PromptTemplate
 from .core.visual_marker import MarkConfig
 from .core.question_type import QuestionType
+from ..prompt_templates.distance_prompt_templates import multiview_distance_obj_cam_answers
 
 
 class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
-    QUESTION_TAG = "Distance"
+    QUESTION_TAG = "Multiview Distance"
     SUB_TASKS = {
         "object_camera_distance": {"default": 1, "handler": "_generate_object_camera_distance"},
     }
@@ -57,16 +59,14 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         else:
             answer = "B"
 
-        # Build option text from answer templates
-        tpl = self.get_template("distance.obj_cam")
-        _, opt_tpl = tpl.sample()
-        opt_a = tpl._fill(opt_tpl, {"A": A_desc, "Y": close_far, "X": "View 1"})
-        opt_b = tpl._fill(opt_tpl, {"A": A_desc, "Y": close_far, "X": "View 2"})
+        opt_tpl = random.choice(multiview_distance_obj_cam_answers)
+        opt_a = PromptTemplate._fill(opt_tpl, {"A": A_desc, "Y": close_far, "X": "View 1"})
+        opt_b = PromptTemplate._fill(opt_tpl, {"A": A_desc, "Y": close_far, "X": "View 2"})
         opt_c = "distance to the spot where camera View 1 and View 2 were positioned is equal"
         options_str = f"Options: A. {opt_a}\nB. {opt_b}\nC. {opt_c}"
 
-        return self.render_prompt(
-            "distance.obj_cam_mcq",
+        return self.render_structured_prompt(
+            "multiview_distance.obj_cam_mcq",
             shared={"A": A_desc, "Y": close_far, "O": options_str, "X": answer},
         )
 
@@ -101,6 +101,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
             "view_idx": [v1, v2],
             "pointcloud": [app1.pointcloud_camera, app2.pointcloud_camera],
             "bbox_2d": [app1.bbox_2d, app2.bbox_2d],
+            "node": [node, node],
         }
         return meta, True
 
@@ -119,5 +120,10 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
         mark_type = self.marker.choose_mark_type()
         processed_images, objs = self._mark_per_view(meta, mark_type)
-        prompt = self.obj_cam_distance_prompt_func(objs[0], objs[1])
+        prompt = self.obj_cam_distance_prompt_func(*self._marked_prompt_items(meta, objs))
+        self._record_multiview_turn(
+            "object_camera_distance", "multiview_distance.obj_cam_mcq", prompt, QuestionType.MCQ, meta,
+            mark_spec=self.marker.last_mark_spec,
+            extra_slots=self._slots_from_marked(objs, labels=["A", "B"]),
+        )
         return prompt, processed_images, QuestionType.MCQ

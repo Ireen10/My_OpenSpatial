@@ -1,3 +1,11 @@
+"""
+Multiview distance: pair absolute (2 views) + N-ary farthest/closest (3–6 views).
+
+Templates:
+    multiview_distance.absolute_{m,cm}.{direct,sentence}  (stems shared with singleview; + introduction)
+    multiview_distance.{farthest,closest}.{direct,reasoning,free}
+"""
+
 import random
 from .core.base_multiview_task import BaseMultiviewAnnotationTask
 from .core.visual_marker import MarkConfig
@@ -8,11 +16,19 @@ from utils.point_cloud_utils import compute_point_cloud_distance
 
 class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
-    QUESTION_TAG = "Distance"
+    QUESTION_TAG = "Multiview Distance"
     SUB_TASKS = {
         "pair_absolute_distance":  {"default": 1, "handler": "_generate_pair_absolute_distance"},
         "multi_relative_distance": {"default": 1, "handler": "_generate_multi_relative_distance"},
     }
+    _INSTRUCTION_MODES = ("direct", "reasoning", "free")
+
+    def _pick_instruction_mode(self, graph) -> str:
+        """Reasoning/free require metric depth (same rule as singleview distance)."""
+        mode = random.choice(self._INSTRUCTION_MODES)
+        if mode in ("reasoning", "free") and not graph.is_metric_depth:
+            return "direct"
+        return mode
 
     def get_mark_config(self):
         return MarkConfig(type_weights={"mask": 0.3, "box": 0.7})
@@ -20,7 +36,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
     # ─── Prompt Functions ─────────────────────────────────────────────
 
     def pair_absolute_distance_prompt_func(self, A, B):
-        """Generate an absolute distance QA for two objects from different views."""
+        """Absolute distance QA (same stems/answers as singleview; multiview template adds introduction)."""
         A_desc, A_cloud = A
         B_desc, B_cloud = B
         A_desc, B_desc = A_desc.lower(), B_desc.lower()
@@ -29,17 +45,22 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         B_cloud = self._clean_cloud(B_cloud)
 
         unit = random.choice(["m", "cm"])
+        style = random.choice(["direct", "sentence"])
         dist = compute_point_cloud_distance(A_cloud, B_cloud)
         scaled = dist * self.scaling_factor * (100 if unit == "cm" else 1)
+        tpl = f"multiview_distance.absolute_{unit}.{style}"
 
-        return self.render_prompt(
-            f"distance.absolute_{unit}",
-            shared={"A": A_desc, "B": B_desc, "X": f"{scaled:.2f} {unit}"},
+        prompt = self.render_structured_prompt(
+            tpl,
+            shared={"A": A_desc, "B": B_desc, "X": f"{scaled:.2f}"},
         )
+        return prompt, tpl
 
-    def multi_relative_distance_prompt_func(self, obj_infos):
-        """Generate a relative distance QA for N objects from different views."""
+    def multi_relative_distance_prompt_func(self, obj_infos, graph):
+        """N-ary farthest/closest to a reference object across multi-view marks."""
         distance_type = random.choice(["closest", "farthest"])
+        mode = self._pick_instruction_mode(graph)
+        tpl = f"multiview_distance.{distance_type}.{mode}"
 
         ref_idx = random.randint(0, len(obj_infos) - 1)
         ref_desc, ref_cloud = obj_infos[ref_idx]
@@ -58,12 +79,13 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         all_descs = [d for _, d in distances]
         random.shuffle(all_descs)
 
-        return self.render_prompt(
-            f"distance.{distance_type}",
+        prompt = self.render_structured_prompt(
+            tpl,
             shared={"T": ", ".join(all_descs)},
             q_args={"X": ref_desc},
             a_args={"X": target_desc, "Y": ref_desc},
         )
+        return prompt, tpl
 
     # ─── Handlers (dispatched by SUB_TASKS) ───────────────────────────
 
@@ -74,7 +96,15 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         if result is None:
             return None
         meta, processed_images, objs = result
-        prompt = self.pair_absolute_distance_prompt_func(objs[0], objs[1])
+        prompt_items = self._marked_prompt_items(meta, objs)
+        prompt, tpl = self.pair_absolute_distance_prompt_func(
+            prompt_items[0], prompt_items[1],
+        )
+        self._record_multiview_turn(
+            "pair_absolute_distance", tpl, prompt, QuestionType.OPEN_ENDED, meta,
+            mark_spec=self.marker.last_mark_spec,
+            extra_slots=self._slots_from_marked(objs, labels=["A", "B"]),
+        )
         return prompt, processed_images, QuestionType.OPEN_ENDED
 
     def _generate_multi_relative_distance(self, graph):
@@ -82,5 +112,13 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         if result is None:
             return None
         meta, processed_images, objs = result
-        prompt = self.multi_relative_distance_prompt_func(objs)
+        prompt, tpl = self.multi_relative_distance_prompt_func(
+            self._marked_prompt_items(meta, objs), graph,
+        )
+        labels = [chr(ord("A") + i) for i in range(len(objs))]
+        self._record_multiview_turn(
+            "multi_relative_distance", tpl, prompt, QuestionType.OPEN_ENDED, meta,
+            mark_spec=self.marker.last_mark_spec,
+            extra_slots=self._slots_from_marked(objs, labels=labels),
+        )
         return prompt, processed_images, QuestionType.OPEN_ENDED

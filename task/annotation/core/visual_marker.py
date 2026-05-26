@@ -271,6 +271,29 @@ class VisualMarker:
                 obj[2] if len(obj) > 2 else None,
                 obj[3] if len(obj) > 3 else None)
 
+    def plan_mark(
+        self,
+        objs: list = None,
+        mark_type: str = None,
+        view_idx: int = 0,
+        labels: List[str] = None,
+        points: list = None,
+    ) -> Tuple[dict, list]:
+        """
+        Build mark_spec v2 without rendering (see mark_spec.py).
+
+        Returns (mark_spec, marked_info) in the same shape as mark_objects().
+        """
+        from .mark_spec import plan_object_marks, plan_point_marks
+
+        if points is not None:
+            spec, color_name = plan_point_marks(self, points, labels=labels)
+            return spec, color_name
+        spec, marked_info = plan_object_marks(
+            self, objs, mark_type=mark_type, view_idx=view_idx, labels=labels,
+        )
+        return spec, marked_info
+
     def mark_objects(
         self,
         image: Image.Image,
@@ -279,75 +302,26 @@ class VisualMarker:
         view_idx: int = 0,
         labels: List[str] = None,
         points: list = None,
+        preprocess_row: dict = None,
     ) -> Tuple[dict, list]:
         """
-        Apply visual marks to objects on an image, optionally with text labels.
+        Plan mark_spec then render. Backward-compatible return shape.
 
-        Colors are consumed from the queue: each object (or point-mode call)
-        pops one color from self.color_queue, so consecutive calls get
-        different colors without manual queue manipulation.
-
-        Two modes:
-        1. Object mode (default): pass `objs` — extracts positions from
-           masks/boxes, one color per object.
-        2. Point mode: pass `points` — draws at explicit [u, v] coordinates,
-           all points share a single color from the queue.
-
-        Args:
-            image: PIL Image to draw on.
-            objs: List of SceneNode objects or legacy tuples.
-            mark_type: Override mark type. If None, uses choose_mark_type().
-                       Ignored when `points` is provided.
-            view_idx: View index for extracting appearance from SceneNode (default 0).
-            labels: Optional list of label strings (e.g., ["A", "B", "C"]).
-            points: Optional list of [u, v] pixel coordinates.
-
-        Returns:
-            (processed_image_dict, marked_info)
-            Object mode: marked_info = [(tag_with_color, passthrough), ...]
-            Point mode:  marked_info = color_name (str)
+        preprocess_row: optional parquet row for mask_ref resolution at render time.
         """
-        # ── Point mode: explicit UV coordinates, single color ──
-        if points is not None:
-            color_name, color = self.pop_color()
-            colors = [[color_name, color]] * len(points)
-            overlay = draw_points_on_image(image, points, colors, labels=labels)
-            return {"bytes": convert_pil_to_bytes(Image.fromarray(overlay))}, color_name
+        from .mark_spec import render_mark
 
-        # ── Object mode: extract positions from masks/boxes ──
-        if mark_type is None:
-            mark_type = self.choose_mark_type()
+        spec, marked_info = self.plan_mark(
+            objs=objs,
+            mark_type=mark_type,
+            view_idx=view_idx,
+            labels=labels,
+            points=points,
+        )
+        self._last_mark_spec = spec
+        rendered = render_mark(image, spec, labels=labels, preprocess_row=preprocess_row)
+        return rendered, marked_info
 
-        marked_objs = []
-        colors_to_draw = []
-        geometries = []
-
-        for obj in objs:
-            tag, passthrough, bbox_2d, mask_pil = self._extract(obj, view_idx)
-            color_name, color = self.pop_color()
-
-            if mark_type == "mask":
-                geometries.append(np.array(mask_pil))
-            elif mark_type == "point":
-                mask = np.array(mask_pil)
-                ys, xs = np.where(mask > 0)
-                if len(xs) == 0:
-                    continue
-                cx, cy = int(np.mean(xs)), int(np.mean(ys))
-                nearest = np.argmin((xs - cx) ** 2 + (ys - cy) ** 2)
-                geometries.append([int(xs[nearest]), int(ys[nearest])])
-            else:  # box
-                geometries.append(np.array(bbox_2d))
-
-            marked_objs.append((tag + f"-({color_name} {mark_type})", passthrough))
-            colors_to_draw.append([color_name, color])
-
-        # Dispatch to the appropriate draw function (each handles labels internally)
-        if mark_type == "mask":
-            overlay = draw_masks_on_image(image, geometries, colors_to_draw, labels=labels)
-        elif mark_type == "point":
-            overlay = draw_points_on_image(image, geometries, colors_to_draw, labels=labels)
-        else:
-            overlay = draw_boxes_on_image(image, geometries, colors_to_draw, labels=labels)
-
-        return {"bytes": convert_pil_to_bytes(Image.fromarray(overlay))}, marked_objs
+    @property
+    def last_mark_spec(self) -> Optional[dict]:
+        return getattr(self, "_last_mark_spec", None)

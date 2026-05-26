@@ -1,4 +1,4 @@
-"""JSONL-backed dataset hook for OpenSpatial pipelines (stub — customize load/save)."""
+"""JSONL upstream bundle I/O for OpenSpatial pipelines (§4.7 / M7)."""
 
 from __future__ import annotations
 
@@ -15,46 +15,60 @@ from dataset.image_base import (
     ImageBaseDataset,
     _resolve_asset_value,
 )
+from dataset.upstream_export import (
+    MANIFEST_FILENAME,
+    SAMPLES_FILENAME,
+    UPSTREAM_SCHEMA_VERSION,
+    load_manifest,
+    merged_row_to_upstream_record,
+    read_upstream_jsonl,
+    write_upstream_bundle,
+)
 
-# Pipeline always calls save_data(..., "data.parquet"); this hook writes JSONL instead.
 PIPELINE_SAVE_BASENAME = "data.jsonl"
 
 
 class JsonlBaseDataset(ImageBaseDataset):
     """
-    Pipeline dataset hook: in-memory table remains a pandas DataFrame; persistence is JSONL.
+    Pipeline dataset hook for upstream JSONL + tar bundles.
 
-    YAML:
-        dataset:
-          modality: image
-          input_dataset_name: image_base
-          output_dataset_name: jsonl_base
-          data_dir: /path/to/input.parquet
-          output_path: data.jsonl             # optional; default derived from save path
+    Load:
+      - ``samples.jsonl`` (or any ``.jsonl`` file)
+      - export directory containing ``manifest.json`` + ``samples.jsonl``
+      - merged ``data.parquet`` (convenience: same rows as aggregate output)
+
+    Save (``export_bundle: true`` in YAML):
+      - ``export/samples.jsonl``, ``export/images.tar``, ``export/manifest.json``
+      - optional pipeline index at ``data.jsonl`` (one summary line)
+
+    YAML (decoupled with ComposedDataset):
+        input_dataset_name: image_base
+        output_dataset_name: jsonl_base
+        export_bundle: true
+        export_dir: export
     """
 
     MODALITY = "image"
 
     def __init__(self, cfg, *, _skip_load=False):
-        if not cfg.data_dir:
+        if not cfg.data_dir and not _skip_load:
             raise ValueError("cfg.data_dir is required")
         self.cfg = cfg
-        self.data_dir = cfg.data_dir
+        self.data_dir = getattr(cfg, "data_dir", None)
         self.raw_data_root = getattr(cfg, "raw_data_root", None)
         if self.raw_data_root:
             self.raw_data_root = os.path.abspath(self.raw_data_root)
         self.output_path = getattr(cfg, "output_path", None) or PIPELINE_SAVE_BASENAME
+        self.export_bundle = bool(getattr(cfg, "export_bundle", False))
+        self.export_dir = getattr(cfg, "export_dir", "export")
+        self.schema_version = getattr(cfg, "schema_version", UPSTREAM_SCHEMA_VERSION)
+        self.pipeline_run_id = getattr(cfg, "pipeline_run_id", None)
         self.data = None if _skip_load else self._load()
-
-    # ------------------------------------------------------------------
-    # Load (stub — override in subclass or edit here)
-    # ------------------------------------------------------------------
 
     def _load(self) -> pd.DataFrame:
         return self._load_from_path(self.data_dir)
 
     def _load_from_path(self, path: str) -> pd.DataFrame:
-        """Load records into a DataFrame. Extend for your on-disk JSONL schema."""
         path = str(path)
         if HF_REPO_PATTERN.match(path):
             raise NotImplementedError(
@@ -65,29 +79,48 @@ class JsonlBaseDataset(ImageBaseDataset):
         if not p.exists():
             raise FileNotFoundError(path)
 
+        if p.is_dir():
+            return self._load_export_dir(p)
         if p.suffix.lower() == ".jsonl":
-            df = self._read_jsonl(p)
-        elif p.suffix.lower() == ".parquet":
-            # Convenience: reuse preprocessing parquet until custom JSONL input is ready.
+            return self._dataframe_from_upstream_records(read_upstream_jsonl(p))
+        if p.suffix.lower() == ".parquet":
             df = pd.read_parquet(p, engine="pyarrow", dtype_backend="pyarrow")
-        else:
-            raise NotImplementedError(
-                f"JsonlBaseDataset._load_from_path: unsupported input '{path}'. "
-                "Implement .jsonl (or add formats here)."
+            return self._apply_raw_data_root(df)
+
+        raise NotImplementedError(
+            f"JsonlBaseDataset._load_from_path: unsupported input '{path}'."
+        )
+
+    @staticmethod
+    def _load_export_dir(directory: Path) -> pd.DataFrame:
+        manifest_path = directory / MANIFEST_FILENAME
+        jsonl_path = directory / SAMPLES_FILENAME
+        if manifest_path.is_file() and jsonl_path.is_file():
+            load_manifest(directory)
+            return JsonlBaseDataset._dataframe_from_upstream_records(
+                read_upstream_jsonl(jsonl_path)
             )
+        for child in sorted(directory.glob("*.jsonl")):
+            return JsonlBaseDataset._dataframe_from_upstream_records(
+                read_upstream_jsonl(child)
+            )
+        raise FileNotFoundError(
+            f"No upstream bundle in {directory} (expected {MANIFEST_FILENAME} + {SAMPLES_FILENAME})"
+        )
 
-        return self._apply_raw_data_root(df)
-
-    def _read_jsonl(self, path: Path) -> pd.DataFrame:
-        """Parse JSONL file into a DataFrame (stub — customize field parsing)."""
-        records: list[dict[str, Any]] = []
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                records.append(json.loads(line))
-        return pd.DataFrame(records)
+    @staticmethod
+    def _dataframe_from_upstream_records(records: list[dict]) -> pd.DataFrame:
+        rows = []
+        for rec in records:
+            rows.append({
+                "schema_version": rec.get("schema_version"),
+                "sample_id": rec.get("sample_id"),
+                "merge_group_key": rec.get("merge_group_key"),
+                "image_refs": rec.get("image_refs"),
+                "messages_json": json.dumps(rec.get("messages") or [], ensure_ascii=False),
+                "metadata_json": json.dumps(rec.get("metadata") or {}, ensure_ascii=False),
+            })
+        return pd.DataFrame(rows)
 
     def _apply_raw_data_root(self, df: pd.DataFrame) -> pd.DataFrame:
         if not self.raw_data_root or df is None or len(df) == 0:
@@ -106,12 +139,7 @@ class JsonlBaseDataset(ImageBaseDataset):
         except Exception as exc:
             raise ValueError(f"Failed to load data: {data_path}") from exc
 
-    # ------------------------------------------------------------------
-    # Save (stub — override serialization here)
-    # ------------------------------------------------------------------
-
     def _resolve_jsonl_output_path(self, data_path: str) -> str:
-        """Map pipeline's data.parquet path to JSONL output path."""
         if self.output_path and os.path.isabs(self.output_path):
             return self.output_path
         if self.output_path and "/" not in self.output_path and "\\" not in self.output_path:
@@ -120,15 +148,19 @@ class JsonlBaseDataset(ImageBaseDataset):
             return data_path[: -len(".parquet")] + ".jsonl"
         return data_path if data_path.endswith(".jsonl") else data_path + ".jsonl"
 
+    def _resolve_export_root(self, data_path: str) -> Path:
+        rel = self.export_dir or "export"
+        if os.path.isabs(rel):
+            return Path(rel)
+        return Path(os.path.dirname(data_path)) / rel
+
     @staticmethod
     def _row_to_jsonable(row: dict[str, Any]) -> dict[str, Any]:
-        """Convert one DataFrame row to a JSON-serializable dict (stub)."""
-        # TODO: custom encoding (bytes, numpy, PIL, nested structures, etc.)
-        return row
+        if "metadata_json" in row or "messages_json" in row:
+            return merged_row_to_upstream_record(row)
+        return {k: v for k, v in row.items() if not str(k).startswith("_")}
 
     def _serialize_record(self, record: dict[str, Any]) -> str:
-        """Serialize one record to a single JSONL line (stub)."""
-        # TODO: user-defined JSONL schema / field filtering
         payload = self._row_to_jsonable(record)
         return json.dumps(payload, ensure_ascii=False, default=str)
 
@@ -140,21 +172,27 @@ class JsonlBaseDataset(ImageBaseDataset):
         batch_size: int = 1000,
         keep_data_columns: Optional[list[str]] = None,
     ) -> None:
-        """
-        Write pipeline output as JSONL instead of Parquet.
-
-        annotation_flag / batch_size / keep_data_columns: reserved for parity with
-        ImageBaseDataset (implement if you need flattening or sharded JSONL).
-        """
         if data is None:
             raise ValueError("Data to save is None")
         if not isinstance(data, pd.DataFrame):
             raise ValueError("Only pandas DataFrame is supported")
 
+        if self.export_bundle:
+            export_root = self._resolve_export_root(data_path)
+            summary = write_upstream_bundle(
+                data,
+                export_root,
+                schema_version=self.schema_version,
+                pipeline_run_id=self.pipeline_run_id,
+            )
+            index_path = self._resolve_jsonl_output_path(data_path)
+            os.makedirs(os.path.dirname(index_path) or ".", exist_ok=True)
+            with open(index_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(summary, ensure_ascii=False) + "\n")
+            return
+
         out_path = self._resolve_jsonl_output_path(data_path)
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-
-        # TODO: honor annotation_flag via flatten_annotations + sharded writers
         with open(out_path, "w", encoding="utf-8") as f:
             for record in data.to_dict(orient="records"):
                 f.write(self._serialize_record(record) + "\n")

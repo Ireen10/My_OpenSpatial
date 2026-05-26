@@ -1,7 +1,57 @@
 """3D bounding box geometry utilities."""
 
+import json
+
 import numpy as np
 from scipy.spatial.transform import Rotation as SciRotation
+
+# Open-ended 3D grounding prompt: roll, pitch, yaw in (-pi, pi] radians.
+EULER_GROUNDING_ORDER = "zxy"
+
+# Relative size: skip pairs when max(D_diag)/min(D_diag) < this threshold.
+RELATIVE_SIZE_DIAG_RATIO_MIN = 1.2
+
+
+def box_3d_diag_extent(box_3d_world) -> float:
+    """Spatial diagonal of 3D box extent: D_diag = sqrt(L^2 + W^2 + H^2)."""
+    L, W, H = box_3d_world[3:6]
+    return float(np.sqrt(L * L + W * W + H * H))
+
+
+def wrap_angle_to_pi(angle: float) -> float:
+    """Wrap one angle to (-pi, pi] radians."""
+    return float((angle + np.pi) % (2 * np.pi) - np.pi)
+
+
+def normalize_euler_angles(rotation, euler_order: str = EULER_GROUNDING_ORDER) -> list:
+    """Return (roll, pitch, yaw) list with each component in (-pi, pi]."""
+    rot = SciRotation.from_euler(euler_order, list(rotation), degrees=False)
+    euler = rot.as_euler(euler_order, degrees=False)
+    return [wrap_angle_to_pi(float(a)) for a in euler]
+
+
+def format_bbox_3d_for_grounding(box_params, euler_order: str = EULER_GROUNDING_ORDER) -> list:
+    """9-param camera-frame box with center/size rounded and euler in (-pi, pi]."""
+    if box_params is None or len(box_params) < 9:
+        return None
+    center = [round(float(v), 2) for v in box_params[:3]]
+    size = [round(float(v), 2) for v in box_params[3:6]]
+    euler = [round(v, 2) for v in normalize_euler_angles(box_params[6:9], euler_order)]
+    return center + size + euler
+
+
+def format_grounding_answer_json(entries: list) -> str:
+    """
+    Serialize GT as a JSON array: [{"label": str, "bbox_3d": [9 floats]}, ...].
+
+    Matches grounding_json_output_instruction (double-quoted keys, outer ``[]``).
+    """
+    payload = [
+        {"label": item["label"], "bbox_3d": item["bbox_3d"]}
+        for item in entries
+        if item.get("bbox_3d") is not None
+    ]
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def compute_box_3d_points(size):
@@ -81,8 +131,11 @@ def convert_box_3d_world_to_camera(box_params, pose, euler_order='zxy'):
 
     cam_transform = np.linalg.inv(pose) @ transform
     cam_center = cam_transform[:3, 3]
-    cam_euler = SciRotation.from_matrix(cam_transform[:3, :3]).as_euler(euler_order, degrees=False)
-    return list(cam_center) + list(size) + list(cam_euler)
+    cam_euler = normalize_euler_angles(
+        SciRotation.from_matrix(cam_transform[:3, :3]).as_euler(euler_order, degrees=False),
+        euler_order,
+    )
+    return list(cam_center) + list(size) + cam_euler
 
 
 def check_box_2d_overlap(box1_xy, box2_xy):

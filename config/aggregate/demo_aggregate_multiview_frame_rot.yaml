@@ -1,0 +1,33 @@
+# Aggregate 5 multiview frame_rot annotation tasks (M4/M5 L3).
+#
+# Prerequisite:
+#   python run.py --config config/annotation/demo_multiview_all_frame_rot.yaml --output_dir E:/GitRepo/OpenSpatial/output/frame_rot
+#
+# Usage:
+#   python run.py --config config/aggregate/demo_aggregate_multiview_frame_rot.yaml --output_dir E:/GitRepo/OpenSpatial/output/frame_rot
+
+dataset:
+  modality: image
+  dataset_name: image_base
+  data_dir: E:/GitRepo/OpenSpatial/output/frame_rot/base_pipeline_demo_preprocessing_embodiedscan/group_stage/group/data.parquet
+
+pipeline:
+  file_name: base_pipeline
+  class_name: BasePipeline
+  output_dir: E:/GitRepo/OpenSpatial/output/frame_rot/base_pipeline_demo_aggregate_multiview_frame_rot
+
+  stages:
+    aggregate_stage:
+      -
+        file_name: sample_aggregator
+        method: SampleAggregator
+        input_tasks:
+          - ../base_pipeline_demo_multiview_all_frame_rot/annotation_stage/multiview_distance
+          - ../base_pipeline_demo_multiview_all_frame_rot/annotation_stage/multiview_size
+          - ../base_pipeline_demo_multiview_all_frame_rot/annotation_stage/multiview_correspondence
+          - ../base_pipeline_demo_multiview_all_frame_rot/annotation_stage/multiview_distance_obj_cam
+          - ../base_pipeline_demo_multiview_all_frame_rot/annotation_stage/multiview_object_position
+        dedup_within_task: true
+        merge_by_visual_input_group: true
+        dedup_keep_policy: semantic_first
+        output_dir: aggregate_stage/merged_samples

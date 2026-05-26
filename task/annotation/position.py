@@ -1,17 +1,7 @@
 """
-Position annotation task: height comparison & proximity.
+Position annotation task: height comparison & near/far (proximity).
 
-Sub-tasks:
-    height_comparison — compare the vertical position (z-max) of two objects,
-                        randomly ask "which is higher/lower" in OE or MCQ form.
-    proximity         — classify object pairs as "next to" or "far away" based on
-                        the ratio of point-cloud distance to average object extent,
-                        then generate one QA per category.
-
-Templates used:
-    position.height_higher  — [O] options, [X] answer
-    position.height_lower   — [O] options, [X] answer
-    position.next_far       — [A]/[B] object names, [O] options, [X] answer
+Templates: position.height_higher | height_lower | near_far (MCQ, direct: letter + option text)
 """
 
 import random
@@ -23,124 +13,116 @@ from utils.box_utils import compute_box_3d_corners
 from .core.question_type import QuestionType
 
 from utils.point_cloud_utils import compute_point_cloud_distance
+from utils.image_utils import convert_pil_to_bytes
 
 
 class AnnotationGenerator(BaseAnnotationTask):
 
-    QUESTION_TAG = "Position"
+    QUESTION_TAG = "Singleview Position"
     SUB_TASKS = {
         "height_comparison": {"default": 1, "handler": "_generate_height_comparison"},
         "proximity":         {"default": 1, "handler": "_generate_proximity"},
     }
 
+    _NEAR_LABEL = "near each other"
+    _FAR_LABEL = "far from each other"
+
+    def __init__(self, args):
+        super().__init__(args)
+        self.task_name = args.get("task_name") or args.get("file_name", "position")
+
     def get_mark_config(self):
         return MarkConfig(mark_types=["mask", "box"])
 
-    # ── helpers ──────────────────────────────────────────────────────
+    @staticmethod
+    def _format_mcq_answer(letter: str, option_text: str) -> str:
+        return f"{letter}. {option_text}"
 
     def _get_z_max(self, node):
-        """Compute the maximum Z coordinate from the 3D bounding box corners."""
         box_3d_world = node.box_3d_world
         corners = compute_box_3d_corners(np.array(box_3d_world[:3]), np.array(box_3d_world[3:6]), box_3d_world[6:])
         return np.max(corners[:, -1])
 
-    # ── prompt functions (called by mark_and_prompt) ─────────────────
-
-    def height_comparison_prompt_func(self, A, B, question_type=QuestionType.OPEN_ENDED):
-        """Generate a height comparison QA for two marked objects.
-
-        Randomly picks higher/lower template. Format (OE/MCQ) is controlled
-        by the question_type parameter passed from the handler.
-        """
+    def height_comparison_prompt_func(self, A, B):
         A_desc, A_node = A
         B_desc, B_node = B
         A_desc, B_desc = A_desc.lower(), B_desc.lower()
 
         is_above = self._get_z_max(A_node) > self._get_z_max(B_node)
 
-        # randomly ask "higher" or "lower"
         if random.random() < 0.5:
-            tpl_name = "position.height_higher"
+            base_tpl = "position.height_higher"
             target = A_desc if is_above else B_desc
         else:
-            tpl_name = "position.height_lower"
+            base_tpl = "position.height_lower"
             target = A_desc if not is_above else B_desc
 
-        if question_type == QuestionType.OPEN_ENDED:
-            options = f"The {A_desc} or the {B_desc}?"
-            return self.render_prompt(tpl_name, shared={"O": options, "X": target})
-        else:
-            options = f"\nOptions: A:The {A_desc} B:The {B_desc}"
-            answer = "A" if target == A_desc else "B"
-            return self.render_prompt(tpl_name, shared={"O": options, "X": answer})
+        opt_a = f"The {A_desc}"
+        opt_b = f"The {B_desc}"
+        options = f"\nOptions: A. {opt_a} B. {opt_b}"
+        letter = "A" if target == A_desc else "B"
+        option_text = opt_a if letter == "A" else opt_b
+        answer = self._format_mcq_answer(letter, option_text)
 
-    def proximity_prompt_func(self, A, B, next_or_far):
-        """Generate a proximity MCQ for two marked objects.
+        prompt = self.render_structured_prompt(
+            base_tpl, shared={"O": options, "X": answer},
+        )
+        return prompt, base_tpl
 
-        Options are shuffled so "next to" / "far away" appear in random order.
-        """
-        A_desc, A_node = A
-        B_desc, B_node = B
-        A_desc, B_desc = A_desc.lower(), B_desc.lower()
+    def proximity_prompt_func(self, A, B, near_or_far):
+        A_desc, B_desc = A[0].lower(), B[0].lower()
 
-        # shuffle option order
-        next_far = ["next to each other", "far away from each other"]
+        labels = [self._NEAR_LABEL, self._FAR_LABEL]
         if random.random() < 0.5:
-            next_far = next_far[::-1]
+            labels = labels[::-1]
 
-        options = f"\nOptions: A: {next_far[0]} B: {next_far[1]}"
+        options = f"\nOptions: A. {labels[0]} B. {labels[1]}"
+        tpl_name = "position.near_far"
 
-        if next_or_far == "next":
-            answer = "A" if next_far[0] == "next to each other" else "B"
+        if near_or_far == "near":
+            letter = "A" if labels[0] == self._NEAR_LABEL else "B"
         else:
-            answer = "A" if next_far[0] == "far away from each other" else "B"
+            letter = "A" if labels[0] == self._FAR_LABEL else "B"
+        option_text = labels[0] if letter == "A" else labels[1]
+        answer = self._format_mcq_answer(letter, option_text)
 
-        return self.render_prompt("position.next_far", shared={"A": A_desc, "B": B_desc, "O": options, "X": answer})
-
-    # ── handlers (dispatched by SUB_TASKS) ───────────────────────────
+        prompt = self.render_structured_prompt(
+            tpl_name,
+            shared={"A": A_desc, "B": B_desc, "O": options, "X": answer},
+        )
+        return prompt, tpl_name
 
     def _generate_height_comparison(self, graph):
-        """Sample two objects and ask which is higher/lower (50% OE / 50% MCQ)."""
         nodes = [n for n in graph.get_object_nodes() if n.box_3d_world is not None]
         if len(nodes) < 2:
             return None
         image = graph.primary_view.image
         sampled = random.sample(nodes, 2)
+        qtype = QuestionType.MCQ
 
-        # decide format before calling prompt func so QuestionType stays in sync
-        if random.random() < 0.5:
-            qtype = QuestionType.OPEN_ENDED
-            prompt_args = {"question_type": QuestionType.OPEN_ENDED}
+        if random.random() < 0.8:
+            processed_image, marked = self.mark_objects_for_qa(image, sampled, mark_prob=1.0)
         else:
-            qtype = QuestionType.MCQ
-            prompt_args = {"question_type": QuestionType.MCQ}
+            processed_image = {"bytes": convert_pil_to_bytes(image)}
+            marked = [(n.tag, n) for n in sampled]
 
-        prompt, processed_image = self.mark_and_prompt(
-            sampled, image, self.height_comparison_prompt_func,
-            mark_prob=0.8, prompt_args=prompt_args,
+        prompt, tpl = self.height_comparison_prompt_func(marked[0], marked[1])
+        self._record_turn(
+            "height_comparison", tpl, prompt, qtype,
+            mark_spec=self.marker.last_mark_spec,
+            extra_slots=self._slots_from_marked(marked),
         )
         return prompt, processed_image, qtype
 
     def _generate_proximity(self, graph):
-        """Classify all object pairs into "next" / "far" by size-relative
-        distance ratio, then sample one pair from each category.
-
-        Ratio = point_cloud_min_distance / avg_object_extent
-            < 0.5  → "next to each other"
-            > 2.0  → "far away from each other"
-
-        Returns list[(prompt, image, qtype)], at most 2 items (one next, one far).
-        """
         nodes = [n for n in graph.get_object_nodes() if n.box_3d_world is not None]
         if len(nodes) < 2:
             return None
-        # Cap to avoid O(n²) blowup in pair enumeration
         if len(nodes) > 8:
             nodes = random.sample(nodes, 8)
         image = graph.primary_view.image
 
-        # classify pairs by distance / avg_extent ratio
-        next_candidates, far_candidates = [], []
+        near_candidates, far_candidates = [], []
         for nodeA, nodeB in combinations(nodes, 2):
             if nodeA.tag == nodeB.tag:
                 continue
@@ -153,28 +135,41 @@ class AnnotationGenerator(BaseAnnotationTask):
             ])
             ratio = distance / avg_extent if avg_extent > 0 else float('inf')
             if ratio < 0.5:
-                next_candidates.append((nodeA, nodeB))
+                near_candidates.append((nodeA, nodeB))
             elif ratio > 2.0:
                 far_candidates.append((nodeA, nodeB))
 
-        if not next_candidates and not far_candidates:
+        if not near_candidates and not far_candidates:
             return None
 
-        # one QA per category
         results = []
-        if next_candidates:
-            pair = random.choice(next_candidates)
-            prompt, img = self.mark_and_prompt(
-                pair, image, self.proximity_prompt_func,
-                mark_prob=0.5, prompt_args={"next_or_far": "next"}
+        if near_candidates:
+            pair = random.choice(near_candidates)
+            if random.random() < 0.5:
+                processed_image, marked = self.mark_objects_for_qa(image, list(pair), mark_prob=1.0)
+            else:
+                processed_image = {"bytes": convert_pil_to_bytes(image)}
+                marked = [(n.tag, n) for n in pair]
+            prompt, tpl = self.proximity_prompt_func(marked[0], marked[1], "near")
+            self._record_turn(
+                "proximity", tpl, prompt, QuestionType.MCQ,
+                mark_spec=self.marker.last_mark_spec,
+                extra_slots=self._slots_from_marked(marked),
             )
-            results.append((prompt, img, QuestionType.MCQ))
+            results.append((prompt, processed_image, QuestionType.MCQ))
         if far_candidates:
             pair = random.choice(far_candidates)
-            prompt, img = self.mark_and_prompt(
-                pair, image, self.proximity_prompt_func,
-                mark_prob=0.5, prompt_args={"next_or_far": "far"}
+            if random.random() < 0.5:
+                processed_image, marked = self.mark_objects_for_qa(image, list(pair), mark_prob=1.0)
+            else:
+                processed_image = {"bytes": convert_pil_to_bytes(image)}
+                marked = [(n.tag, n) for n in pair]
+            prompt, tpl = self.proximity_prompt_func(marked[0], marked[1], "far")
+            self._record_turn(
+                "proximity", tpl, prompt, QuestionType.MCQ,
+                mark_spec=self.marker.last_mark_spec,
+                extra_slots=self._slots_from_marked(marked),
             )
-            results.append((prompt, img, QuestionType.MCQ))
+            results.append((prompt, processed_image, QuestionType.MCQ))
 
         return results

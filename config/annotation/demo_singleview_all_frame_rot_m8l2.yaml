@@ -1,0 +1,104 @@
+# M8 L2 review — singleview annotation (structured templates).
+# Does NOT overwrite base_pipeline_demo_singleview_all_frame_rot.
+#
+# Output: output/frame_rot/base_pipeline_demo_singleview_all_frame_rot_m8l2/
+#
+# Usage:
+#   python run.py --config config/annotation/demo_singleview_all_frame_rot_m8l2.yaml --output_dir E:/GitRepo/OpenSpatial/output/frame_rot
+#   python visualize_server.py --data_dir output/frame_rot/base_pipeline_demo_singleview_all_frame_rot_m8l2 --port 8890
+
+dataset:
+  modality: image
+  dataset_name: image_base
+  data_dir: &singleview_input E:/GitRepo/OpenSpatial/output/frame_rot/base_pipeline_demo_preprocessing_embodiedscan/scene_fusion_stage/depth_back_projection/data.parquet
+
+pipeline:
+  file_name: base_pipeline
+  class_name: BasePipeline
+
+  stages:
+    annotation_stage:
+      -
+        file_name: distance
+        method: AnnotationGenerator
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          absolute_distance: 1
+          relative_distance: 1
+        emit_metadata: true
+        emit_marked_images: false
+        keep_data_columns: &keep_cols
+          - messages
+          - QA_images
+          - question_tags
+          - question_types
+          - metadata
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:
+
+      -
+        file_name: depth_annotation
+        method: AnnotationGenerator
+        depends_on: *singleview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          depth_ordering_oe: 1
+          depth_ordering_mcq: 1
+          depth_choice_oe: 1
+          depth_choice_mcq: 1
+        emit_metadata: true
+        emit_marked_images: false
+        keep_data_columns: *keep_cols
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:
+
+      -
+        file_name: size
+        method: AnnotationGenerator
+        depends_on: *singleview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          absolute_size: 1
+          relative_size: 1
+        emit_metadata: true
+        emit_marked_images: false
+        keep_data_columns: *keep_cols
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:
+
+      -
+        file_name: position
+        method: AnnotationGenerator
+        depends_on: *singleview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          height_comparison: 1
+          proximity: 1
+        emit_metadata: true
+        emit_marked_images: false
+        keep_data_columns: *keep_cols
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:
+
+      -
+        file_name: 3d_grounding
+        method: ThreeDGroundingGenerator
+        depends_on: *singleview_input
+        scaling_factor: 1
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        sub_tasks:
+          grounding_oe: 1
+        emit_metadata: true
+        emit_marked_images: false
+        keep_data_columns: *keep_cols
+        use_multi_processing: false
+        num_workers: 8
+        output_dir:

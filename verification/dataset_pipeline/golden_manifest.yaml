@@ -1,0 +1,13 @@
+# Frozen preprocess input for annotation verification (M1+).
+# Update paths to your machine; keep row ids stable once set.
+
+schema_version: "1"
+# Not lowres — use frame_rot preprocess output (user-confirmed).
+preprocess_parquet: "E:/GitRepo/OpenSpatial/output/frame_rot/base_pipeline_demo_preprocessing_embodiedscan/scene_fusion_stage/depth_back_projection/data.parquet"
+raw_data_root: "E:/GitRepo/OpenSpatial/data_root/EmbodiedScan/data"
+
+# Subset for G1-golden (10-30 rows); empty = verify script may take head(N)
+golden_row_ids: []
+
+g1_max_rows: 20
+g2_max_rows: 100
