@@ -38,12 +38,6 @@ import visualize_server as ann_viz
 app = Flask(__name__)
 DATA_DIR = "output/frame_rot"
 
-# Coarse task families for filters (not sub_task / template variants).
-_TASK_FAMILY_ALIASES = {
-    "depth_annotation": "depth",
-    "object_position": "position",
-}
-
 # (path, kind, bundle_root) -> cached rows + precomputed filter facts
 _SOURCE_CACHE: Dict[Tuple[str, str, str], dict] = {}
 
@@ -51,16 +45,10 @@ FilterFacts = Tuple[int, FrozenSet[str]]
 
 
 def _coarse_task_key(name: str) -> str:
-    """Map task_name / source_tasks entry to a coarse family (e.g. distance, depth)."""
+    """Normalize task_name / source_tasks entry without changing task category."""
     s = (name or "").strip().lower()
     if not s:
         return ""
-    if s in _TASK_FAMILY_ALIASES:
-        return _TASK_FAMILY_ALIASES[s]
-    if s.startswith("multiview_"):
-        s = s[len("multiview_") :]
-    if s.endswith("_annotation"):
-        s = s[: -len("_annotation")]
     return s
 
 

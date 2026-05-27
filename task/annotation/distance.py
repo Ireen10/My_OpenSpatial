@@ -136,9 +136,9 @@ class AnnotationGenerator(BaseAnnotationTask):
         ) = self._resolve_relative_distance(A, B, C)
 
         if random.random() < 0.5:
-            polarity, winner = "far", farther
+            polarity, winner, other = "far", farther, closer
         else:
-            polarity, winner = "close", closer
+            polarity, winner, other = "close", closer, farther
 
         mode = pick_relative_distance_mode(is_metric_depth=graph.is_metric_depth)
         tpl = f"distance.relative_{polarity}.{mode}"
@@ -151,6 +151,7 @@ class AnnotationGenerator(BaseAnnotationTask):
             "E": self._fmt_dist_m(dist_BC),
             "O": "",
             "X": self._title_desc(winner),
+            "G": self._title_desc(other),
         }
 
         prompt = self.render_structured_prompt(
@@ -188,6 +189,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         option_answer = self._mcq_option_label(
             target_tag, A_desc, B_desc,
         )
+        other_desc = B_desc if target_tag == "A" else A_desc
         anchor = self._title_desc(C_desc)
         if polarity == "far":
             premise = f"{self._title_desc(winner_desc)} is farther from the {anchor}"
@@ -200,6 +202,7 @@ class AnnotationGenerator(BaseAnnotationTask):
             "D": self._fmt_dist_m(dist_AC),
             "E": self._fmt_dist_m(dist_BC),
             "F": self._title_desc(winner_desc),
+            "G": self._title_desc(other_desc),
             "P": premise,
             "O": options,
             "X": option_answer,

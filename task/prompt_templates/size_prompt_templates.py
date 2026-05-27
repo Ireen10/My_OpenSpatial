@@ -17,7 +17,7 @@ size_predicate_questions_single_view = [
 ]
 
 size_answers_single_view = [
-    "[X]",
+    "[X].",
     "The largest dimension of the [A] is [X].",
     "The [A] measures approximately [X] at its longest side.",
 ]
@@ -35,7 +35,7 @@ height_predicate_questions_single_view = [
 ]
 
 height_answers_single_view = [
-    "[X]",
+    "[X].",
     "The height of the [A] is [X].",
     "The [A] stands approximately [X] tall.",
 ]
@@ -180,7 +180,7 @@ multiview_size_biggest_direct_answers = [
 
 multiview_size_biggest_sentence_answers = [
     "The [X] is the biggest among the objects.",
-    "Out of all the objects, the [X] has the largest size.",
+    "Among the objects, the [X] is larger than any of the others.",
     "In terms of size, the [X] is the biggest one.",
 ]
 
@@ -198,7 +198,7 @@ multiview_size_smallest_direct_answers = [
 
 multiview_size_smallest_sentence_answers = [
     "The [X] is the smallest among the objects.",
-    "Out of all the objects, the [X] has the least size.",
+    "Among the objects, the [X] is smaller than any of the others.",
     "In terms of size, the [X] is the smallest one.",
 ]
 from .register_structured import (

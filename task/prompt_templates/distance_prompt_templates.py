@@ -50,33 +50,32 @@ positional_far_mcq_questions = [
 ]
 
 positional_far_oe_direct_answers = [
-    "[X].",
-    "The [X] is farther from the [C].",
+    "[X]."
 ]
 
 positional_far_oe_reasoning_metric_answers = [
     "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. Therefore, [X] is farther from [C].",
-    "[X] is farther from [C]: the distance to [A] is about [D] and to [B] is about [E].",
+    "Given these two distances, [X] is farther from [C].",
 ]
 positional_far_oe_reasoning_semantic_answers = [
     "The [X] is farther from the [C].",
-    "[X] is farther from the [C].",
+    "The [X] is farther from the [C] than the [G] is.",
 ]
 
 positional_far_mcq_direct_answers = ["[X]", "[X]."]
 positional_far_mcq_reasoning_metric_answers = [
-    "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. [X]",
+    "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. Therefore, the correct option is [X].",
 ]
 positional_far_mcq_reasoning_semantic_answers = [
-    "The [F] is farther from the [C]. [X]",
-    "[F] is farther from the [C], so the answer is [X].",
+    "The [F] is farther from the [C] than the [G] is. Therefore, the correct option is [X].",
+    "The [F] is farther from the [C] than the [G] is, so the answer is [X].",
 ]
 positional_far_mcq_free_metric_answers = [
     "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. Therefore, the answer is [X].",
 ]
 positional_far_mcq_free_semantic_answers = [
-    "The [F] is farther from the [C]. Therefore, the answer is [X].",
-    "[F] is farther from the [C], so the answer is [X].",
+    "The [F] is farther from the [C] than the [G] is. Therefore, the answer is [X].",
+    "The [F] is farther from the [C] than the [G] is, so the answer is [X].",
 ]
 
 positional_close_oe_questions = [
@@ -98,33 +97,32 @@ positional_close_mcq_questions = [
 ]
 
 positional_close_oe_direct_answers = [
-    "[X].",
-    "The [X] is closer to the [C].",
+    "[X]."
 ]
 
 positional_close_oe_reasoning_metric_answers = [
     "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. Therefore, [X] is closer to [C].",
-    "[X] is closer to [C]: the distance to [A] is about [D] and to [B] is about [E].",
+    "Given these two distances, [X] is closer to [C].",
 ]
 positional_close_oe_reasoning_semantic_answers = [
     "The [X] is closer to the [C].",
-    "[X] is closer to the [C].",
+    "The [X] is closer to the [C] than the [G] is.",
 ]
 
-positional_close_mcq_direct_answers = ["[X]", "[X]."]
+positional_close_mcq_direct_answers = ["[X]."]
 positional_close_mcq_reasoning_metric_answers = [
-    "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. [X]",
+    "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. Therefore, the correct option is [X].",
 ]
 positional_close_mcq_reasoning_semantic_answers = [
-    "The [F] is closer to the [C]. [X]",
-    "[F] is closer to the [C], so the answer is [X].",
+    "The [F] is closer to the [C] than the [G] is. Therefore, the correct option is [X].",
+    "The [F] is closer to the [C] than the [G] is, so the answer is [X].",
 ]
 positional_close_mcq_free_metric_answers = [
     "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. Therefore, the answer is [X].",
 ]
 positional_close_mcq_free_semantic_answers = [
-    "The [F] is closer to the [C]. Therefore, the answer is [X].",
-    "[F] is closer to the [C], so the answer is [X].",
+    "The [F] is closer to the [C] than the [G] is. Therefore, the answer is [X].",
+    "The [F] is closer to the [C] than the [G] is, so the answer is [X].",
 ]
 
 relative_oe_direct_instructions = [
@@ -153,12 +151,12 @@ relative_mcq_sentence_instructions = [
 
 positional_far_oe_sentence_answers = [
     "The [X] is farther from the [C].",
-    "[X] is farther from the [C].",
+    "The [X] is farther from the [C] than the [G] is.",
 ]
 
 positional_close_oe_sentence_answers = [
     "The [X] is closer to the [C].",
-    "[X] is closer to the [C].",
+    "The [X] is closer to the [C] than the [G] is.",
 ]
 
 positional_far_mcq_sentence_answers = [
@@ -209,9 +207,9 @@ multiview_distance_farthest_direct_answers = [
 ]
 
 multiview_distance_farthest_sentence_answers = [
-    "[X] is the farthest from [Y].",
+    "The object [X] is farther from [Y] than any other listed object.",
     "Among the listed objects, [X] has the greatest distance to [Y].",
-    "The object [X] is most distant from [Y] across the views.",
+    "Compared with the other listed objects, [X] is the most distant from [Y].",
 ]
 
 multiview_distance_closest_questions = [
@@ -228,9 +226,9 @@ multiview_distance_closest_direct_answers = [
 ]
 
 multiview_distance_closest_sentence_answers = [
-    "[X] is the closest to [Y].",
+    "The object [X] is closer to [Y] than any other listed object.",
     "Among the listed objects, [X] has the smallest distance to [Y].",
-    "The object [X] is nearest to [Y] across the views.",
+    "Compared with the other listed objects, [X] is the nearest to [Y].",
 ]
 
 multiview_distance_obj_cam_questions = [
@@ -250,7 +248,7 @@ multiview_distance_obj_cam_answers = [
 multiview_distance_obj_cam_mcq_questions = [q + "\n[O]" for q in multiview_distance_obj_cam_questions]
 
 multiview_distance_obj_cam_mcq_answers = [
-    "[X]",
+    "[X].",
 ]
 from .register_structured import (
     EMPTY_QUESTION_INSTRUCTION,

@@ -10,8 +10,8 @@ depth_ordering_questions = [
 ]
 
 depth_ordering_answers = [
-    "[X]",
-    "The order is [X]",
+    "[X].",
+    "The order is [X].",
     "From near to far: the order can be represented as [X].",
     "In order from near to far: this can be expressed as [X].",
     "Arranged from near to far: the configuration can be denoted as [X].",
@@ -29,8 +29,8 @@ depth_ordering_questions_mcq = [
 ]
 
 depth_ordering_answers_mcq = [
-    "[X]",
-    "The answer is [X]",
+    "[X].",
+    "The answer is [X].",
     "In order from near to far: the answer is given in option [X].",
     "Arranged from near to far: the answer is denoted as option [X].",
     "From closest to farthest: the answer is represented as option [X].",
@@ -47,9 +47,9 @@ depth_choice_questions = [
 ]
 
 depth_choice_answers = [
-    "[X]",
+    "[X].",
     "The [T] [X] is the one [B] closest to the camera.",
-    "The [T] [X] is the one [B] nearest to the camera.",
+    "Among the objects, the [T] [X] is the [B] closest to the camera.",
 ]
 
 
@@ -62,8 +62,8 @@ depth_choice_questions_mcq = [
 ]
 
 depth_choice_answers_mcq = [
-    "[X]",
-    "The answer is [X]",
+    "[X].",
+    "The answer is [X].",
 ]
 
 
@@ -76,12 +76,10 @@ depth_farthest_questions = [
     "From the [T] [A], which is the one with the largest depth?",
 ]
 depth_farthest_answers = [
-    "[X]",
+    "[X].",
     "The [T] [X] is the farthest from the camera.",
-    "The [T] [X] is the most distant from the camera.",
+    "Among the objects, the [T] [X] is farther from the camera than any of them.",
     "The [T] [X] has the greatest depth.",
-    "The [T] [X] has the largest depth.",
-    "The [T] [X] is the one farthest from the camera.",
     "The [T] [X] is the one most distant from the camera.",
 ]
 
@@ -95,8 +93,8 @@ depth_farthest_questions_mcq = [
 ]
 
 depth_farthest_answers_mcq = [
-    "[X]",
-    "The answer is [X]",
+    "[X].",
+    "The answer is [X].",
 ]
 
 
@@ -110,12 +108,10 @@ depth_closest_questions = [
 ]
 
 depth_closest_answers = [
-    "[X]",
+    "[X].",
     "The [T] [X] is the closest to the camera.",
-    "The [T] [X] is the nearest to the camera.",
+    "Among the objects, the [T] [X] is closer to the camera than any of them.",
     "The [T] [X] has the smallest depth.",
-    "The [T] [X] has the least depth.",
-    "The [T] [X] is the one closest to the camera.",
     "The [T] [X] is the one nearest to the camera.",
 ]
 
@@ -129,8 +125,8 @@ depth_closest_questions_mcq = [
 ]
 
 depth_closest_answers_mcq = [
-    "[X]",
-    "The answer is [X]",
+    "[X].",
+    "The answer is [X].",
 ]
 from .register_structured import (
     EMPTY_QUESTION_INSTRUCTION,
