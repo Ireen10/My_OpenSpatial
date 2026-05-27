@@ -200,6 +200,8 @@ def build_prompt_struct(
         out["question_type_enum"] = render.question_type
     if render.instruction_type:
         out["instruction_type"] = render.instruction_type
+    if render.constraint_mode:
+        out["constraint_mode"] = render.constraint_mode
     if render.introduction_index >= 0:
         out["introduction_index"] = render.introduction_index
     if render.question_instruction_index >= 0:

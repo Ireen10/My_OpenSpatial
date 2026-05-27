@@ -37,6 +37,7 @@ grounding_json_output_instruction = [
         "respectively, expressed in radians ranging from -Pi to Pi."
     ),
 ]
+from ..annotation.core.structured_prompt_template import AnswerInstructionProfile
 from .register_structured import register_oe
 
 
@@ -44,9 +45,13 @@ def register_structured_grounding_templates() -> None:
     register_oe(
         "grounding_3d.open_ended",
         object_grounding_box_template_questions,
-        ["[X]"],
+        [],
         introduction=grounding_camera_introduction,
         question_instruction=grounding_json_output_instruction,
+        answer_profiles={
+            "direct": AnswerInstructionProfile("direct", answer_templates=["[X]"]),
+        },
+        instruction_types=["direct"],
     )
 
 

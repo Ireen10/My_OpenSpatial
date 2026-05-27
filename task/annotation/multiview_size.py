@@ -12,6 +12,8 @@ from .core.visual_marker import MarkConfig
 from .core.question_type import QuestionType
 from utils.box_utils import RELATIVE_SIZE_DIAG_RATIO_MIN, box_3d_diag_extent
 
+from .metric_gating import pick_instruction_mode
+
 
 class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
@@ -20,7 +22,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         "pair_relative_size":  {"default": 1, "handler": "_generate_pair_relative_size"},
         "multi_relative_size": {"default": 1, "handler": "_generate_multi_relative_size"},
     }
-    _SUPERLATIVE_STYLES = ("direct", "sentence")
+    _SUPERLATIVE_MODES = ("direct", "sentence", "free")
 
     def get_mark_config(self):
         return MarkConfig(mark_types=["box", "point"])
@@ -65,8 +67,8 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
     def multi_relative_size_prompt_func(self, obj_infos, boxes_3d_world=None):
         """Generate a superlative size QA for N objects from different views."""
         size_type = random.choice(["biggest", "smallest"])
-        style = random.choice(self._SUPERLATIVE_STYLES)
-        tpl_name = f"multiview_size.{size_type}.{style}"
+        mode = pick_instruction_mode(self._SUPERLATIVE_MODES)
+        tpl_name = f"multiview_size.{size_type}.{mode}"
 
         diags = []
         for i, (desc, cloud) in enumerate(obj_infos):

@@ -26,6 +26,14 @@ from .core.question_type import QuestionType
 
 from utils.point_cloud_utils import compute_point_cloud_distance
 
+from .metric_gating import (
+    ABSOLUTE_DISTANCE_MODES,
+    format_distance_value,
+    pick_instruction_mode,
+    pick_relative_distance_mode,
+    pick_stem_index,
+)
+
 
 class AnnotationGenerator(BaseAnnotationTask):
 
@@ -35,8 +43,6 @@ class AnnotationGenerator(BaseAnnotationTask):
         "relative_distance": {"default": 1, "handler": "_generate_relative_distance"},
     }
 
-    # free: question_instruction pool empty (project-wide M8 convention)
-    _RELATIVE_MODES = ("direct", "reasoning", "free")
 
     def __init__(self, args):
         super().__init__(args)
@@ -56,8 +62,10 @@ class AnnotationGenerator(BaseAnnotationTask):
     def _fmt_dist_m(dist: float) -> str:
         return f"{dist:.2f} m"
 
-    def _pick_relative_mode(self) -> str:
-        return random.choice(self._RELATIVE_MODES)
+
+    def _relative_stem_index(self, template_id: str, graph) -> int:
+        tpl = self.get_structured_template(template_id)
+        return pick_stem_index(tpl.stem, is_metric_depth=graph.is_metric_depth)
 
     def _get_cleaned_cloud(self, marked):
         """Extract and clean pointcloud from a marked result (desc, node)."""
@@ -102,15 +110,14 @@ class AnnotationGenerator(BaseAnnotationTask):
         A_desc, A_cloud = self._get_cleaned_cloud(A)
         B_desc, B_cloud = self._get_cleaned_cloud(B)
 
-        unit = random.choice(["m", "cm"])
-        dist = compute_point_cloud_distance(A_cloud, B_cloud)
-        scaled = dist * self.scaling_factor * (100 if unit == "cm" else 1)
-        style = random.choice(["direct", "sentence"])
-        tpl = f"distance.absolute_{unit}.{style}"
+        dist_m = compute_point_cloud_distance(A_cloud, B_cloud)
+        mode = pick_instruction_mode(ABSOLUTE_DISTANCE_MODES)
+        tpl = f"distance.absolute.{mode}"
+        x_val = format_distance_value(dist_m, scaling_factor=self.scaling_factor)
 
         prompt = self.render_structured_prompt(
             tpl,
-            shared={"A": A_desc, "B": B_desc, "X": f"{scaled:.2f}"},
+            shared={"A": A_desc, "B": B_desc, "X": x_val},
         )
         return prompt, tpl
 
@@ -133,8 +140,9 @@ class AnnotationGenerator(BaseAnnotationTask):
         else:
             polarity, winner = "close", closer
 
-        mode = self._pick_relative_mode()
+        mode = pick_relative_distance_mode(is_metric_depth=graph.is_metric_depth)
         tpl = f"distance.relative_{polarity}.{mode}"
+        stem_index = self._relative_stem_index(tpl, graph)
         shared = {
             "A": A_desc,
             "B": B_desc,
@@ -146,7 +154,10 @@ class AnnotationGenerator(BaseAnnotationTask):
         }
 
         prompt = self.render_structured_prompt(
-            tpl, shared=shared, is_metric_depth=graph.is_metric_depth,
+            tpl,
+            shared=shared,
+            is_metric_depth=graph.is_metric_depth,
+            stem_index=stem_index,
         )
         return prompt, tpl
 
@@ -171,11 +182,17 @@ class AnnotationGenerator(BaseAnnotationTask):
         else:
             polarity, target_tag, winner_desc = "close", closer_tag, closer
 
-        mode = self._pick_relative_mode()
+        mode = pick_relative_distance_mode(is_metric_depth=graph.is_metric_depth)
         tpl = f"distance.relative_{polarity}_mcq.{mode}"
+        stem_index = self._relative_stem_index(tpl, graph)
         option_answer = self._mcq_option_label(
             target_tag, A_desc, B_desc,
         )
+        anchor = self._title_desc(C_desc)
+        if polarity == "far":
+            premise = f"{self._title_desc(winner_desc)} is farther from the {anchor}"
+        else:
+            premise = f"{self._title_desc(winner_desc)} is closer to the {anchor}"
         shared = {
             "A": A_desc,
             "B": B_desc,
@@ -183,12 +200,16 @@ class AnnotationGenerator(BaseAnnotationTask):
             "D": self._fmt_dist_m(dist_AC),
             "E": self._fmt_dist_m(dist_BC),
             "F": self._title_desc(winner_desc),
+            "P": premise,
             "O": options,
             "X": option_answer,
         }
 
         prompt = self.render_structured_prompt(
-            tpl, shared=shared, is_metric_depth=graph.is_metric_depth,
+            tpl,
+            shared=shared,
+            is_metric_depth=graph.is_metric_depth,
+            stem_index=stem_index,
         )
         return prompt, tpl
 

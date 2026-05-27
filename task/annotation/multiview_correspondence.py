@@ -96,8 +96,10 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
             "T": full_option,
         }
 
+        from .metric_gating import pick_instruction_mode
+
         if question_type == QuestionType.MCQ:
-            mode = random.choice(self._MCQ_INSTRUCTION_MODES)
+            mode = pick_instruction_mode(self._MCQ_INSTRUCTION_MODES)
             tpl_name = f"{base}.mcq.{mode}"
             shared = {
                 "A": question_color,
@@ -108,7 +110,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
                 tpl_name, shared=shared, a_args=answer_slots,
             )
         else:
-            mode = random.choice(self._OE_INSTRUCTION_MODES)
+            mode = pick_instruction_mode(self._OE_INSTRUCTION_MODES)
             tpl_name = f"{base}.oe.{mode}"
             prompt = self.render_structured_prompt(
                 tpl_name,

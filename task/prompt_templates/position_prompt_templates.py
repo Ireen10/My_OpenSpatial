@@ -1,4 +1,5 @@
-# Template IDs: position.height_higher | height_lower | near_far (MCQ: direct / sentence / free)
+# position.{height_higher,height_lower,near_far}.{direct|sentence|free}
+# Question-side instruction pools only (never answer instruction_snippets).
 
 position_introduction = [
     "Consider the real-world 3D locations of the objects.",
@@ -49,43 +50,56 @@ from .register_structured import (
 
 position_mcq_direct_instructions = MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS
 
-_POSITION_MCQ_ANSWER_MODES = ("direct", "sentence", "free")
+_POSITION_MCQ_MODES = ("direct", "sentence", "free")
 
 
-def _position_mcq_profiles() -> dict:
-    return {
-        "direct": AnswerInstructionProfile(
-            "direct",
-            instruction_snippets=position_mcq_direct_instructions,
-            answer_templates=["[X]"],
-        ),
-        "sentence": AnswerInstructionProfile(
-            "sentence",
-            instruction_snippets=position_sentence_instructions,
-            answer_templates=position_mcq_sentence_answers,
-        ),
-        "free": AnswerInstructionProfile(
-            "free",
-            answer_templates=position_mcq_sentence_answers,
-        ),
-    }
+def _register_position_mcq_family(template_id: str, stems: list) -> None:
+    register_mcq(
+        f"{template_id}.direct",
+        stems,
+        answers=["[X]"],
+        introduction=position_introduction,
+        question_instruction=position_mcq_direct_instructions,
+        answer_profiles={
+            "direct": AnswerInstructionProfile("direct", answer_templates=["[X]"]),
+        },
+        enabled=["direct"],
+    )
+    register_mcq(
+        f"{template_id}.sentence",
+        stems,
+        answers=position_mcq_sentence_answers,
+        introduction=position_introduction,
+        question_instruction=position_sentence_instructions,
+        answer_profiles={
+            "sentence": AnswerInstructionProfile(
+                "sentence", answer_templates=position_mcq_sentence_answers
+            ),
+        },
+        enabled=["sentence"],
+    )
+    register_mcq(
+        f"{template_id}.free",
+        stems,
+        answers=position_mcq_sentence_answers,
+        introduction=position_introduction,
+        question_instruction=EMPTY_QUESTION_INSTRUCTION,
+        answer_profiles={
+            "free": AnswerInstructionProfile(
+                "free", answer_templates=position_mcq_sentence_answers
+            ),
+        },
+        enabled=["free"],
+    )
 
 
 def register_structured_position_templates() -> None:
-    profiles = _position_mcq_profiles()
     for template_id, stems in (
         ("position.height_higher", height_higher_stems),
         ("position.height_lower", height_lower_stems),
         ("position.near_far", near_far_stems),
     ):
-        register_mcq(
-            template_id,
-            stems,
-            introduction=position_introduction,
-            question_instruction=EMPTY_QUESTION_INSTRUCTION,
-            answer_profiles=profiles,
-            enabled=list(_POSITION_MCQ_ANSWER_MODES),
-        )
+        _register_position_mcq_family(template_id, stems)
 
 
 register_structured_position_templates()

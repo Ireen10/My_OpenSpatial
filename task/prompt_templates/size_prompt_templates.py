@@ -201,25 +201,61 @@ multiview_size_smallest_sentence_answers = [
     "Out of all the objects, the [X] has the least size.",
     "In terms of size, the [X] is the smallest one.",
 ]
-from .register_structured import EMPTY_QUESTION_INSTRUCTION, register_judgment, register_oe
+from .register_structured import (
+    EMPTY_QUESTION_INSTRUCTION,
+    register_judgment,
+    register_oe_mode,
+)
 
 _UNCONSTRAINED = EMPTY_QUESTION_INSTRUCTION
 
+size_absolute_direct_instructions = [
+    "Give the numeric measurement with the appropriate unit (meters or centimeters).",
+    "Reply with the measurement using meters or centimeters as appropriate.",
+    "State the value as a single number with unit.",
+]
+
+size_absolute_sentence_instructions = [
+    "Answer in a complete sentence that includes the measurement and unit.",
+    "Reply using a full sentence with the measurement and appropriate unit.",
+    "Provide your final answer in a complete sentence including the measurement.",
+]
+
+size_absolute_direct_answers = ["[X]"]
+
+
+def _register_size_absolute_family(kind: str, stems: list, sentence_answers: list) -> None:
+    prefix = f"size.{kind}.single_view"
+    register_oe_mode(
+        f"{prefix}.direct",
+        "direct",
+        stems,
+        size_absolute_direct_answers,
+        question_instruction=size_absolute_direct_instructions,
+    )
+    register_oe_mode(
+        f"{prefix}.sentence",
+        "sentence",
+        stems,
+        sentence_answers,
+        question_instruction=size_absolute_sentence_instructions,
+    )
+    register_oe_mode(
+        f"{prefix}.free",
+        "free",
+        stems,
+        sentence_answers,
+        question_instruction=EMPTY_QUESTION_INSTRUCTION,
+    )
+
 
 def register_structured_size_templates() -> None:
-    for unit, instr in (("cm", unit_centimeter_disclaimer), ("m", unit_meter_disclaimer)):
-        register_oe(
-            f"size.absolute.single_view.{unit}",
-            size_predicate_questions_single_view,
-            size_answers_single_view,
-            question_instruction=instr,
-        )
-        register_oe(
-            f"size.height.single_view.{unit}",
-            height_predicate_questions_single_view,
-            height_answers_single_view,
-            question_instruction=instr,
-        )
+    _register_size_absolute_family(
+        "absolute", size_predicate_questions_single_view, size_answers_single_view,
+    )
+    _register_size_absolute_family(
+        "height", height_predicate_questions_single_view, height_answers_single_view,
+    )
 
     register_judgment(
         "size.big.single_view",
@@ -265,19 +301,29 @@ def register_structured_size_templates() -> None:
             multiview_size_smallest_sentence_answers,
         ),
     ):
-        register_oe(
+        register_oe_mode(
             f"multiview_size.{polarity}.direct",
+            "direct",
             stems,
             direct_ans,
             introduction=multiview_size_introduction,
             question_instruction=_UNCONSTRAINED,
         )
-        register_oe(
+        register_oe_mode(
             f"multiview_size.{polarity}.sentence",
+            "sentence",
             stems,
             sentence_ans,
             introduction=multiview_size_introduction,
             question_instruction=_UNCONSTRAINED,
+        )
+        register_oe_mode(
+            f"multiview_size.{polarity}.free",
+            "free",
+            stems,
+            sentence_ans,
+            introduction=multiview_size_introduction,
+            question_instruction=EMPTY_QUESTION_INSTRUCTION,
         )
 
 

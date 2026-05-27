@@ -1,7 +1,7 @@
 """
 Position annotation task: height comparison & near/far (proximity).
 
-Templates: position.height_higher | height_lower | near_far (MCQ: direct / sentence / free)
+Templates: position.{height_higher,height_lower,near_far}.{direct|sentence|free} (MCQ)
 """
 
 import random
@@ -15,6 +15,10 @@ from .core.question_type import QuestionType
 
 from utils.point_cloud_utils import compute_point_cloud_distance
 from utils.image_utils import convert_pil_to_bytes
+
+from .metric_gating import pick_instruction_mode
+
+_POSITION_MCQ_MODES = ("direct", "sentence", "free")
 
 
 class AnnotationGenerator(BaseAnnotationTask):
@@ -73,8 +77,10 @@ class AnnotationGenerator(BaseAnnotationTask):
         else:
             premise = f"The {lower_desc} is at a lower elevation than the {higher_desc}"
 
+        mode = pick_instruction_mode(_POSITION_MCQ_MODES)
+        tpl = f"{base_tpl}.{mode}"
         prompt = self.render_structured_prompt(
-            base_tpl,
+            tpl,
             shared={
                 "P": premise,
                 "A": A_desc,
@@ -83,7 +89,7 @@ class AnnotationGenerator(BaseAnnotationTask):
                 "X": answer,
             },
         )
-        return prompt, base_tpl
+        return prompt, tpl
 
     def proximity_prompt_func(self, A, B, near_or_far):
         A_desc, B_desc = marked_surface_label(A), marked_surface_label(B)
@@ -93,7 +99,9 @@ class AnnotationGenerator(BaseAnnotationTask):
             labels = labels[::-1]
 
         options = f"\nOptions: A. {labels[0]} B. {labels[1]}"
-        tpl_name = "position.near_far"
+        base_tpl = "position.near_far"
+        mode = pick_instruction_mode(_POSITION_MCQ_MODES)
+        tpl_name = f"{base_tpl}.{mode}"
 
         if near_or_far == "near":
             letter = "A" if labels[0] == self._NEAR_LABEL else "B"

@@ -2,7 +2,7 @@
 Multiview distance: pair absolute (2 views) + N-ary farthest/closest (3–6 views).
 
 Templates:
-    multiview_distance.absolute_{m,cm}.{direct,sentence}  (stems shared with singleview; + introduction)
+    multiview_distance.absolute.{direct,sentence,free}  (stems shared with singleview; + introduction)
     multiview_distance.{farthest,closest}.{direct,reasoning,free}
 """
 
@@ -12,6 +12,13 @@ from .core.visual_marker import MarkConfig
 from .core.question_type import QuestionType
 
 from utils.point_cloud_utils import compute_point_cloud_distance
+
+from .metric_gating import (
+    ABSOLUTE_DISTANCE_MODES,
+    format_distance_value,
+    pick_instruction_mode,
+    pick_metric_gated_mode,
+)
 
 
 class AnnotationGenerator(BaseMultiviewAnnotationTask):
@@ -24,11 +31,12 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
     _INSTRUCTION_MODES = ("direct", "reasoning", "free")
 
     def _pick_instruction_mode(self, graph) -> str:
-        """Reasoning/free require metric depth (same rule as singleview distance)."""
-        mode = random.choice(self._INSTRUCTION_MODES)
-        if mode in ("reasoning", "free") and not graph.is_metric_depth:
-            return "direct"
-        return mode
+        """Reasoning/free question instructions require metric depth."""
+        return pick_metric_gated_mode(
+            self._INSTRUCTION_MODES,
+            is_metric_depth=graph.is_metric_depth,
+            metric_only_modes=("reasoning", "free"),
+        )
 
     def get_mark_config(self):
         return MarkConfig(type_weights={"point": 0.3, "box": 0.7})
@@ -44,15 +52,14 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         A_cloud = self._clean_cloud(A_cloud)
         B_cloud = self._clean_cloud(B_cloud)
 
-        unit = random.choice(["m", "cm"])
-        style = random.choice(["direct", "sentence"])
-        dist = compute_point_cloud_distance(A_cloud, B_cloud)
-        scaled = dist * self.scaling_factor * (100 if unit == "cm" else 1)
-        tpl = f"multiview_distance.absolute_{unit}.{style}"
+        dist_m = compute_point_cloud_distance(A_cloud, B_cloud)
+        mode = pick_instruction_mode(ABSOLUTE_DISTANCE_MODES)
+        tpl = f"multiview_distance.absolute.{mode}"
+        x_val = format_distance_value(dist_m, scaling_factor=self.scaling_factor)
 
         prompt = self.render_structured_prompt(
             tpl,
-            shared={"A": A_desc, "B": B_desc, "X": f"{scaled:.2f}"},
+            shared={"A": A_desc, "B": B_desc, "X": x_val},
         )
         return prompt, tpl
 

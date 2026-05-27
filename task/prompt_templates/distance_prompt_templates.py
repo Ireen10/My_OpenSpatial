@@ -5,52 +5,28 @@
 #
 # ─── Shared: absolute distance (OE) ─────────────────────────────────────
 
-distance_template_questions_v2 = [
-    "Measuring from the closest point of each object, what is the distance between the [A] and the [B] (in meters)?",
-    "Measuring from the closest point of each object, what is the distance between the [A] and the [B] (in centimeters)?",
-    "What is the distance between the [A] and the [B] (in meters)?",
-    "What is the distance between the [A] and the [B] (in centimeters)?",
-    "Consider the real-world 3D location of the objects. What is the distance between the [A] and the [B] (in meters)?",
-    "Consider the real-world 3D location of the objects. What is the distance between the [A] and the [B] (in centimeters)?",
+absolute_distance_stems = [
+    "Measuring from the closest point of each object, what is the distance between the [A] and the [B]?",
+    "What is the distance between the [A] and the [B]?",
+    "Consider the real-world 3D location of the objects. What is the distance between the [A] and the [B]?",
 ]
 
-distance_template_questions_m = [q for q in distance_template_questions_v2 if "meters)" in q]
-distance_template_questions_cm = [q for q in distance_template_questions_v2 if "centimeters)" in q]
-
-absolute_m_direct_instructions = [
-    "Give the distance in meters only.",
-    "Reply with the numeric distance in meters.",
-    "State their separation in meters as a single value.",
+absolute_direct_instructions = [
+    "Give the numeric distance with the appropriate unit (meters or centimeters).",
+    "Reply with the distance using meters or centimeters as appropriate.",
+    "State their separation as a single numeric value with unit.",
 ]
 
-absolute_m_sentence_instructions = [
-    "Please answer in meters.",
-    "Provide your final answer in meters.",
-    "Use meters as the unit in your answer.",
+absolute_sentence_instructions = [
+    "Answer in a complete sentence that includes the distance and unit.",
+    "Reply using a full sentence with the distance and appropriate unit.",
+    "Provide your final answer in a complete sentence including the distance.",
 ]
 
-absolute_cm_direct_instructions = [
-    "Give the distance in centimeters only.",
-    "Reply with the numeric distance in centimeters.",
-    "State their separation in centimeters as a single value.",
-]
-
-absolute_cm_sentence_instructions = [
-    "Please answer in centimeters.",
-    "Provide your final answer in centimeters.",
-    "Use centimeters as the unit in your answer.",
-]
-
-absolute_m_direct_answers = ["[X] meters"]
-absolute_m_sentence_answers = [
-    "The distance between the [A] and the [B] is [X] meters.",
-    "The [A] and the [B] are approximately [X] meters apart.",
-]
-
-absolute_cm_direct_answers = ["[X] centimeters"]
-absolute_cm_sentence_answers = [
-    "The distance between the [A] and the [B] is [X] centimeters.",
-    "The [A] and the [B] are approximately [X] centimeters apart.",
+absolute_direct_answers = ["[X]"]
+absolute_sentence_answers = [
+    "The distance between the [A] and the [B] is [X].",
+    "The [A] and the [B] are approximately [X] apart.",
 ]
 
 # ─── Shared: singleview relative distance (OE / MCQ); multiview N-ary uses multiview_distance.* ──
@@ -163,6 +139,40 @@ relative_oe_reasoning_instructions = [
     "Reason from the two absolute distances, then state which object applies.",
 ]
 
+relative_oe_sentence_instructions = [
+    "Answer in a complete sentence.",
+    "Reply using a full sentence.",
+    "Please describe your answer in a complete sentence.",
+]
+
+relative_mcq_sentence_instructions = [
+    "Answer in a complete sentence.",
+    "Reply using a full sentence.",
+    "Answer in a complete sentence that states the correct option.",
+]
+
+positional_far_oe_sentence_answers = [
+    "The [X] is farther from the [C].",
+    "[X] is farther from the [C].",
+]
+
+positional_close_oe_sentence_answers = [
+    "The [X] is closer to the [C].",
+    "[X] is closer to the [C].",
+]
+
+positional_far_mcq_sentence_answers = [
+    "[P]. Therefore the correct option is [X].",
+    "[P]. So the answer is [X].",
+    "[P]. The correct option is [X].",
+]
+
+positional_close_mcq_sentence_answers = [
+    "[P]. Therefore the correct option is [X].",
+    "[P]. So the answer is [X].",
+    "[P]. The correct option is [X].",
+]
+
 from .register_structured import MCQ_ANSWER_WITH_OPTION_AND_NAME_INSTRUCTIONS
 
 relative_mcq_direct_instructions = MCQ_ANSWER_WITH_OPTION_AND_NAME_INSTRUCTIONS
@@ -246,7 +256,9 @@ from .register_structured import (
     EMPTY_QUESTION_INSTRUCTION,
     mixed_metric_default_profile,
     register_mcq,
+    register_mcq_mode,
     register_oe,
+    register_oe_mode,
 )
 
 
@@ -255,10 +267,12 @@ def _relative_oe_reasoning_profiles(polarity: str):
         return mixed_metric_default_profile(
             positional_far_oe_reasoning_metric_answers,
             positional_far_oe_reasoning_semantic_answers,
+            instruction_type="reasoning",
         )
     return mixed_metric_default_profile(
         positional_close_oe_reasoning_metric_answers,
         positional_close_oe_reasoning_semantic_answers,
+        instruction_type="reasoning",
     )
 
 
@@ -267,10 +281,12 @@ def _relative_mcq_reasoning_profiles(polarity: str):
         return mixed_metric_default_profile(
             positional_far_mcq_reasoning_metric_answers,
             positional_far_mcq_reasoning_semantic_answers,
+            instruction_type="reasoning",
         )
     return mixed_metric_default_profile(
         positional_close_mcq_reasoning_metric_answers,
         positional_close_mcq_reasoning_semantic_answers,
+        instruction_type="reasoning",
     )
 
 
@@ -287,32 +303,45 @@ def _relative_mcq_free_profiles(polarity: str):
 
 
 def _register_relative_oe_pair(polarity: str) -> None:
-    """Register far/close OE templates: direct / reasoning / free (free = empty question_instruction)."""
+    """Register far/close OE: direct / reasoning / sentence / free."""
     if polarity == "far":
         stems = positional_far_oe_questions
         direct_ans = positional_far_oe_direct_answers
+        sentence_ans = positional_far_oe_sentence_answers
     else:
         stems = positional_close_oe_questions
         direct_ans = positional_close_oe_direct_answers
+        sentence_ans = positional_close_oe_sentence_answers
 
     reasoning_profiles = _relative_oe_reasoning_profiles(polarity)
 
-    register_oe(
+    register_oe_mode(
         f"distance.relative_{polarity}.direct",
+        "direct",
         stems,
         direct_ans,
         question_instruction=relative_oe_direct_instructions,
     )
-    register_oe(
+    register_oe_mode(
         f"distance.relative_{polarity}.reasoning",
+        "reasoning",
         stems,
+        [],
         answer_profiles=reasoning_profiles,
         question_instruction=relative_oe_reasoning_instructions,
     )
-    register_oe(
-        f"distance.relative_{polarity}.free",
+    register_oe_mode(
+        f"distance.relative_{polarity}.sentence",
+        "sentence",
         stems,
-        answer_profiles=reasoning_profiles,
+        sentence_ans,
+        question_instruction=relative_oe_sentence_instructions,
+    )
+    register_oe_mode(
+        f"distance.relative_{polarity}.free",
+        "free",
+        stems,
+        sentence_ans,
         question_instruction=EMPTY_QUESTION_INSTRUCTION,
     )
 
@@ -321,82 +350,78 @@ def _register_relative_mcq_pair(polarity: str) -> None:
     if polarity == "far":
         stems = positional_far_mcq_questions
         direct_ans = positional_far_mcq_direct_answers
+        sentence_ans = positional_far_mcq_sentence_answers
     else:
         stems = positional_close_mcq_questions
         direct_ans = positional_close_mcq_direct_answers
+        sentence_ans = positional_close_mcq_sentence_answers
 
     reasoning_profiles = _relative_mcq_reasoning_profiles(polarity)
-    free_profiles = _relative_mcq_free_profiles(polarity)
 
-    register_mcq(
+    register_mcq_mode(
         f"distance.relative_{polarity}_mcq.direct",
+        "direct",
         stems,
         answers=direct_ans,
-        letter_only=False,
         question_instruction=relative_mcq_direct_instructions,
     )
-    register_mcq(
+    register_mcq_mode(
         f"distance.relative_{polarity}_mcq.reasoning",
+        "reasoning",
         stems,
         answer_profiles=reasoning_profiles,
-        letter_only=False,
         question_instruction=relative_mcq_reasoning_instructions,
     )
-    register_mcq(
-        f"distance.relative_{polarity}_mcq.free",
+    register_mcq_mode(
+        f"distance.relative_{polarity}_mcq.sentence",
+        "sentence",
         stems,
-        answer_profiles=free_profiles,
-        letter_only=False,
+        answers=sentence_ans,
+        question_instruction=relative_mcq_sentence_instructions,
+    )
+    register_mcq_mode(
+        f"distance.relative_{polarity}_mcq.free",
+        "free",
+        stems,
+        answers=sentence_ans,
         question_instruction=EMPTY_QUESTION_INSTRUCTION,
     )
 
 
+def _register_absolute_distance_family(prefix: str, *, introduction=None) -> None:
+    kwargs = {"introduction": introduction} if introduction else {}
+    register_oe_mode(
+        f"{prefix}.direct",
+        "direct",
+        absolute_distance_stems,
+        absolute_direct_answers,
+        question_instruction=absolute_direct_instructions,
+        **kwargs,
+    )
+    register_oe_mode(
+        f"{prefix}.sentence",
+        "sentence",
+        absolute_distance_stems,
+        absolute_sentence_answers,
+        question_instruction=absolute_sentence_instructions,
+        **kwargs,
+    )
+    register_oe_mode(
+        f"{prefix}.free",
+        "free",
+        absolute_distance_stems,
+        absolute_sentence_answers,
+        question_instruction=EMPTY_QUESTION_INSTRUCTION,
+        **kwargs,
+    )
+
+
 def register_structured_distance_templates() -> None:
-    # Absolute distance: singleview IDs (no introduction) vs multiview IDs (+ introduction)
-    for unit, stems, direct_ans, sentence_ans, direct_instr, sentence_instr in (
-        (
-            "m",
-            distance_template_questions_m,
-            absolute_m_direct_answers,
-            absolute_m_sentence_answers,
-            absolute_m_direct_instructions,
-            absolute_m_sentence_instructions,
-        ),
-        (
-            "cm",
-            distance_template_questions_cm,
-            absolute_cm_direct_answers,
-            absolute_cm_sentence_answers,
-            absolute_cm_direct_instructions,
-            absolute_cm_sentence_instructions,
-        ),
-    ):
-        register_oe(
-            f"distance.absolute_{unit}.direct",
-            stems,
-            direct_ans,
-            question_instruction=direct_instr,
-        )
-        register_oe(
-            f"distance.absolute_{unit}.sentence",
-            stems,
-            sentence_ans,
-            question_instruction=sentence_instr,
-        )
-        register_oe(
-            f"multiview_distance.absolute_{unit}.direct",
-            stems,
-            direct_ans,
-            introduction=multiview_distance_introduction,
-            question_instruction=direct_instr,
-        )
-        register_oe(
-            f"multiview_distance.absolute_{unit}.sentence",
-            stems,
-            sentence_ans,
-            introduction=multiview_distance_introduction,
-            question_instruction=sentence_instr,
-        )
+    _register_absolute_distance_family("distance.absolute")
+    _register_absolute_distance_family(
+        "multiview_distance.absolute",
+        introduction=multiview_distance_introduction,
+    )
 
     _register_relative_oe_pair("far")
     _register_relative_oe_pair("close")
@@ -417,22 +442,25 @@ def register_structured_distance_templates() -> None:
             multiview_distance_closest_sentence_answers,
         ),
     ):
-        register_oe(
+        register_oe_mode(
             f"multiview_distance.{polarity}.direct",
+            "direct",
             stems,
             direct_ans,
             introduction=multiview_distance_introduction,
             question_instruction=relative_oe_direct_instructions,
         )
-        register_oe(
+        register_oe_mode(
             f"multiview_distance.{polarity}.reasoning",
+            "reasoning",
             stems,
             sentence_ans,
             introduction=multiview_distance_introduction,
             question_instruction=relative_oe_reasoning_instructions,
         )
-        register_oe(
+        register_oe_mode(
             f"multiview_distance.{polarity}.free",
+            "free",
             stems,
             sentence_ans,
             introduction=multiview_distance_introduction,

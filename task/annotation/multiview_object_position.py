@@ -104,12 +104,14 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
     @classmethod
     def _pick_answer_mode(cls, question_type: QuestionType) -> str:
+        from .metric_gating import pick_instruction_mode
+
         modes = (
             cls._MCQ_ANSWER_MODES
             if question_type == QuestionType.MCQ
             else cls._OE_ANSWER_MODES
         )
-        return random.choice(modes)
+        return pick_instruction_mode(modes)
 
     def _vocab_for_direction(self, direction):
         if direction in self._DIR_TEMPLATES["object_relative"]:
@@ -154,11 +156,12 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
         dir_B2anchor = dir_B2anchors[random.choice([1, 2])]
         answer_mode = self._pick_answer_mode(question_type)
-        tpl = (
+        base = (
             f"multiview_position.{frame}"
             if question_type == QuestionType.OPEN_ENDED
             else f"multiview_position.{frame}_mcq"
         )
+        tpl = f"{base}.{answer_mode}"
         tpl_obj = self.get_structured_template(tpl)
         stem_i = random.randrange(len(tpl_obj.stem))
         premise = PromptTemplate._fill(FRAME_PREMISE_POOLS[frame][stem_i], {

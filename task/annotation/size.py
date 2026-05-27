@@ -13,6 +13,8 @@ from .core.visual_marker import MarkConfig
 from .core.question_type import QuestionType
 from utils.box_utils import RELATIVE_SIZE_DIAG_RATIO_MIN, box_3d_diag_extent
 
+from .metric_gating import ABSOLUTE_DISTANCE_MODES, format_distance_value, pick_instruction_mode
+
 
 class AnnotationGenerator(BaseAnnotationTask):
 
@@ -62,15 +64,12 @@ class AnnotationGenerator(BaseAnnotationTask):
     def absolute_size_prompt_func(self, marked, stem_kind, get_value):
         A_desc = marked_surface_label(marked)
         _, node = marked
-        value = get_value(node)
-
-        unit = random.choice(["cm", "m"])
-        if unit == "cm":
-            value *= 100
-
-        tpl = f"size.{stem_kind}.single_view.{unit}"
+        value_m = float(get_value(node))
+        mode = pick_instruction_mode(ABSOLUTE_DISTANCE_MODES)
+        tpl = f"size.{stem_kind}.single_view.{mode}"
+        x_val = format_distance_value(value_m)
         prompt = self.render_structured_prompt(
-            tpl, shared={"A": A_desc, "X": f"{round(value, 2)} {unit}"},
+            tpl, shared={"A": A_desc, "X": x_val},
         )
         return prompt, tpl
 

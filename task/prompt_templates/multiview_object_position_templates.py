@@ -1,7 +1,5 @@
-# multiview_position.{object_relative,viewer_at_anchor}[._mcq]
-#   object_relative  — premise: A's direction relative to anchor B in image 1 (cardinal)
-#   viewer_at_anchor — premise: viewer stands at B, A on the [X] side (egocentric)
-# Answer modes: OE sentence|free (same answer pool); MCQ direct|sentence|free
+# multiview_position.{object_relative,viewer_at_anchor}[._mcq].{direct|sentence|free}
+# Instruction constraints on the question only (question_instruction pools).
 
 multiview_position_introduction = [
     "The images show the same scene captured from different viewpoints.",
@@ -10,8 +8,6 @@ multiview_position_introduction = [
     "The provided views are different angles of the same space.",
     "All images represent the same scene under different viewpoints.",
 ]
-
-# ─── object_relative (cardinal / landmark-relative premise) ───────────────────
 
 object_relative_stems = [
     "If the [A] is [X] of the [B] in image 1, what direction is the [C] (visible in image 2) from the [B]?",
@@ -22,7 +18,6 @@ object_relative_stems = [
     "What direction does the [C] (shown in image 2) occupy from the [B], given that the [A] is [X] to the [B] in image 1?",
 ]
 
-# Clause for [P], … (no trailing comma/space; comma splice in answer templates)
 object_relative_premises = [
     "If the [A] is [X] of the [B] in image 1",
     "If the [A] is to the [X] of the [B] in the first image",
@@ -31,8 +26,6 @@ object_relative_premises = [
     "If the [A] is positioned [X] relative to the [B] in the first image",
     "Given that the [A] is [X] to the [B] in image 1",
 ]
-
-# ─── viewer_at_anchor (egocentric premise at anchor B) ────────────────────────
 
 viewer_at_anchor_stems = [
     "If I am at the position of the [B] in image 1, and the [A] is on the [X] side of me, what direction is the [C] (visible in image 2) from my position?",
@@ -60,35 +53,24 @@ FRAME_PREMISE_POOLS = {
 object_relative_stems_mcq = [q + "\n[O]" for q in object_relative_stems]
 viewer_at_anchor_stems_mcq = [q + "\n[O]" for q in viewer_at_anchor_stems]
 
-# ─── Answer instruction pools ───────────────────────────────────────────────
-
-position_oe_direct_instructions = [
-    "Reply with the direction only.",
-    "Answer using only the direction word or phrase.",
-    "Give the direction without extra explanation.",
-]
-
 position_sentence_instructions = [
     "Answer in a complete sentence.",
     "Reply using a full sentence.",
     "Please describe your answer in a complete sentence.",
 ]
 
-# object_relative: [D] = cardinal direction (north, east, …). Pattern "is [D] of" needs cardinals only.
 object_relative_oe_sentence_answers = [
     "[P], the [C] is [D] of the [B].",
     "[P], the [C] lies to the [D] of the [B].",
     "[P], the [C] is located to the [D] of the [B].",
 ]
 
-# viewer_at_anchor: [D] = ego direction (front, back-left, …). Avoid "is [D] of the [B]".
 viewer_at_anchor_oe_sentence_answers = [
     "[P], the [C] is on the [D] side.",
     "[P], from my position at the [B], the [C] is on the [D] side.",
     "[P], the [C] is on the [D] side relative to me.",
 ]
 
-# MCQ sentence: same full spatial sentence as OE, then a separate line choosing the option.
 object_relative_mcq_sentence_answers = [
     "[P], the [C] is [D] of the [B]. Therefore the correct option is [E].",
     "[P], the [C] lies to the [D] of the [B]. So the answer is [E].",
@@ -111,80 +93,95 @@ from .register_structured import (
 
 position_mcq_direct_instructions = MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS
 
-_POSITION_OE_ANSWER_MODES = ("sentence", "free")
-_POSITION_MCQ_ANSWER_MODES = ("direct", "sentence", "free")
+_POSITION_OE_MODES = ("sentence", "free")
+_POSITION_MCQ_MODES = ("direct", "sentence", "free")
 
 
-def _oe_answer_profiles(sentence_answers: list) -> dict:
-    return {
-        "direct": AnswerInstructionProfile(
-            "direct",
-            instruction_snippets=position_oe_direct_instructions,
-            answer_templates=["[T].", "[T]"],
-        ),
-        "sentence": AnswerInstructionProfile(
-            "sentence",
-            instruction_snippets=position_sentence_instructions,
-            answer_templates=sentence_answers,
-        ),
-        "free": AnswerInstructionProfile(
-            "free",
-            answer_templates=sentence_answers,
-        ),
-    }
+def _register_oe_family(base_id: str, stems: list, sentence_answers: list) -> None:
+    register_oe(
+        f"{base_id}.sentence",
+        stems,
+        [],
+        introduction=multiview_position_introduction,
+        question_instruction=position_sentence_instructions,
+        answer_profiles={
+            "sentence": AnswerInstructionProfile(
+                "sentence", answer_templates=sentence_answers
+            ),
+        },
+        instruction_types=["sentence"],
+    )
+    register_oe(
+        f"{base_id}.free",
+        stems,
+        [],
+        introduction=multiview_position_introduction,
+        question_instruction=EMPTY_QUESTION_INSTRUCTION,
+        answer_profiles={
+            "free": AnswerInstructionProfile("free", answer_templates=sentence_answers),
+        },
+        instruction_types=["free"],
+    )
 
 
-def _mcq_answer_profiles(sentence_answers: list) -> dict:
-    return {
-        "direct": AnswerInstructionProfile(
-            "direct",
-            instruction_snippets=position_mcq_direct_instructions,
-            answer_templates=["[T]"],
-        ),
-        "sentence": AnswerInstructionProfile(
-            "sentence",
-            instruction_snippets=position_sentence_instructions,
-            answer_templates=sentence_answers,
-        ),
-        "free": AnswerInstructionProfile(
-            "free",
-            answer_templates=sentence_answers,
-        ),
-    }
+def _register_mcq_family(base_id: str, stems: list, sentence_answers: list) -> None:
+    register_mcq(
+        f"{base_id}.direct",
+        stems,
+        answers=["[T]"],
+        introduction=multiview_position_introduction,
+        question_instruction=position_mcq_direct_instructions,
+        answer_profiles={
+            "direct": AnswerInstructionProfile("direct", answer_templates=["[T]"]),
+        },
+        enabled=["direct"],
+    )
+    register_mcq(
+        f"{base_id}.sentence",
+        stems,
+        answers=sentence_answers,
+        introduction=multiview_position_introduction,
+        question_instruction=position_sentence_instructions,
+        answer_profiles={
+            "sentence": AnswerInstructionProfile(
+                "sentence", answer_templates=sentence_answers
+            ),
+        },
+        enabled=["sentence"],
+    )
+    register_mcq(
+        f"{base_id}.free",
+        stems,
+        answers=sentence_answers,
+        introduction=multiview_position_introduction,
+        question_instruction=EMPTY_QUESTION_INSTRUCTION,
+        answer_profiles={
+            "free": AnswerInstructionProfile("free", answer_templates=sentence_answers),
+        },
+        enabled=["free"],
+    )
 
 
 def register_structured_multiview_position_templates() -> None:
-    register_oe(
+    _register_oe_family(
         "multiview_position.object_relative",
         object_relative_stems,
-        [],
-        introduction=multiview_position_introduction,
-        question_instruction=EMPTY_QUESTION_INSTRUCTION,
-        answer_profiles=_oe_answer_profiles(object_relative_oe_sentence_answers),
-        instruction_types=list(_POSITION_OE_ANSWER_MODES),
+        object_relative_oe_sentence_answers,
     )
-    register_mcq(
+    _register_mcq_family(
         "multiview_position.object_relative_mcq",
         object_relative_stems_mcq,
-        introduction=multiview_position_introduction,
-        answer_profiles=_mcq_answer_profiles(object_relative_mcq_sentence_answers),
-        enabled=list(_POSITION_MCQ_ANSWER_MODES),
+        object_relative_mcq_sentence_answers,
     )
-    register_oe(
+    _register_oe_family(
         "multiview_position.viewer_at_anchor",
         viewer_at_anchor_stems,
-        [],
-        introduction=multiview_position_introduction,
-        question_instruction=EMPTY_QUESTION_INSTRUCTION,
-        answer_profiles=_oe_answer_profiles(viewer_at_anchor_oe_sentence_answers),
-        instruction_types=list(_POSITION_OE_ANSWER_MODES),
+        viewer_at_anchor_oe_sentence_answers,
     )
-    register_mcq(
+    _register_mcq_family(
         "multiview_position.viewer_at_anchor_mcq",
         viewer_at_anchor_stems_mcq,
-        introduction=multiview_position_introduction,
-        answer_profiles=_mcq_answer_profiles(viewer_at_anchor_mcq_sentence_answers),
-        enabled=list(_POSITION_MCQ_ANSWER_MODES),
+        viewer_at_anchor_mcq_sentence_answers,
     )
 
 

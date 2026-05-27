@@ -43,6 +43,64 @@ def default_profile(answers: Sequence[str]) -> Dict[str, AnswerInstructionProfil
     }
 
 
+def mode_answer_profiles(
+    mode: str,
+    answers: Sequence[str],
+) -> Dict[str, AnswerInstructionProfile]:
+    """Single enabled profile keyed by constraint mode (matches template id suffix)."""
+    return {
+        mode: AnswerInstructionProfile(mode, answer_templates=list(answers)),
+    }
+
+
+def register_oe_mode(
+    template_id: str,
+    mode: str,
+    stem: Sequence[str],
+    answers: Sequence[str],
+    *,
+    introduction: Optional[Sequence[str]] = None,
+    question_instruction: Optional[Sequence[str]] = None,
+    answer_profiles: Optional[Dict[str, AnswerInstructionProfile]] = None,
+) -> None:
+    profiles = answer_profiles or mode_answer_profiles(mode, answers)
+    if mode not in profiles:
+        raise ValueError(f"{template_id}: answer_profiles must include mode {mode!r}")
+    register_oe(
+        template_id,
+        stem,
+        answer_profiles=profiles,
+        instruction_types=[mode],
+        introduction=introduction,
+        question_instruction=question_instruction,
+    )
+
+
+def register_mcq_mode(
+    template_id: str,
+    mode: str,
+    stem: Sequence[str],
+    *,
+    answers: Optional[Sequence[str]] = None,
+    letter_only: bool = False,
+    introduction: Optional[Sequence[str]] = None,
+    question_instruction: Optional[Sequence[str]] = None,
+    answer_profiles: Optional[Dict[str, AnswerInstructionProfile]] = None,
+) -> None:
+    profiles = answer_profiles or mode_answer_profiles(mode, answers or ["[X]"])
+    if mode not in profiles:
+        raise ValueError(f"{template_id}: answer_profiles must include mode {mode!r}")
+    register_mcq(
+        template_id,
+        stem,
+        answer_profiles=profiles,
+        enabled=[mode],
+        letter_only=letter_only,
+        introduction=introduction,
+        question_instruction=question_instruction,
+    )
+
+
 def mixed_metric_default_profile(
     metric_answers: Sequence[str],
     semantic_answers: Sequence[str],

@@ -23,6 +23,7 @@ class PromptRenderRecord:
     # M8 structured render (empty when using legacy flat PromptTemplate only)
     question_type: str = ""
     instruction_type: str = ""
+    constraint_mode: str = ""
     introduction_index: int = -1
     question_instruction_index: int = -1
 

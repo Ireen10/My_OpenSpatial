@@ -1,5 +1,4 @@
-# depth.* templates: comparative depth only (no absolute depth values in QA).
-# All instruction modes are unconstrained (empty question_instruction pool).
+# depth.<family>.{direct|sentence|free} — question-side instruction constraints only.
 
 depth_ordering_questions = [
     "Given the [T] [A], please order them by depth (from near to far).",
@@ -133,47 +132,105 @@ depth_closest_answers_mcq = [
     "[X]",
     "The answer is [X]",
 ]
-from .register_structured import EMPTY_QUESTION_INSTRUCTION, register_mcq, register_oe
+from .register_structured import (
+    EMPTY_QUESTION_INSTRUCTION,
+    register_mcq_mode,
+    register_oe_mode,
+)
 
-_UNCONSTRAINED = EMPTY_QUESTION_INSTRUCTION
+depth_direct_instructions = [
+    "Answer with the required label, ordering, or option only.",
+    "Give a concise answer without extra explanation.",
+    "Reply using only the label(s) or option identifier needed.",
+]
+
+depth_sentence_instructions = [
+    "Answer in a complete sentence.",
+    "Reply using a full sentence.",
+    "Please describe your answer in a complete sentence.",
+]
+
+
+def _direct_answers(pool: list) -> list:
+    return [pool[0]] if pool else ["[X]"]
+
+
+def _register_depth_oe_family(
+    base_id: str,
+    stems: list,
+    all_answers: list,
+) -> None:
+    sentence_answers = all_answers
+    direct_answers = _direct_answers(all_answers)
+    register_oe_mode(
+        f"{base_id}.direct",
+        "direct",
+        stems,
+        direct_answers,
+        question_instruction=depth_direct_instructions,
+    )
+    register_oe_mode(
+        f"{base_id}.sentence",
+        "sentence",
+        stems,
+        sentence_answers,
+        question_instruction=depth_sentence_instructions,
+    )
+    register_oe_mode(
+        f"{base_id}.free",
+        "free",
+        stems,
+        sentence_answers,
+        question_instruction=EMPTY_QUESTION_INSTRUCTION,
+    )
+
+
+def _register_depth_mcq_family(
+    base_id: str,
+    stems: list,
+    all_answers: list,
+) -> None:
+    sentence_answers = all_answers
+    direct_answers = _direct_answers(all_answers)
+    register_mcq_mode(
+        f"{base_id}.direct",
+        "direct",
+        stems,
+        answers=direct_answers,
+        question_instruction=depth_direct_instructions,
+    )
+    register_mcq_mode(
+        f"{base_id}.sentence",
+        "sentence",
+        stems,
+        answers=sentence_answers,
+        question_instruction=depth_sentence_instructions,
+    )
+    register_mcq_mode(
+        f"{base_id}.free",
+        "free",
+        stems,
+        answers=sentence_answers,
+        question_instruction=EMPTY_QUESTION_INSTRUCTION,
+    )
 
 
 def register_structured_depth_templates() -> None:
-    register_oe(
-        "depth.ordering", depth_ordering_questions, depth_ordering_answers,
-        question_instruction=_UNCONSTRAINED,
+    _register_depth_oe_family("depth.ordering", depth_ordering_questions, depth_ordering_answers)
+    _register_depth_mcq_family(
+        "depth.ordering_mcq", depth_ordering_questions_mcq, depth_ordering_answers_mcq,
     )
-    register_mcq(
-        "depth.ordering_mcq", depth_ordering_questions_mcq,
-        answers=depth_ordering_answers_mcq,
-        question_instruction=_UNCONSTRAINED,
+    _register_depth_oe_family("depth.choice", depth_choice_questions, depth_choice_answers)
+    _register_depth_mcq_family(
+        "depth.choice_mcq", depth_choice_questions_mcq, depth_choice_answers_mcq,
     )
-    register_oe(
-        "depth.choice", depth_choice_questions, depth_choice_answers,
-        question_instruction=_UNCONSTRAINED,
+    _register_depth_oe_family("depth.farthest", depth_farthest_questions, depth_farthest_answers)
+    _register_depth_mcq_family(
+        "depth.farthest_mcq", depth_farthest_questions_mcq, depth_farthest_answers_mcq,
     )
-    register_mcq(
-        "depth.choice_mcq", depth_choice_questions_mcq,
-        answers=depth_choice_answers_mcq,
-        question_instruction=_UNCONSTRAINED,
-    )
-    register_oe(
-        "depth.farthest", depth_farthest_questions, depth_farthest_answers,
-        question_instruction=_UNCONSTRAINED,
-    )
-    register_mcq(
-        "depth.farthest_mcq", depth_farthest_questions_mcq,
-        answers=depth_farthest_answers_mcq,
-        question_instruction=_UNCONSTRAINED,
-    )
-    register_oe(
-        "depth.closest", depth_closest_questions, depth_closest_answers,
-        question_instruction=_UNCONSTRAINED,
-    )
-    register_mcq(
-        "depth.closest_mcq", depth_closest_questions_mcq,
-        answers=depth_closest_answers_mcq,
-        question_instruction=_UNCONSTRAINED,
+    _register_depth_oe_family("depth.closest", depth_closest_questions, depth_closest_answers)
+    _register_depth_mcq_family(
+        "depth.closest_mcq", depth_closest_questions_mcq, depth_closest_answers_mcq,
     )
 
 

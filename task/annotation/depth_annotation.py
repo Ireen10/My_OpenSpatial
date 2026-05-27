@@ -38,6 +38,10 @@ from .core.mark_spec import render_mark
 
 from utils.image_utils import convert_pil_to_bytes
 
+from .metric_gating import pick_instruction_mode
+
+_DEPTH_INSTRUCTION_MODES = ("direct", "sentence", "free")
+
 ORDINALS = [
     "first", "second", "third", "fourth", "fifth",
     "sixth", "seventh", "eighth", "ninth", "tenth",
@@ -257,7 +261,8 @@ class AnnotationGenerator(BaseAnnotationTask):
         is_points = t_label.startswith("points")
 
         if qtype == QuestionType.OPEN_ENDED:
-            tpl = "depth.ordering"
+            mode = pick_instruction_mode(_DEPTH_INSTRUCTION_MODES)
+            tpl = f"depth.ordering.{mode}"
             prompt = self.render_structured_prompt(
                 tpl,
                 shared={
@@ -273,7 +278,8 @@ class AnnotationGenerator(BaseAnnotationTask):
                 sorted_semantic=sorted_sem,
             )
         else:
-            tpl = "depth.ordering_mcq"
+            mode = pick_instruction_mode(_DEPTH_INSTRUCTION_MODES)
+            tpl = f"depth.ordering_mcq.{mode}"
             wrong_perms = []
             for _ in range(50):
                 perm = list(sorted_sem)
@@ -313,7 +319,9 @@ class AnnotationGenerator(BaseAnnotationTask):
 
         r = random.random()
         question_type = "farthest" if r < 0.4 else ("closest" if r < 0.8 else "choice")
-        tpl_name = f"depth.{question_type}" + ("_mcq" if qtype == QuestionType.MCQ else "")
+        base = f"depth.{question_type}" + ("_mcq" if qtype == QuestionType.MCQ else "")
+        mode = pick_instruction_mode(_DEPTH_INSTRUCTION_MODES)
+        tpl_name = f"{base}.{mode}"
         obj_str = ', '.join(tags)
 
         if question_type == "farthest":

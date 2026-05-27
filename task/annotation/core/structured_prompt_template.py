@@ -191,16 +191,24 @@ class StructuredPromptTemplate:
         types = self.enabled_types()
         if not types:
             raise ValueError(f"{self.template_id}: no answer instruction_type enabled")
-        itype = instruction_type or random.choice(types)
+        if instruction_type is not None:
+            itype = instruction_type
+        else:
+            from task.annotation.metric_gating import pick_instruction_mode
+
+            itype = pick_instruction_mode(types, is_metric_depth=is_metric_depth)
         if itype not in self.answer_profiles:
             raise KeyError(
                 f"{self.template_id}: instruction_type {itype!r} not in answer_profiles"
             )
         profile = self.answer_profiles[itype]
+        constraint_mode = itype
 
         if condition is not None:
             polarity = "true" if condition else "false"
             if polarity in self.answer_profiles:
+                if self.question_type == QuestionType.JUDGMENT:
+                    constraint_mode = "free"
                 itype = polarity
                 profile = self.answer_profiles[itype]
 
@@ -245,6 +253,7 @@ class StructuredPromptTemplate:
             answer_bindings=a_bindings,
             question_type=self.question_type.value,
             instruction_type=itype,
+            constraint_mode=constraint_mode,
             introduction_index=intro_i,
             question_instruction_index=qinstr_i,
         )

@@ -10,12 +10,16 @@ PROFILE_MODE_SUFFIXES = frozenset(
         "reasoning",
         "free",
         "sentence",
-        "default",
         "true",
         "false",
         "letter_only",
     }
 )
+
+_LEGACY_MODE_ALIASES = {
+    "default": "direct",
+    "letter_only": "direct",
+}
 
 
 def normalize_question_type_enum(raw: str) -> str:
@@ -32,13 +36,20 @@ def normalize_question_type_enum(raw: str) -> str:
     return q
 
 
+def _normalize_mode(mode: str) -> str:
+    m = (mode or "").strip()
+    if not m:
+        return "none"
+    return _LEGACY_MODE_ALIASES.get(m, m)
+
+
 def _mode_from_template_id(template_id: str) -> Optional[str]:
     tid = (template_id or "").strip()
     if not tid:
         return None
     last = tid.rsplit(".", 1)[-1]
     if last in PROFILE_MODE_SUFFIXES:
-        return last
+        return _normalize_mode(last)
     return None
 
 
@@ -46,8 +57,8 @@ def prompt_profile_stat_key(turn: Dict[str, Any]) -> str:
     """
     Histogram key: ``{question_type}_{mode}`` (e.g. ``MCQ_direct``).
 
-    Mode prefers the last ``template_id`` segment (``distance.relative_far.direct``);
-    otherwise ``prompt_struct.instruction_type`` (``letter_only`` → ``direct``).
+    Mode priority: ``constraint_mode`` > last ``template_id`` segment >
+    ``instruction_type`` (never use judgment answer polarity true/false).
     """
     ps = turn.get("prompt_struct")
     if not isinstance(ps, dict):
@@ -56,15 +67,25 @@ def prompt_profile_stat_key(turn: Dict[str, Any]) -> str:
     qt = normalize_question_type_enum(
         str(ps.get("question_type_enum") or turn.get("question_type") or "unknown")
     )
-    mode = _mode_from_template_id(str(ps.get("template_id") or ""))
+
+    mode: Optional[str] = None
+    cm = ps.get("constraint_mode")
+    if isinstance(cm, str) and cm.strip():
+        mode = _normalize_mode(cm)
+
+    if mode is None:
+        mode = _mode_from_template_id(str(ps.get("template_id") or ""))
+
     if mode is None:
         it = (ps.get("instruction_type") or "").strip()
-        if it == "letter_only":
-            mode = "direct"
+        if qt == "judgment" and it in ("true", "false"):
+            mode = "free"
         elif it:
-            mode = it
+            mode = _normalize_mode(it)
         else:
             mode = "none"
-    if mode == "letter_only":
-        mode = "direct"
+
+    if qt == "judgment" and mode in ("true", "false"):
+        mode = "free"
+
     return f"{qt}_{mode}"
