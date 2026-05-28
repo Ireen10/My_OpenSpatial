@@ -3,6 +3,18 @@
 #   multiview_distance.absolute_* — same stems as distance.absolute_* + introduction
 #   multiview_distance.*          — multiview-only (farthest/closest, obj_cam)
 #
+from .register_structured import (
+    EMPTY_QUESTION_INSTRUCTION,
+    MCQ_ANSWER_WITH_OPTION_AND_NAME_INSTRUCTIONS,
+    MULTIVIEW_SCENE_INTRODUCTION,
+    SENTENCE_QUESTION_INSTRUCTIONS,
+    mixed_metric_default_profile,
+    register_mcq,
+    register_mcq_mode,
+    register_oe_mode,
+    register_oe_mode_family,
+)
+
 # ─── Shared: absolute distance (OE) ─────────────────────────────────────
 
 absolute_distance_stems = [
@@ -70,14 +82,6 @@ positional_far_mcq_reasoning_semantic_answers = [
     "The [F] is farther from the [C] than the [G] is. Therefore, the correct option is [X].",
     "The [F] is farther from the [C] than the [G] is, so the answer is [X].",
 ]
-positional_far_mcq_free_metric_answers = [
-    "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. Therefore, the answer is [X].",
-]
-positional_far_mcq_free_semantic_answers = [
-    "The [F] is farther from the [C] than the [G] is. Therefore, the answer is [X].",
-    "The [F] is farther from the [C] than the [G] is, so the answer is [X].",
-]
-
 positional_close_oe_questions = [
     "Estimate the real-world distances between objects in this image. Which object is closer to the [C], the [A] or the [B]?",
     "Based on the spatial arrangement of objects in this image, which object is nearer to the [C], the [A] or the [B]?",
@@ -117,14 +121,6 @@ positional_close_mcq_reasoning_semantic_answers = [
     "The [F] is closer to the [C] than the [G] is. Therefore, the correct option is [X].",
     "The [F] is closer to the [C] than the [G] is, so the answer is [X].",
 ]
-positional_close_mcq_free_metric_answers = [
-    "The distance from [A] to [C] is about [D]. The distance from [B] to [C] is about [E]. Therefore, the answer is [X].",
-]
-positional_close_mcq_free_semantic_answers = [
-    "The [F] is closer to the [C] than the [G] is. Therefore, the answer is [X].",
-    "The [F] is closer to the [C] than the [G] is, so the answer is [X].",
-]
-
 relative_oe_direct_instructions = [
     "Answer with the object name only.",
     "Give the correct object as your direct answer.",
@@ -137,11 +133,7 @@ relative_oe_reasoning_instructions = [
     "Reason from the two absolute distances, then state which object applies.",
 ]
 
-relative_oe_sentence_instructions = [
-    "Answer in a complete sentence.",
-    "Reply using a full sentence.",
-    "Please describe your answer in a complete sentence.",
-]
+relative_oe_sentence_instructions = SENTENCE_QUESTION_INSTRUCTIONS
 
 relative_mcq_sentence_instructions = [
     "Answer in a complete sentence.",
@@ -171,7 +163,32 @@ positional_close_mcq_sentence_answers = [
     "[P]. The correct option is [X].",
 ]
 
-from .register_structured import MCQ_ANSWER_WITH_OPTION_AND_NAME_INSTRUCTIONS
+RELATIVE_POLARITY_POOLS = {
+    "far": {
+        "oe_stems": positional_far_oe_questions,
+        "oe_direct_answers": positional_far_oe_direct_answers,
+        "oe_sentence_answers": positional_far_oe_sentence_answers,
+        "mcq_stems": positional_far_mcq_questions,
+        "mcq_direct_answers": positional_far_mcq_direct_answers,
+        "mcq_sentence_answers": positional_far_mcq_sentence_answers,
+        "oe_reasoning_metric_answers": positional_far_oe_reasoning_metric_answers,
+        "oe_reasoning_semantic_answers": positional_far_oe_reasoning_semantic_answers,
+        "mcq_reasoning_metric_answers": positional_far_mcq_reasoning_metric_answers,
+        "mcq_reasoning_semantic_answers": positional_far_mcq_reasoning_semantic_answers,
+    },
+    "close": {
+        "oe_stems": positional_close_oe_questions,
+        "oe_direct_answers": positional_close_oe_direct_answers,
+        "oe_sentence_answers": positional_close_oe_sentence_answers,
+        "mcq_stems": positional_close_mcq_questions,
+        "mcq_direct_answers": positional_close_mcq_direct_answers,
+        "mcq_sentence_answers": positional_close_mcq_sentence_answers,
+        "oe_reasoning_metric_answers": positional_close_oe_reasoning_metric_answers,
+        "oe_reasoning_semantic_answers": positional_close_oe_reasoning_semantic_answers,
+        "mcq_reasoning_metric_answers": positional_close_mcq_reasoning_metric_answers,
+        "mcq_reasoning_semantic_answers": positional_close_mcq_reasoning_semantic_answers,
+    },
+}
 
 relative_mcq_direct_instructions = MCQ_ANSWER_WITH_OPTION_AND_NAME_INSTRUCTIONS
 
@@ -185,13 +202,7 @@ relative_mcq_reasoning_instructions = [
 
 # ─── Multiview distance (N-ary farthest/closest; obj_cam in multiview_distance_obj_cam.py) ──
 
-multiview_distance_introduction = [
-    "The images show the same scene captured from different viewpoints.",
-    "You are viewing multiple perspectives of one shared scene.",
-    "These multi-view images depict the same environment from different camera poses.",
-    "The provided views are different angles of the same space.",
-    "All images represent the same scene under different viewpoints.",
-]
+multiview_distance_introduction = MULTIVIEW_SCENE_INTRODUCTION
 
 multiview_distance_farthest_questions = [
     "Among the objects [T], which one is the farthest from [X]?",
@@ -239,77 +250,46 @@ multiview_distance_obj_cam_questions = [
     "Between View 1 and View 2, in which view is the [A] [Y] to the camera?",
 ]
 
-multiview_distance_obj_cam_answers = [
+multiview_distance_obj_cam_option_phrases = [
     "[Y] to the spot where camera [X] was positioned",
     "The [A] is [Y] to the camera in [X].",
     "In [X], the [A] is [Y] to the camera position.",
 ]
+# Backward-compatible alias used by annotation module imports.
+multiview_distance_obj_cam_answers = multiview_distance_obj_cam_option_phrases
+multiview_distance_obj_cam_equal_option = (
+    "distance to the spot where camera View 1 and View 2 were positioned is equal"
+)
 
 multiview_distance_obj_cam_mcq_questions = [q + "\n[O]" for q in multiview_distance_obj_cam_questions]
 
 multiview_distance_obj_cam_mcq_answers = [
     "[X].",
 ]
-from .register_structured import (
-    EMPTY_QUESTION_INSTRUCTION,
-    mixed_metric_default_profile,
-    register_mcq,
-    register_mcq_mode,
-    register_oe,
-    register_oe_mode,
-)
-
-
 def _relative_oe_reasoning_profiles(polarity: str):
-    if polarity == "far":
-        return mixed_metric_default_profile(
-            positional_far_oe_reasoning_metric_answers,
-            positional_far_oe_reasoning_semantic_answers,
-            instruction_type="reasoning",
-        )
+    pools = RELATIVE_POLARITY_POOLS[polarity]
     return mixed_metric_default_profile(
-        positional_close_oe_reasoning_metric_answers,
-        positional_close_oe_reasoning_semantic_answers,
+        pools["oe_reasoning_metric_answers"],
+        pools["oe_reasoning_semantic_answers"],
         instruction_type="reasoning",
     )
 
 
 def _relative_mcq_reasoning_profiles(polarity: str):
-    if polarity == "far":
-        return mixed_metric_default_profile(
-            positional_far_mcq_reasoning_metric_answers,
-            positional_far_mcq_reasoning_semantic_answers,
-            instruction_type="reasoning",
-        )
+    pools = RELATIVE_POLARITY_POOLS[polarity]
     return mixed_metric_default_profile(
-        positional_close_mcq_reasoning_metric_answers,
-        positional_close_mcq_reasoning_semantic_answers,
+        pools["mcq_reasoning_metric_answers"],
+        pools["mcq_reasoning_semantic_answers"],
         instruction_type="reasoning",
-    )
-
-
-def _relative_mcq_free_profiles(polarity: str):
-    if polarity == "far":
-        return mixed_metric_default_profile(
-            positional_far_mcq_free_metric_answers,
-            positional_far_mcq_free_semantic_answers,
-        )
-    return mixed_metric_default_profile(
-        positional_close_mcq_free_metric_answers,
-        positional_close_mcq_free_semantic_answers,
     )
 
 
 def _register_relative_oe_pair(polarity: str) -> None:
     """Register far/close OE: direct / reasoning / sentence / free."""
-    if polarity == "far":
-        stems = positional_far_oe_questions
-        direct_ans = positional_far_oe_direct_answers
-        sentence_ans = positional_far_oe_sentence_answers
-    else:
-        stems = positional_close_oe_questions
-        direct_ans = positional_close_oe_direct_answers
-        sentence_ans = positional_close_oe_sentence_answers
+    pools = RELATIVE_POLARITY_POOLS[polarity]
+    stems = pools["oe_stems"]
+    direct_ans = pools["oe_direct_answers"]
+    sentence_ans = pools["oe_sentence_answers"]
 
     reasoning_profiles = _relative_oe_reasoning_profiles(polarity)
 
@@ -345,14 +325,10 @@ def _register_relative_oe_pair(polarity: str) -> None:
 
 
 def _register_relative_mcq_pair(polarity: str) -> None:
-    if polarity == "far":
-        stems = positional_far_mcq_questions
-        direct_ans = positional_far_mcq_direct_answers
-        sentence_ans = positional_far_mcq_sentence_answers
-    else:
-        stems = positional_close_mcq_questions
-        direct_ans = positional_close_mcq_direct_answers
-        sentence_ans = positional_close_mcq_sentence_answers
+    pools = RELATIVE_POLARITY_POOLS[polarity]
+    stems = pools["mcq_stems"]
+    direct_ans = pools["mcq_direct_answers"]
+    sentence_ans = pools["mcq_sentence_answers"]
 
     reasoning_profiles = _relative_mcq_reasoning_profiles(polarity)
 
@@ -387,30 +363,46 @@ def _register_relative_mcq_pair(polarity: str) -> None:
 
 
 def _register_absolute_distance_family(prefix: str, *, introduction=None) -> None:
-    kwargs = {"introduction": introduction} if introduction else {}
+    register_oe_mode_family(
+        prefix,
+        absolute_distance_stems,
+        absolute_sentence_answers,
+        direct_answers=absolute_direct_answers,
+        direct_instructions=absolute_direct_instructions,
+        sentence_instructions=absolute_sentence_instructions,
+        introduction=introduction,
+    )
+
+
+def _register_multiview_superlative_family(
+    polarity: str,
+    stems: list,
+    direct_answers: list,
+    sentence_answers: list,
+) -> None:
     register_oe_mode(
-        f"{prefix}.direct",
+        f"multiview_distance.{polarity}.direct",
         "direct",
-        absolute_distance_stems,
-        absolute_direct_answers,
-        question_instruction=absolute_direct_instructions,
-        **kwargs,
+        stems,
+        direct_answers,
+        introduction=multiview_distance_introduction,
+        question_instruction=relative_oe_direct_instructions,
     )
     register_oe_mode(
-        f"{prefix}.sentence",
-        "sentence",
-        absolute_distance_stems,
-        absolute_sentence_answers,
-        question_instruction=absolute_sentence_instructions,
-        **kwargs,
+        f"multiview_distance.{polarity}.reasoning",
+        "reasoning",
+        stems,
+        sentence_answers,
+        introduction=multiview_distance_introduction,
+        question_instruction=relative_oe_reasoning_instructions,
     )
     register_oe_mode(
-        f"{prefix}.free",
+        f"multiview_distance.{polarity}.free",
         "free",
-        absolute_distance_stems,
-        absolute_sentence_answers,
+        stems,
+        sentence_answers,
+        introduction=multiview_distance_introduction,
         question_instruction=EMPTY_QUESTION_INSTRUCTION,
-        **kwargs,
     )
 
 
@@ -440,29 +432,11 @@ def register_structured_distance_templates() -> None:
             multiview_distance_closest_sentence_answers,
         ),
     ):
-        register_oe_mode(
-            f"multiview_distance.{polarity}.direct",
-            "direct",
+        _register_multiview_superlative_family(
+            polarity,
             stems,
             direct_ans,
-            introduction=multiview_distance_introduction,
-            question_instruction=relative_oe_direct_instructions,
-        )
-        register_oe_mode(
-            f"multiview_distance.{polarity}.reasoning",
-            "reasoning",
-            stems,
             sentence_ans,
-            introduction=multiview_distance_introduction,
-            question_instruction=relative_oe_reasoning_instructions,
-        )
-        register_oe_mode(
-            f"multiview_distance.{polarity}.free",
-            "free",
-            stems,
-            sentence_ans,
-            introduction=multiview_distance_introduction,
-            question_instruction=EMPTY_QUESTION_INSTRUCTION,
         )
     register_mcq(
         "multiview_distance.obj_cam_mcq",

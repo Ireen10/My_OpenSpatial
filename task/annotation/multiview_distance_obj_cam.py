@@ -5,7 +5,10 @@ from .core.base_multiview_task import BaseMultiviewAnnotationTask
 from .core.prompt_template import PromptTemplate
 from .core.visual_marker import MarkConfig
 from .core.question_type import QuestionType
-from ..prompt_templates.distance_prompt_templates import multiview_distance_obj_cam_answers
+from ..prompt_templates.distance_prompt_templates import (
+    multiview_distance_obj_cam_equal_option,
+    multiview_distance_obj_cam_option_phrases,
+)
 
 
 class AnnotationGenerator(BaseMultiviewAnnotationTask):
@@ -59,10 +62,10 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         else:
             answer = "B"
 
-        opt_tpl = random.choice(multiview_distance_obj_cam_answers)
+        opt_tpl = random.choice(multiview_distance_obj_cam_option_phrases)
         opt_a = PromptTemplate._fill(opt_tpl, {"A": A_desc, "Y": close_far, "X": "View 1"})
         opt_b = PromptTemplate._fill(opt_tpl, {"A": A_desc, "Y": close_far, "X": "View 2"})
-        opt_c = "distance to the spot where camera View 1 and View 2 were positioned is equal"
+        opt_c = multiview_distance_obj_cam_equal_option
         options_str = f"Options: A. {opt_a}\nB. {opt_b}\nC. {opt_c}"
 
         return self.render_structured_prompt(

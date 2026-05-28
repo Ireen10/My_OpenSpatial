@@ -129,9 +129,9 @@ depth_closest_answers_mcq = [
     "The answer is [X].",
 ]
 from .register_structured import (
-    EMPTY_QUESTION_INSTRUCTION,
-    register_mcq_mode,
-    register_oe_mode,
+    SENTENCE_QUESTION_INSTRUCTIONS,
+    register_mcq_mode_family,
+    register_oe_mode_family,
 )
 
 depth_direct_instructions = [
@@ -140,15 +140,7 @@ depth_direct_instructions = [
     "Reply using only the label(s) or option identifier needed.",
 ]
 
-depth_sentence_instructions = [
-    "Answer in a complete sentence.",
-    "Reply using a full sentence.",
-    "Please describe your answer in a complete sentence.",
-]
-
-
-def _direct_answers(pool: list) -> list:
-    return [pool[0]] if pool else ["[X]"]
+depth_sentence_instructions = SENTENCE_QUESTION_INSTRUCTIONS
 
 
 def _register_depth_oe_family(
@@ -156,28 +148,12 @@ def _register_depth_oe_family(
     stems: list,
     all_answers: list,
 ) -> None:
-    sentence_answers = all_answers
-    direct_answers = _direct_answers(all_answers)
-    register_oe_mode(
-        f"{base_id}.direct",
-        "direct",
+    register_oe_mode_family(
+        base_id,
         stems,
-        direct_answers,
-        question_instruction=depth_direct_instructions,
-    )
-    register_oe_mode(
-        f"{base_id}.sentence",
-        "sentence",
-        stems,
-        sentence_answers,
-        question_instruction=depth_sentence_instructions,
-    )
-    register_oe_mode(
-        f"{base_id}.free",
-        "free",
-        stems,
-        sentence_answers,
-        question_instruction=EMPTY_QUESTION_INSTRUCTION,
+        all_answers,
+        direct_instructions=depth_direct_instructions,
+        sentence_instructions=depth_sentence_instructions,
     )
 
 
@@ -186,28 +162,12 @@ def _register_depth_mcq_family(
     stems: list,
     all_answers: list,
 ) -> None:
-    sentence_answers = all_answers
-    direct_answers = _direct_answers(all_answers)
-    register_mcq_mode(
-        f"{base_id}.direct",
-        "direct",
+    register_mcq_mode_family(
+        base_id,
         stems,
-        answers=direct_answers,
-        question_instruction=depth_direct_instructions,
-    )
-    register_mcq_mode(
-        f"{base_id}.sentence",
-        "sentence",
-        stems,
-        answers=sentence_answers,
-        question_instruction=depth_sentence_instructions,
-    )
-    register_mcq_mode(
-        f"{base_id}.free",
-        "free",
-        stems,
-        answers=sentence_answers,
-        question_instruction=EMPTY_QUESTION_INSTRUCTION,
+        all_answers,
+        direct_instructions=depth_direct_instructions,
+        sentence_instructions=depth_sentence_instructions,
     )
 
 

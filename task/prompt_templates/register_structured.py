@@ -7,6 +7,22 @@ from typing import Dict, List, Optional, Sequence
 # Unconstrained ("free") instruction mode: no question_instruction line (empty pool).
 EMPTY_QUESTION_INSTRUCTION: List[str] = []
 
+# Shared question-side instruction pools used across tasks.
+SENTENCE_QUESTION_INSTRUCTIONS: List[str] = [
+    "Answer in a complete sentence.",
+    "Reply using a full sentence.",
+    "Please describe your answer in a complete sentence.",
+]
+
+# Shared introduction pool for multiview tasks.
+MULTIVIEW_SCENE_INTRODUCTION: List[str] = [
+    "The images show the same scene captured from different viewpoints.",
+    "You are viewing multiple perspectives of one shared scene.",
+    "These multi-view images depict the same environment from different camera poses.",
+    "The provided views are different angles of the same space.",
+    "All images represent the same scene under different viewpoints.",
+]
+
 # MCQ answer-format hints (mix short + explicit; no concrete option-letter examples in pool).
 MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS: List[str] = [
     "Answer with the correct option.",
@@ -98,6 +114,83 @@ def register_mcq_mode(
         letter_only=letter_only,
         introduction=introduction,
         question_instruction=question_instruction,
+    )
+
+
+def _direct_answers(pool: Sequence[str]) -> List[str]:
+    values = list(pool)
+    return [values[0]] if values else ["[X]"]
+
+
+def register_oe_mode_family(
+    base_id: str,
+    stems: Sequence[str],
+    sentence_answers: Sequence[str],
+    *,
+    direct_instructions: Sequence[str],
+    sentence_instructions: Sequence[str] = SENTENCE_QUESTION_INSTRUCTIONS,
+    introduction: Optional[Sequence[str]] = None,
+    direct_answers: Optional[Sequence[str]] = None,
+) -> None:
+    register_oe_mode(
+        f"{base_id}.direct",
+        "direct",
+        stems,
+        list(direct_answers) if direct_answers is not None else _direct_answers(sentence_answers),
+        introduction=introduction,
+        question_instruction=direct_instructions,
+    )
+    register_oe_mode(
+        f"{base_id}.sentence",
+        "sentence",
+        stems,
+        sentence_answers,
+        introduction=introduction,
+        question_instruction=sentence_instructions,
+    )
+    register_oe_mode(
+        f"{base_id}.free",
+        "free",
+        stems,
+        sentence_answers,
+        introduction=introduction,
+        question_instruction=EMPTY_QUESTION_INSTRUCTION,
+    )
+
+
+def register_mcq_mode_family(
+    base_id: str,
+    stems: Sequence[str],
+    sentence_answers: Sequence[str],
+    *,
+    direct_instructions: Sequence[str],
+    sentence_instructions: Sequence[str] = SENTENCE_QUESTION_INSTRUCTIONS,
+    introduction: Optional[Sequence[str]] = None,
+    direct_answers: Optional[Sequence[str]] = None,
+) -> None:
+    register_mcq_mode(
+        f"{base_id}.direct",
+        "direct",
+        stems,
+        answers=list(direct_answers) if direct_answers is not None else _direct_answers(sentence_answers),
+        introduction=introduction,
+        question_instruction=direct_instructions,
+    )
+    register_mcq_mode(
+        f"{base_id}.sentence",
+        "sentence",
+        stems,
+        answers=sentence_answers,
+        introduction=introduction,
+        question_instruction=sentence_instructions,
+    )
+    register_mcq_mode(
+        f"{base_id}.free",
+        "free",
+        stems,
+        answers=sentence_answers,
+        introduction=introduction,
+        question_instruction=EMPTY_QUESTION_INSTRUCTION,
     )
 
 

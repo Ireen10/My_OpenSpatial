@@ -35,61 +35,23 @@ position_mcq_sentence_answers = [
     "[P]. The correct option is [X].",
 ]
 
-position_sentence_instructions = [
-    "Answer in a complete sentence.",
-    "Reply using a full sentence.",
-    "Please describe your answer in a complete sentence.",
-]
-
-from ..annotation.core.structured_prompt_template import AnswerInstructionProfile
+from .register_structured import SENTENCE_QUESTION_INSTRUCTIONS
 from .register_structured import (
-    EMPTY_QUESTION_INSTRUCTION,
     MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS,
-    register_mcq,
+    register_mcq_mode_family,
 )
 
 position_mcq_direct_instructions = MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS
 
-_POSITION_MCQ_MODES = ("direct", "sentence", "free")
-
-
 def _register_position_mcq_family(template_id: str, stems: list) -> None:
-    register_mcq(
-        f"{template_id}.direct",
+    register_mcq_mode_family(
+        template_id,
         stems,
-        answers=["[X]"],
+        position_mcq_sentence_answers,
+        direct_answers=["[X]"],
+        direct_instructions=position_mcq_direct_instructions,
+        sentence_instructions=SENTENCE_QUESTION_INSTRUCTIONS,
         introduction=position_introduction,
-        question_instruction=position_mcq_direct_instructions,
-        answer_profiles={
-            "direct": AnswerInstructionProfile("direct", answer_templates=["[X]"]),
-        },
-        enabled=["direct"],
-    )
-    register_mcq(
-        f"{template_id}.sentence",
-        stems,
-        answers=position_mcq_sentence_answers,
-        introduction=position_introduction,
-        question_instruction=position_sentence_instructions,
-        answer_profiles={
-            "sentence": AnswerInstructionProfile(
-                "sentence", answer_templates=position_mcq_sentence_answers
-            ),
-        },
-        enabled=["sentence"],
-    )
-    register_mcq(
-        f"{template_id}.free",
-        stems,
-        answers=position_mcq_sentence_answers,
-        introduction=position_introduction,
-        question_instruction=EMPTY_QUESTION_INSTRUCTION,
-        answer_profiles={
-            "free": AnswerInstructionProfile(
-                "free", answer_templates=position_mcq_sentence_answers
-            ),
-        },
-        enabled=["free"],
     )
 
 

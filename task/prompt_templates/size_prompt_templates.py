@@ -39,38 +39,6 @@ height_answers_single_view = [
     "The height of the [A] is [X].",
     "The [A] stands approximately [X] tall.",
 ]
-
-
-
-unit_centimeter_disclaimer = [
-    "Calculations are in centimeters.",
-    "Format the measurement in centimeters.",
-    "Express the measurement in centimeters.",
-    "All measurement are provided in centimeters.",
-    "The size mentioned are in centimeters.",
-    "All size references are in centimeters.",
-    "Measurement are expressed in centimeters.",
-    "Please be aware that the size are in centimeters.",
-    "All length measurement are in centimeters.",
-    "The size are indicated in centimeters.",
-]
-
-unit_meter_disclaimer = [
-    "Calculations are in meters.",
-    "Format the measurement in meters.",
-    "Express the measurement in meters.",
-    "All measurement are provided in meters.",
-    "The size mentioned are in meters.",
-    "Please note that the dimensions are given in meters.",
-    "All size references are in meters.",
-    "Measurement are expressed in meters.",
-    "The dimensions provided are in meters.",
-    "Please be aware that the size are in meters.",
-    "All length measurement are in meters.",
-    "The size are indicated in meters.",
-]
-
-
 #### Single-view relative size predicate templates ####
 
 big_predicate_questions_single_view = [
@@ -111,14 +79,6 @@ small_false_responses_single_view = [
 
 
 #### Multiview size (pair judgment + N-ary superlative) ####
-
-multiview_size_introduction = [
-    "The images show the same scene captured from different viewpoints.",
-    "You are viewing multiple perspectives of one shared scene.",
-    "These multi-view images depict the same environment from different camera poses.",
-    "The provided views are different angles of the same space.",
-    "All images represent the same scene under different viewpoints.",
-]
 
 big_predicate_questions_multi_view = [
     "Is the [A] bigger than the [B]?",
@@ -174,10 +134,6 @@ multiview_size_biggest_questions = [
     "Which object in [T] is the biggest?",
 ]
 
-multiview_size_biggest_direct_answers = [
-    "[X].",
-]
-
 multiview_size_biggest_sentence_answers = [
     "The [X] is the biggest among the objects.",
     "Among the objects, the [X] is larger than any of the others.",
@@ -192,10 +148,6 @@ multiview_size_smallest_questions = [
     "Which object in [T] is the smallest?",
 ]
 
-multiview_size_smallest_direct_answers = [
-    "[X].",
-]
-
 multiview_size_smallest_sentence_answers = [
     "The [X] is the smallest among the objects.",
     "Among the objects, the [X] is smaller than any of the others.",
@@ -203,11 +155,13 @@ multiview_size_smallest_sentence_answers = [
 ]
 from .register_structured import (
     EMPTY_QUESTION_INSTRUCTION,
+    MULTIVIEW_SCENE_INTRODUCTION,
+    register_oe_mode_family,
     register_judgment,
-    register_oe_mode,
 )
 
 _UNCONSTRAINED = EMPTY_QUESTION_INSTRUCTION
+multiview_size_introduction = MULTIVIEW_SCENE_INTRODUCTION
 
 size_absolute_direct_instructions = [
     "Give the numeric measurement with the appropriate unit (meters or centimeters).",
@@ -226,26 +180,13 @@ size_absolute_direct_answers = ["[X]"]
 
 def _register_size_absolute_family(kind: str, stems: list, sentence_answers: list) -> None:
     prefix = f"size.{kind}.single_view"
-    register_oe_mode(
-        f"{prefix}.direct",
-        "direct",
-        stems,
-        size_absolute_direct_answers,
-        question_instruction=size_absolute_direct_instructions,
-    )
-    register_oe_mode(
-        f"{prefix}.sentence",
-        "sentence",
+    register_oe_mode_family(
+        prefix,
         stems,
         sentence_answers,
-        question_instruction=size_absolute_sentence_instructions,
-    )
-    register_oe_mode(
-        f"{prefix}.free",
-        "free",
-        stems,
-        sentence_answers,
-        question_instruction=EMPTY_QUESTION_INSTRUCTION,
+        direct_answers=size_absolute_direct_answers,
+        direct_instructions=size_absolute_direct_instructions,
+        sentence_instructions=size_absolute_sentence_instructions,
     )
 
 
@@ -287,43 +228,26 @@ def register_structured_size_templates() -> None:
         introduction=multiview_size_introduction,
         question_instruction=_UNCONSTRAINED,
     )
-    for polarity, stems, direct_ans, sentence_ans in (
+    for polarity, stems, sentence_ans in (
         (
             "biggest",
             multiview_size_biggest_questions,
-            multiview_size_biggest_direct_answers,
             multiview_size_biggest_sentence_answers,
         ),
         (
             "smallest",
             multiview_size_smallest_questions,
-            multiview_size_smallest_direct_answers,
             multiview_size_smallest_sentence_answers,
         ),
     ):
-        register_oe_mode(
-            f"multiview_size.{polarity}.direct",
-            "direct",
-            stems,
-            direct_ans,
-            introduction=multiview_size_introduction,
-            question_instruction=_UNCONSTRAINED,
-        )
-        register_oe_mode(
-            f"multiview_size.{polarity}.sentence",
-            "sentence",
+        register_oe_mode_family(
+            f"multiview_size.{polarity}",
             stems,
             sentence_ans,
+            direct_answers=["[X]."],
+            direct_instructions=_UNCONSTRAINED,
+            sentence_instructions=_UNCONSTRAINED,
             introduction=multiview_size_introduction,
-            question_instruction=_UNCONSTRAINED,
-        )
-        register_oe_mode(
-            f"multiview_size.{polarity}.free",
-            "free",
-            stems,
-            sentence_ans,
-            introduction=multiview_size_introduction,
-            question_instruction=EMPTY_QUESTION_INSTRUCTION,
         )
 
 

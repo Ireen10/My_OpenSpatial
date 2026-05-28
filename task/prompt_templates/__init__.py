@@ -1,5 +1,5 @@
 """
-Auto-import all template modules to trigger TemplateRegistry.register() calls.
+Auto-import template modules to trigger StructuredTemplateRegistry registrations.
 """
 from . import distance_prompt_templates
 from . import size_prompt_templates

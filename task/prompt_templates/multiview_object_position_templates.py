@@ -1,14 +1,6 @@
 # multiview_position.{object_relative,viewer_at_anchor}[._mcq].{direct|sentence|free}
 # Instruction constraints on the question only (question_instruction pools).
 
-multiview_position_introduction = [
-    "The images show the same scene captured from different viewpoints.",
-    "You are viewing multiple perspectives of one shared scene.",
-    "These multi-view images depict the same environment from different camera poses.",
-    "The provided views are different angles of the same space.",
-    "All images represent the same scene under different viewpoints.",
-]
-
 object_relative_stems = [
     "If the [A] is [X] of the [B] in image 1, what direction is the [C] (visible in image 2) from the [B]?",
     "If the [A] is to the [X] of the [B] in the first image, what direction is the [C] from the [B]?",
@@ -53,12 +45,6 @@ FRAME_PREMISE_POOLS = {
 object_relative_stems_mcq = [q + "\n[O]" for q in object_relative_stems]
 viewer_at_anchor_stems_mcq = [q + "\n[O]" for q in viewer_at_anchor_stems]
 
-position_sentence_instructions = [
-    "Answer in a complete sentence.",
-    "Reply using a full sentence.",
-    "Please describe your answer in a complete sentence.",
-]
-
 object_relative_oe_sentence_answers = [
     "[P], the [C] is [D] of the [B].",
     "[P], the [C] lies to the [D] of the [B].",
@@ -83,82 +69,62 @@ viewer_at_anchor_mcq_sentence_answers = [
     "[P], the [C] is on the [D] side relative to me. The correct option is [E].",
 ]
 
-from ..annotation.core.structured_prompt_template import AnswerInstructionProfile
 from .register_structured import (
     EMPTY_QUESTION_INSTRUCTION,
     MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS,
-    register_mcq,
-    register_oe,
+    MULTIVIEW_SCENE_INTRODUCTION,
+    SENTENCE_QUESTION_INSTRUCTIONS,
+    register_mcq_mode,
+    register_oe_mode,
 )
 
+multiview_position_introduction = MULTIVIEW_SCENE_INTRODUCTION
+position_sentence_instructions = SENTENCE_QUESTION_INSTRUCTIONS
 position_mcq_direct_instructions = MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS
 
-_POSITION_OE_MODES = ("sentence", "free")
-_POSITION_MCQ_MODES = ("direct", "sentence", "free")
-
-
 def _register_oe_family(base_id: str, stems: list, sentence_answers: list) -> None:
-    register_oe(
+    register_oe_mode(
         f"{base_id}.sentence",
+        "sentence",
         stems,
-        [],
+        sentence_answers,
         introduction=multiview_position_introduction,
         question_instruction=position_sentence_instructions,
-        answer_profiles={
-            "sentence": AnswerInstructionProfile(
-                "sentence", answer_templates=sentence_answers
-            ),
-        },
-        instruction_types=["sentence"],
     )
-    register_oe(
+    register_oe_mode(
         f"{base_id}.free",
+        "free",
         stems,
-        [],
+        sentence_answers,
         introduction=multiview_position_introduction,
         question_instruction=EMPTY_QUESTION_INSTRUCTION,
-        answer_profiles={
-            "free": AnswerInstructionProfile("free", answer_templates=sentence_answers),
-        },
-        instruction_types=["free"],
     )
 
 
 def _register_mcq_family(base_id: str, stems: list, sentence_answers: list) -> None:
-    register_mcq(
+    register_mcq_mode(
         f"{base_id}.direct",
+        "direct",
         stems,
         answers=["[T]"],
         introduction=multiview_position_introduction,
         question_instruction=position_mcq_direct_instructions,
-        answer_profiles={
-            "direct": AnswerInstructionProfile("direct", answer_templates=["[T]"]),
-        },
-        enabled=["direct"],
     )
-    register_mcq(
+    register_mcq_mode(
         f"{base_id}.sentence",
+        "sentence",
         stems,
         answers=sentence_answers,
         introduction=multiview_position_introduction,
         question_instruction=position_sentence_instructions,
-        answer_profiles={
-            "sentence": AnswerInstructionProfile(
-                "sentence", answer_templates=sentence_answers
-            ),
-        },
-        enabled=["sentence"],
     )
-    register_mcq(
+    register_mcq_mode(
         f"{base_id}.free",
+        "free",
         stems,
         answers=sentence_answers,
         introduction=multiview_position_introduction,
         question_instruction=EMPTY_QUESTION_INSTRUCTION,
-        answer_profiles={
-            "free": AnswerInstructionProfile("free", answer_templates=sentence_answers),
-        },
-        enabled=["free"],
     )
 
 
