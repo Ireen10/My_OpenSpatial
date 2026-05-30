@@ -16,8 +16,7 @@ size_predicate_questions_single_view = [
     "Can you provide the size of the [A]'s most significant dimension (length, width, or height)?",
 ]
 
-size_answers_single_view = [
-    "[X].",
+size_sentence_answers_single_view = [
     "The largest dimension of the [A] is [X].",
     "The [A] measures approximately [X] at its longest side.",
 ]
@@ -34,8 +33,7 @@ height_predicate_questions_single_view = [
     "What is the vertical dimension of the [A]?",
 ]
 
-height_answers_single_view = [
-    "[X].",
+height_sentence_answers_single_view = [
     "The height of the [A] is [X].",
     "The [A] stands approximately [X] tall.",
 ]
@@ -192,10 +190,10 @@ def _register_size_absolute_family(kind: str, stems: list, sentence_answers: lis
 
 def register_structured_size_templates() -> None:
     _register_size_absolute_family(
-        "absolute", size_predicate_questions_single_view, size_answers_single_view,
+        "absolute", size_predicate_questions_single_view, size_sentence_answers_single_view,
     )
     _register_size_absolute_family(
-        "height", height_predicate_questions_single_view, height_answers_single_view,
+        "height", height_predicate_questions_single_view, height_sentence_answers_single_view,
     )
 
     register_judgment(
