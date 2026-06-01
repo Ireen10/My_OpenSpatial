@@ -29,20 +29,13 @@ class Sam3Refiner(BaseTask):
     def __init__(self, args, device=None):
         super().__init__(args)
         self.device = self._resolve_device(args, device)
-        self._configure_hf_cache(args)
         self._prepare_npu_runtime_if_needed()
 
         segmenter_model = args.get("segmenter_model", "facebook/sam3")
         segmenter_checkpoint_path = args.get("segmenter_checkpoint_path")
         segmenter_bpe_path = args.get("segmenter_bpe_path")
-        segmenter_load_from_hf = args.get("segmenter_load_from_hf", True)
         segmenter_resolution = args.get("segmenter_resolution", 1008)
-
-        if not segmenter_load_from_hf and not segmenter_checkpoint_path:
-            raise ValueError(
-                "segmenter_load_from_hf is False but segmenter_checkpoint_path is not provided."
-            )
-        if segmenter_load_from_hf and not segmenter_checkpoint_path:
+        if not segmenter_checkpoint_path:
             segmenter_version = self._resolve_sam3_version(segmenter_model)
             segmenter_checkpoint_path = download_ckpt_from_hf(version=segmenter_version)
 
@@ -83,20 +76,10 @@ class Sam3Refiner(BaseTask):
     def _resolve_sam3_version(cls, model_name):
         if model_name not in cls.MODEL_VERSION_MAP:
             raise ValueError(
-                "Unsupported segmenter_model for SAM3 auto-download. "
-                "Use one of: facebook/sam3, sam3, facebook/sam3.1, sam3.1; "
-                "or provide segmenter_checkpoint_path for local checkpoint."
+                "Unsupported segmenter_model. Use one of: "
+                "facebook/sam3, sam3, facebook/sam3.1, sam3.1."
             )
         return cls.MODEL_VERSION_MAP[model_name]
-
-    @staticmethod
-    def _configure_hf_cache(args):
-        hf_home = args.get("hf_home")
-        hf_hub_cache = args.get("hf_hub_cache")
-        if hf_home:
-            os.environ["HF_HOME"] = hf_home
-        if hf_hub_cache:
-            os.environ["HF_HUB_CACHE"] = hf_hub_cache
 
     def _prepare_npu_runtime_if_needed(self):
         if isinstance(self.device, str) and self.device.startswith("npu"):

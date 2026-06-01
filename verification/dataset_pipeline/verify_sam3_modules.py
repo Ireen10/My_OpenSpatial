@@ -133,12 +133,9 @@ def _build_common_args(parsed) -> dict:
     args = {
         "device": parsed.device,
         "segmenter_model": parsed.segmenter_model,
-        "segmenter_load_from_hf": parsed.segmenter_load_from_hf,
         "segmenter_checkpoint_path": parsed.segmenter_checkpoint_path,
         "segmenter_bpe_path": parsed.segmenter_bpe_path,
         "segmenter_resolution": parsed.segmenter_resolution,
-        "hf_home": parsed.hf_home,
-        "hf_hub_cache": parsed.hf_hub_cache,
     }
     return {k: v for k, v in args.items() if v is not None}
 
@@ -282,15 +279,10 @@ def main() -> int:
         help="SAM3 model id (record only).",
     )
     parser.add_argument(
-        "--segmenter_load_from_hf",
-        action="store_true",
-        help="Allow auto-download from HuggingFace if checkpoint path not provided.",
-    )
-    parser.add_argument(
         "--segmenter_checkpoint_path",
         type=str,
         default=None,
-        help="Local SAM3 checkpoint path, recommended in restricted environments.",
+        help="Optional local SAM3 checkpoint path. If omitted, auto-download is used.",
     )
     parser.add_argument(
         "--segmenter_bpe_path",
@@ -304,19 +296,6 @@ def main() -> int:
         default=1008,
         help="SAM3 processor resolution.",
     )
-    parser.add_argument(
-        "--hf_home",
-        type=str,
-        default=None,
-        help="HF_HOME for controlling download/cache location.",
-    )
-    parser.add_argument(
-        "--hf_hub_cache",
-        type=str,
-        default=None,
-        help="HF_HUB_CACHE for controlling hub cache location.",
-    )
-
     args = parser.parse_args()
     try:
         _infer_input_from_parquet(args)
@@ -330,12 +309,6 @@ def main() -> int:
     if not args.image.is_file():
         print(f"FAIL: image not found: {args.image}")
         return 1
-    if (not args.segmenter_load_from_hf) and (not args.segmenter_checkpoint_path):
-        print(
-            "FAIL: must provide --segmenter_checkpoint_path when --segmenter_load_from_hf is not set."
-        )
-        return 1
-
     try:
         if args.mode == "localizer":
             return 0 if run_localizer(args) is not None else 1

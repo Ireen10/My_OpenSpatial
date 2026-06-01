@@ -39,12 +39,9 @@ pipeline:
         output_dir:
         device: npu:0
         segmenter_model: facebook/sam3
-        segmenter_load_from_hf: false
-        segmenter_checkpoint_path: /path/to/sam3.pt
+        # segmenter_checkpoint_path: /path/to/sam3.pt
         # Optional:
         # segmenter_bpe_path: /path/to/bpe_simple_vocab_16e6.txt.gz
-        # hf_home: /path/to/hf_cache_root
-        # hf_hub_cache: /path/to/hf_cache_root/hub
 
     scene_fusion_stage:
       -
