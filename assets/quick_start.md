@@ -28,6 +28,20 @@ python -m spacy download en_core_web_sm
 pip install 'git+https://github.com/facebookresearch/sam2.git' --quiet
 pip install -q -U flash-attn --no-build-isolation
 
+# SAM3 (official upstream installation from facebookresearch/sam3 README)
+# NOTE: upstream SAM3 recommends Python >=3.12 and PyTorch >=2.7 (CUDA >=12.6).
+# If your main env is pinned to older versions, use a separate env for SAM3 validation.
+pip install -e "git+https://github.com/facebookresearch/sam3.git#egg=sam3"
+
+# Optional (faster inference, CUDA path per upstream README)
+# pip install einops ninja && pip install flash-attn-3 --no-deps --index-url https://download.pytorch.org/whl/cu128
+# pip install git+https://github.com/ronghanghu/cc_torch.git
+
+# SAM3 checkpoint access (required before first download from HuggingFace)
+# 1) request access: https://huggingface.co/facebook/sam3
+# 2) login:
+# hf auth login
+
 ### 1.3 Verify Installation
 
 ```bash

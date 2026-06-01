@@ -1,0 +1,63 @@
+dataset:
+  modality: image
+  dataset_name: image_base
+  data_dir: "Path to your dataset parquet file, e.g., /pfs/jianhuiliu/tmp/test_sample.parquet"
+
+pipeline:
+  file_name: base_pipeline
+  class_name: BasePipeline
+
+  stages:
+    flatten_stage:
+      -
+        file_name: flatten
+        method: SampleFlattener
+        anchor_col: image
+        split_col_list: ['image', 'id', 'depth_map', 'pose', "intrinsic"]
+        update_keys: ['image', 'id', 'obj_tags', 'bboxes_3d_world_coords', 'depth_map', 'pose', "intrinsic"]
+        output_dir:
+
+    filter_stage:
+      -
+        file_name: 3dbox_filter
+        method: ThreeDBoxFilter
+        proj_mask_threshold: 0.1
+        box3d_pcd_threshold: 0.1
+        box_scale_factor: 0.9
+        mask_area_threshold: 0.005
+        update_keys: []
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        depends_on: flatten_stage/flatten
+        output_dir:
+
+    localization_stage:
+      -
+        file_name: sam3_refiner
+        method: Sam3Refiner
+        update_keys: ["obj_tags", "bboxes_3d_world_coords"]
+        depends_on: filter_stage/3dbox_filter
+        output_dir:
+        device: npu:0
+        segmenter_model: facebook/sam3
+        segmenter_load_from_hf: false
+        segmenter_checkpoint_path: /path/to/sam3.pt
+        # Optional:
+        # segmenter_bpe_path: /path/to/bpe_simple_vocab_16e6.txt.gz
+        # hf_home: /path/to/hf_cache_root
+        # hf_hub_cache: /path/to/hf_cache_root/hub
+
+    scene_fusion_stage:
+      -
+        file_name: depth_back_projection
+        method: DepthBackProjecter
+        depends_on: localization_stage/sam3_refiner
+        output_dir:
+
+    group_stage:
+      -
+        file_name: group
+        method: SampleGrouper
+        group_by: scene_id
+        group_col_list: ['image', 'id','obj_tags', 'depth_map', 'pose', 'intrinsic', "bboxes_3d_world_coords", 'masks', 'bboxes_2d', "pointclouds", "depth_scale"]
+        depends_on: scene_fusion_stage/depth_back_projection
+        output_dir:

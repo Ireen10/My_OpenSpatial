@@ -14,6 +14,7 @@ scripts/
 config/debug*.yaml
 tests/
 .pytest_cache/
+.ipynb_checkpoints/
 
 # Local dataset roots (large; not versioned)
 data_root/
