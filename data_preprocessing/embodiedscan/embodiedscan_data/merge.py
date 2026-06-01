@@ -3,6 +3,7 @@ import logging
 import os
 from collections import defaultdict
 from typing import Optional
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,14 @@ def merge_to_scenes(input_path: str, output_path: Optional[str] = None) -> str:
     bad_lines = 0
 
     with open(input_path, "r", encoding="utf-8") as f:
-        for line_num, line in enumerate(f, 1):
+        for line_num, line in enumerate(
+            tqdm(
+                f,
+                desc=f"Reading {os.path.basename(input_path)}",
+                unit="line",
+            ),
+            1,
+        ):
             line = line.strip()
             if not line:
                 continue
@@ -53,7 +61,12 @@ def merge_to_scenes(input_path: str, output_path: Optional[str] = None) -> str:
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
 
     with open(output_path, "w", encoding="utf-8") as f:
-        for scene_id, records in grouped.items():
+        for scene_id, records in tqdm(
+            grouped.items(),
+            total=len(grouped),
+            desc=f"Writing {os.path.basename(output_path)}",
+            unit="scene",
+        ):
             scene_record = {
                 "dataset": records[0].get("dataset", ""),
                 "scene_id": scene_id,

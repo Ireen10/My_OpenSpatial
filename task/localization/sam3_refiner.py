@@ -10,7 +10,7 @@ try:
 except Exception:
     torch_npu = None  # type: ignore
 
-from sam3.model_builder import build_sam3_image_model
+from sam3.model_builder import build_sam3_image_model, download_ckpt_from_hf
 from sam3.model.sam3_image_processor import Sam3Processor
 
 
@@ -19,6 +19,12 @@ class Sam3Refiner(BaseTask):
 
     MIN_SCORE = 0.6
     MIN_MASK_PIXELS = 20
+    MODEL_VERSION_MAP = {
+        "facebook/sam3": "sam3",
+        "sam3": "sam3",
+        "facebook/sam3.1": "sam3.1",
+        "sam3.1": "sam3.1",
+    }
 
     def __init__(self, args, device=None):
         super().__init__(args)
@@ -36,6 +42,9 @@ class Sam3Refiner(BaseTask):
             raise ValueError(
                 "segmenter_load_from_hf is False but segmenter_checkpoint_path is not provided."
             )
+        if segmenter_load_from_hf and not segmenter_checkpoint_path:
+            segmenter_version = self._resolve_sam3_version(segmenter_model)
+            segmenter_checkpoint_path = download_ckpt_from_hf(version=segmenter_version)
 
         # SAM3 official builder currently only moves model when device == 'cuda'.
         # Build on CPU first, then move to target device (including NPU).
@@ -44,7 +53,7 @@ class Sam3Refiner(BaseTask):
             device="cpu",
             eval_mode=True,
             checkpoint_path=segmenter_checkpoint_path,
-            load_from_HF=segmenter_load_from_hf,
+            load_from_HF=False,
         ).to(self.device)
         self.sam3_model.eval()
 
@@ -69,6 +78,16 @@ class Sam3Refiner(BaseTask):
         if torch.cuda.is_available():
             return "cuda"
         return "cpu"
+
+    @classmethod
+    def _resolve_sam3_version(cls, model_name):
+        if model_name not in cls.MODEL_VERSION_MAP:
+            raise ValueError(
+                "Unsupported segmenter_model for SAM3 auto-download. "
+                "Use one of: facebook/sam3, sam3, facebook/sam3.1, sam3.1; "
+                "or provide segmenter_checkpoint_path for local checkpoint."
+            )
+        return cls.MODEL_VERSION_MAP[model_name]
 
     @staticmethod
     def _configure_hf_cache(args):

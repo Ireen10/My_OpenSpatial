@@ -5,6 +5,7 @@ from glob import glob
 from typing import List, Optional
 
 import pandas as pd
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +13,8 @@ logger = logging.getLogger(__name__)
 def _read_all_jsonl(directory: str, suffix: str = ".jsonl", exclude_suffix: str = "_scenes.jsonl") -> List[dict]:
     """Read all JSONL files matching pattern from directory."""
     records = []
-    for filepath in sorted(glob(os.path.join(directory, f"*{suffix}"))):
+    files = sorted(glob(os.path.join(directory, f"*{suffix}")))
+    for filepath in tqdm(files, desc="Reading per-image JSONL files", unit="file"):
         if exclude_suffix and filepath.endswith(exclude_suffix):
             continue
         with open(filepath, "r", encoding="utf-8") as f:
@@ -29,7 +31,8 @@ def _read_all_jsonl(directory: str, suffix: str = ".jsonl", exclude_suffix: str 
 def _read_scene_jsonl(directory: str) -> List[dict]:
     """Read all per-scene JSONL files."""
     records = []
-    for filepath in sorted(glob(os.path.join(directory, "*_scenes.jsonl"))):
+    files = sorted(glob(os.path.join(directory, "*_scenes.jsonl")))
+    for filepath in tqdm(files, desc="Reading per-scene JSONL files", unit="file"):
         with open(filepath, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -45,7 +48,11 @@ def _shard_to_parquet(df: pd.DataFrame, output_dir: str, batch_size: int, prefix
     """Write DataFrame to sharded Parquet files."""
     os.makedirs(output_dir, exist_ok=True)
     paths = []
-    for i in range(0, len(df), batch_size):
+    for i in tqdm(
+        range(0, len(df), batch_size),
+        desc=f"Writing {prefix} parquet shards",
+        unit="shard",
+    ):
         chunk = df.iloc[i:i + batch_size]
         filename = f"{prefix}-{i // batch_size:05d}.parquet"
         filepath = os.path.join(output_dir, filename)

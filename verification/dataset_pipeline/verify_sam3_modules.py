@@ -272,7 +272,7 @@ def main() -> int:
     parser.add_argument(
         "--grounding_model",
         type=str,
-        default="IDEA-Research/grounding-dino-tiny",
+        default="IDEA-Research/grounding-dino-base",
         help="GroundingDINO model id.",
     )
     parser.add_argument(

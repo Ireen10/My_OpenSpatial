@@ -146,7 +146,11 @@ def extract_dataset(
     existing_ids = set()
     if os.path.exists(output_path):
         with open(output_path, "r", encoding="utf-8") as f:
-            for line in f:
+            for line in tqdm(
+                f,
+                desc=f"Loading existing {dataset_name} records",
+                unit="line",
+            ):
                 try:
                     existing_ids.add(json.loads(line.strip()).get("id"))
                 except (json.JSONDecodeError, AttributeError):
@@ -160,7 +164,8 @@ def extract_dataset(
         scenes = scenes[:max_scenes]
 
     tasks = []
-    for scene in scenes:
+    scene_iter = tqdm(scenes, desc=f"Collecting {dataset_name} scenes", unit="scene")
+    for scene in scene_iter:
         if config.skip_scene(data_root, scene):
             continue
         cameras = config.list_cameras(data_root, scene)
@@ -168,6 +173,7 @@ def extract_dataset(
             if config.skip_camera(data_root, scene, camera):
                 continue
             tasks.append((scene, camera))
+        scene_iter.set_postfix(tasks=len(tasks))
 
     logger.info("Found %d tasks across %d scenes", len(tasks), len(scenes))
 

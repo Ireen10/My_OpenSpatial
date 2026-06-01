@@ -12,7 +12,7 @@ try:
 except Exception:
     torch_npu = None  # type: ignore
 
-from sam3.model_builder import build_sam3_image_model
+from sam3.model_builder import build_sam3_image_model, download_ckpt_from_hf
 from sam3.model.sam3_image_processor import Sam3Processor
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
@@ -21,10 +21,16 @@ from utils.data_utils import merge_overlapping_masks, merge_overlapping_boxes
 
 class Localizer(BaseTask):
     """Grounding DINO + SAM3 pipeline: detect objects and generate segmentation masks."""
+    MODEL_VERSION_MAP = {
+        "facebook/sam3": "sam3",
+        "sam3": "sam3",
+        "facebook/sam3.1": "sam3.1",
+        "sam3.1": "sam3.1",
+    }
 
     def __init__(self, args, device=None):
         super().__init__(args)
-        grounding_model = args.get("grounding_model", "IDEA-Research/grounding-dino-tiny")
+        grounding_model = args.get("grounding_model", "IDEA-Research/grounding-dino-base")
         self.device = self._resolve_device(args, device)
         self._configure_hf_cache(args)
         self._prepare_npu_runtime_if_needed()
@@ -39,6 +45,9 @@ class Localizer(BaseTask):
             raise ValueError(
                 "segmenter_load_from_hf is False but segmenter_checkpoint_path is not provided."
             )
+        if segmenter_load_from_hf and not segmenter_checkpoint_path:
+            segmenter_version = self._resolve_sam3_version(segmenter_model)
+            segmenter_checkpoint_path = download_ckpt_from_hf(version=segmenter_version)
 
         self.processor = AutoProcessor.from_pretrained(grounding_model)
         self.detector = AutoModelForZeroShotObjectDetection.from_pretrained(grounding_model).to(
@@ -50,7 +59,7 @@ class Localizer(BaseTask):
             device="cpu",
             eval_mode=True,
             checkpoint_path=segmenter_checkpoint_path,
-            load_from_HF=segmenter_load_from_hf,
+            load_from_HF=False,
         ).to(self.device)
         self.sam3_model.eval()
 
@@ -74,6 +83,16 @@ class Localizer(BaseTask):
         if torch.cuda.is_available():
             return "cuda"
         return "cpu"
+
+    @classmethod
+    def _resolve_sam3_version(cls, model_name):
+        if model_name not in cls.MODEL_VERSION_MAP:
+            raise ValueError(
+                "Unsupported segmenter_model for SAM3 auto-download. "
+                "Use one of: facebook/sam3, sam3, facebook/sam3.1, sam3.1; "
+                "or provide segmenter_checkpoint_path for local checkpoint."
+            )
+        return cls.MODEL_VERSION_MAP[model_name]
 
     @staticmethod
     def _configure_hf_cache(args):

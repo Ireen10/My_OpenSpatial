@@ -6,6 +6,7 @@ from glob import glob
 from typing import List, Optional
 
 import numpy as np
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,8 @@ VALID_DEPTH_SCALES = {1000, 4000}
 
 def _read_per_image(directory: str) -> List[dict]:
     records = []
-    for fp in sorted(glob(os.path.join(directory, "*.jsonl"))):
+    files = sorted(glob(os.path.join(directory, "*.jsonl")))
+    for fp in tqdm(files, desc="Loading per-image JSONL files", unit="file"):
         if fp.endswith("_scenes.jsonl"):
             continue
         with open(fp, "r", encoding="utf-8") as f:
@@ -36,7 +38,8 @@ def _read_per_image(directory: str) -> List[dict]:
 
 def _read_per_scene(directory: str) -> List[dict]:
     records = []
-    for fp in sorted(glob(os.path.join(directory, "*_scenes.jsonl"))):
+    files = sorted(glob(os.path.join(directory, "*_scenes.jsonl")))
+    for fp in tqdm(files, desc="Loading per-scene JSONL files", unit="file"):
         with open(fp, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -52,7 +55,9 @@ def validate_schema(directory: str) -> List[str]:
     """Check all per-image records have the required fields."""
     errors = []
     records = _read_per_image(directory)
-    for i, r in enumerate(records):
+    for i, r in enumerate(
+        tqdm(records, desc="Validating schema", unit="record")
+    ):
         missing = REQUIRED_FIELDS - set(r.keys())
         if missing:
             errors.append(f"Record {i} missing fields: {missing}")
@@ -80,7 +85,9 @@ def validate_value_ranges(directory: str) -> List[str]:
     """Check value ranges for depth_scale, pose, intrinsic, dataset."""
     errors = []
     records = _read_per_image(directory)
-    for i, r in enumerate(records):
+    for i, r in enumerate(
+        tqdm(records, desc="Validating value ranges", unit="record")
+    ):
         ds = r.get("depth_scale")
         if ds not in VALID_DEPTH_SCALES:
             errors.append(f"Record {i}: invalid depth_scale={ds}")
@@ -125,7 +132,7 @@ def validate_paths(directory: str, data_root: str, sample_size: int = 100) -> Li
         return ["No per-image records found"]
 
     sample = random.sample(records, min(sample_size, len(records)))
-    for r in sample:
+    for r in tqdm(sample, desc="Validating path reachability", unit="record"):
         for field in ("image", "depth_map", "intrinsic"):
             path = r.get(field)
             if path and isinstance(path, str):
