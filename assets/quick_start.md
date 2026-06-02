@@ -42,6 +42,13 @@ pip install -e "git+https://github.com/facebookresearch/sam3.git#egg=sam3"
 # 2) login:
 # hf auth login
 
+# SAM3 weight loading modes in OpenSpatial (simplified):
+# Mode 1: auto-download to default HF cache (no checkpoint path)
+#   segmenter_model: facebook/sam3
+# Mode 2: load local checkpoint (explicit path)
+#   segmenter_model: facebook/sam3
+#   segmenter_checkpoint_path: /path/to/sam3.pt
+
 ### 1.3 Verify Installation
 
 ```bash

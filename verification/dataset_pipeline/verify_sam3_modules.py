@@ -44,7 +44,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageDraw
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -157,6 +157,60 @@ def _load_coarse_masks(mask_paths: list[Path]) -> list[np.ndarray]:
     return coarse_masks
 
 
+def _ensure_save_dir(parsed):
+    if parsed.save_dir is None:
+        return None
+    parsed.save_dir.mkdir(parents=True, exist_ok=True)
+    return parsed.save_dir
+
+
+def _save_localizer_outputs(save_dir: Path, image: Image.Image, masks, boxes, det_tags):
+    image.save(save_dir / "input_image.png")
+
+    boxed = image.copy()
+    draw = ImageDraw.Draw(boxed)
+    for i, (box, tag) in enumerate(zip(boxes, det_tags)):
+        x1, y1, x2, y2 = [int(v) for v in box]
+        draw.rectangle([x1, y1, x2, y2], outline="red", width=3)
+        draw.text((x1 + 2, max(0, y1 - 14)), f"{i}:{tag}", fill="red")
+    boxed.save(save_dir / "localizer_boxes.png")
+
+    localizer_mask_dir = save_dir / "localizer_masks"
+    localizer_mask_dir.mkdir(parents=True, exist_ok=True)
+    for i, mask in enumerate(masks):
+        arr = mask[0] if mask.ndim == 3 else mask
+        binary = (arr > 0).astype(np.uint8) * 255
+        Image.fromarray(binary, mode="L").save(localizer_mask_dir / f"mask_{i}.png")
+
+    summary = {
+        "localizer": {
+            "num_instances": len(det_tags),
+            "tags": det_tags,
+            "boxes": boxes,
+        }
+    }
+    with open(save_dir / "localizer_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+
+
+def _save_refiner_outputs(save_dir: Path, refined_masks, bboxes_2d, keep_indices):
+    refiner_mask_dir = save_dir / "refiner_masks"
+    refiner_mask_dir.mkdir(parents=True, exist_ok=True)
+    for i, mask in enumerate(refined_masks):
+        binary = (mask > 0).astype(np.uint8) * 255
+        Image.fromarray(binary, mode="L").save(refiner_mask_dir / f"mask_{i}.png")
+
+    summary = {
+        "refiner": {
+            "num_refined_masks": len(refined_masks),
+            "boxes": bboxes_2d,
+            "keep_indices": keep_indices,
+        }
+    }
+    with open(save_dir / "refiner_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+
+
 def run_localizer(parsed) -> tuple[np.ndarray, list, list] | None:
     image = _load_image(parsed.image)
     tags = _parse_tags(parsed.tags)
@@ -184,6 +238,10 @@ def run_localizer(parsed) -> tuple[np.ndarray, list, list] | None:
         )
         print(f"Detected tags: {det_tags}")
         print(f"Boxes: {json.dumps(boxes)}")
+        save_dir = _ensure_save_dir(parsed)
+        if save_dir is not None:
+            _save_localizer_outputs(save_dir, image, masks, boxes, det_tags)
+            print(f"SAVED: localizer outputs -> {save_dir}")
         return masks, boxes, det_tags
 
 
@@ -215,6 +273,10 @@ def run_refiner(parsed, coarse_masks: list[np.ndarray] | None = None) -> tuple[l
         )
         print(f"Refined boxes: {json.dumps(bboxes_2d)}")
         print(f"Keep indices: {keep_indices}")
+        save_dir = _ensure_save_dir(parsed)
+        if save_dir is not None:
+            _save_refiner_outputs(save_dir, refined_masks, bboxes_2d, keep_indices)
+            print(f"SAVED: refiner outputs -> {save_dir}")
         return refined_masks, bboxes_2d, keep_indices
 
 
@@ -250,6 +312,12 @@ def main() -> int:
         type=str,
         default=None,
         help="Root for resolving relative image/mask paths from parquet.",
+    )
+    parser.add_argument(
+        "--save_dir",
+        type=Path,
+        default=None,
+        help="Optional directory to save visual outputs (boxes/masks/summaries).",
     )
     parser.add_argument(
         "--tags",
