@@ -36,10 +36,13 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 import tempfile
+import time
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -52,6 +55,25 @@ if str(REPO_ROOT) not in sys.path:
 
 from task.localization.grounding_sam3 import Localizer
 from task.localization.sam3_refiner import Sam3Refiner
+
+
+def _log(stage: str, message: str):
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] [{stage}] {message}", flush=True)
+
+
+@contextlib.contextmanager
+def _timed_stage(stage: str, start_message: str):
+    _log(stage, start_message)
+    t0 = time.perf_counter()
+    try:
+        yield
+    except Exception:
+        elapsed = time.perf_counter() - t0
+        _log(stage, f"failed after {elapsed:.2f}s")
+        raise
+    elapsed = time.perf_counter() - t0
+    _log(stage, f"done in {elapsed:.2f}s")
 
 
 def _to_py_list(value):
@@ -93,7 +115,8 @@ def _infer_input_from_parquet(parsed):
     if not parsed.parquet.is_file():
         raise ValueError(f"Parquet not found: {parsed.parquet}")
 
-    df = pd.read_parquet(parsed.parquet)
+    with _timed_stage("INPUT", f"loading parquet: {parsed.parquet}"):
+        df = pd.read_parquet(parsed.parquet)
     if len(df) == 0:
         raise ValueError(f"Parquet is empty: {parsed.parquet}")
     if parsed.row_idx < 0 or parsed.row_idx >= len(df):
@@ -212,11 +235,13 @@ def _save_refiner_outputs(save_dir: Path, refined_masks, bboxes_2d, keep_indices
 
 
 def run_localizer(parsed) -> tuple[np.ndarray, list, list] | None:
-    image = _load_image(parsed.image)
+    with _timed_stage("LOCALIZER", f"loading image: {parsed.image}"):
+        image = _load_image(parsed.image)
     tags = _parse_tags(parsed.tags)
     if not tags:
         print("FAIL: --tags is required for localizer/both mode")
         return None
+    _log("LOCALIZER", f"parsed {len(tags)} tags: {tags}")
 
     with tempfile.TemporaryDirectory(prefix="verify_sam3_localizer_") as tmp_dir:
         localizer_args = {
@@ -225,8 +250,10 @@ def run_localizer(parsed) -> tuple[np.ndarray, list, list] | None:
             "output_dir": tmp_dir,
             "file_name": "verify_sam3_localizer",
         }
-        localizer = Localizer(localizer_args)
-        result = localizer.detect_and_segment(image, tags)
+        with _timed_stage("LOCALIZER", "initializing Localizer (model load/build)"):
+            localizer = Localizer(localizer_args)
+        with _timed_stage("LOCALIZER", "running detect_and_segment"):
+            result = localizer.detect_and_segment(image, tags)
         if result is None:
             print("FAIL: Localizer returned None (no valid detections/masks).")
             return None
@@ -246,7 +273,8 @@ def run_localizer(parsed) -> tuple[np.ndarray, list, list] | None:
 
 
 def run_refiner(parsed, coarse_masks: list[np.ndarray] | None = None) -> tuple[list, list, list] | None:
-    image = _load_image(parsed.image)
+    with _timed_stage("REFINER", f"loading image: {parsed.image}"):
+        image = _load_image(parsed.image)
     with tempfile.TemporaryDirectory(prefix="verify_sam3_refiner_") as tmp_dir:
         refiner_args = {
             **_build_common_args(parsed),
@@ -254,15 +282,20 @@ def run_refiner(parsed, coarse_masks: list[np.ndarray] | None = None) -> tuple[l
             "file_name": "verify_sam3_refiner",
             "update_keys": [],
         }
-        refiner = Sam3Refiner(refiner_args)
+        with _timed_stage("REFINER", "initializing Sam3Refiner (model load/build)"):
+            refiner = Sam3Refiner(refiner_args)
 
         if coarse_masks is None:
             if not parsed.mask_paths:
                 print("FAIL: --mask_paths is required for refiner mode.")
                 return None
-            coarse_masks = _load_coarse_masks(parsed.mask_paths)
+            with _timed_stage("REFINER", f"loading coarse masks ({len(parsed.mask_paths)})"):
+                coarse_masks = _load_coarse_masks(parsed.mask_paths)
+        else:
+            _log("REFINER", f"using localizer-produced coarse masks: {len(coarse_masks)}")
 
-        refined_masks, bboxes_2d, keep_indices = refiner.refine_masks(image, coarse_masks)
+        with _timed_stage("REFINER", f"running refine_masks on {len(coarse_masks)} masks"):
+            refined_masks, bboxes_2d, keep_indices = refiner.refine_masks(image, coarse_masks)
         if len(keep_indices) == 0:
             print("FAIL: Refiner kept 0 masks after score/area filtering.")
             return None
@@ -365,10 +398,18 @@ def main() -> int:
         help="SAM3 processor resolution.",
     )
     args = parser.parse_args()
+    _log(
+        "INIT",
+        (
+            f"mode={args.mode}, device={args.device}, image={args.image}, parquet={args.parquet}, "
+            f"save_dir={args.save_dir}, segmenter_model={args.segmenter_model}"
+        ),
+    )
     try:
         _infer_input_from_parquet(args)
     except Exception as exc:
         print(f"FAIL: failed to infer inputs from parquet: {exc}")
+        traceback.print_exc()
         return 1
 
     if args.image is None:
@@ -379,17 +420,21 @@ def main() -> int:
         return 1
     try:
         if args.mode == "localizer":
+            _log("FLOW", "running mode=localizer")
             return 0 if run_localizer(args) is not None else 1
 
         if args.mode == "refiner":
+            _log("FLOW", "running mode=refiner")
             return 0 if run_refiner(args) is not None else 1
 
+        _log("FLOW", "running mode=both (localizer -> refiner)")
         localizer_out = run_localizer(args)
         if localizer_out is None:
             return 1
 
         masks, _, _ = localizer_out
         coarse_masks = []
+        _log("FLOW", f"converting {len(masks)} localizer masks to refiner inputs")
         for m in masks:
             if m.ndim == 3 and m.shape[0] == 1:
                 coarse_masks.append((m[0] > 0).astype(np.uint8))
@@ -400,6 +445,7 @@ def main() -> int:
 
         return 0 if run_refiner(args, coarse_masks=coarse_masks) is not None else 1
     except Exception as exc:
+        traceback.print_exc()
         print(f"FAIL: exception during verification: {exc}")
         return 2
 
