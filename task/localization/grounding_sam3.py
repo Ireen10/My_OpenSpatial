@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 import torch
 import os
@@ -31,9 +32,19 @@ class Localizer(BaseTask):
         self.processor = AutoProcessor.from_pretrained(grounding_model)
         self.detector = AutoModelForZeroShotObjectDetection.from_pretrained(grounding_model).to(device)
 
-        # SAM3 Tracker for segmentation via transformers (replaces SAM2ImagePredictor)
-        self.seg_processor = Sam3TrackerProcessor.from_pretrained(segmenter_model)
-        self.seg_model = Sam3TrackerModel.from_pretrained(segmenter_model).to(device)
+        # SAM3 Tracker for segmentation via transformers (replaces SAM2ImagePredictor).
+        # Suppress the spurious "model of type sam3_video" warning: the facebook/sam3
+        # checkpoint sets model_type=sam3_video in config.json to serve four architectures
+        # from one file; loading Sam3TrackerModel triggers a cosmetic type-mismatch
+        # warning that does not affect inference.  Tracked upstream: issue #43408.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"You are using a model of type sam3_video",
+                category=UserWarning,
+            )
+            self.seg_processor = Sam3TrackerProcessor.from_pretrained(segmenter_model)
+            self.seg_model = Sam3TrackerModel.from_pretrained(segmenter_model).to(device)
         self.seg_model.eval()
 
         self.output_dir = args.get("output_dir")

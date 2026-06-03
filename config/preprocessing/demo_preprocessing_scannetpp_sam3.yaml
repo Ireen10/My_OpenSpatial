@@ -29,6 +29,8 @@ pipeline:
         filter_tags: ["ceiling", "floor", "wall", "object"]
         depends_on: flatten_stage/flatten
         output_dir:
+        use_multi_processing: true
+        num_workers: 20
 
     localization_stage:
       -
@@ -41,11 +43,12 @@ pipeline:
         # segmenter_checkpoint_path: /path/to/sam3     # local weights dir (optional)
 
         # ── Multi-card parallel inference (2× 910B 32G) ──────────────────────
-        device: "npu:0,npu:1"        # comma-separated NPU device list
-        replicas_per_device: 2       # 2 instances/card ≈ 4–6 GB/card (bfloat16)
-        torch_dtype: bfloat16        # native 910B dtype; halves memory, no accuracy loss
+        device: "npu:0,npu:1"
+        replicas_per_device: 2
+        torch_dtype: bfloat16
         use_multi_processing: true
-        num_workers: 4               # = devices(2) × replicas_per_device(2)
+        num_workers: 4
+        batch_size: 4
 
     scene_fusion_stage:
       -
@@ -53,6 +56,8 @@ pipeline:
         method: DepthBackProjecter
         depends_on: localization_stage/sam3_refiner
         output_dir:
+        use_multi_processing: true
+        num_workers: 20
 
     group_stage:
       -
