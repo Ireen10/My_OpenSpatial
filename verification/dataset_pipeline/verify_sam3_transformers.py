@@ -245,7 +245,6 @@ def main() -> int:
     parser.add_argument("--device", type=str, default=None, help="sam3 device (e.g. npu:0/cuda:0/cpu)")
     parser.add_argument("--grounding_model", type=str, default="IDEA-Research/grounding-dino-base")
     parser.add_argument("--sam3_model", type=str, default="facebook/sam3")
-    parser.add_argument("--segmenter_model", type=str, default=None, help="Alias for --sam3_model")
 
     parser.add_argument("--det_threshold", type=float, default=0.3)
     parser.add_argument("--text_threshold", type=float, default=0.3)
@@ -253,9 +252,6 @@ def main() -> int:
     parser.add_argument("--sam_mask_threshold", type=float, default=0.5)
     parser.add_argument("--save_dir", type=Path, default=Path("output/verify_sam3_transformers"))
     args = parser.parse_args()
-
-    if args.segmenter_model:
-        args.sam3_model = args.segmenter_model
 
     infer_input_from_parquet(args)
     if args.image is None:
@@ -288,6 +284,7 @@ def main() -> int:
     localizer_masks: list[np.ndarray] = []
     localizer_boxes = np.zeros((0, 4), dtype=np.float32)
     det_tags: list[str] = []
+    localizer_scores: list[float] = []
 
     if args.mode in ("localizer", "both"):
         tags_text = args.tags or "chair,table"
@@ -347,7 +344,12 @@ def main() -> int:
         else:
             coarse_masks = localizer_masks
             if len(coarse_masks) == 0:
-                raise RuntimeError("No localizer masks available for both mode.")
+                raise RuntimeError(
+                    "both mode requires localizer to produce masks, but got 0. "
+                    f"Detector boxes={len(localizer_boxes)}, detector tags={len(det_tags)}, "
+                    f"sam3 masks={len(localizer_masks)}. "
+                    "Run with --mode localizer first and inspect localizer_summary.json."
+                )
 
         coarse_boxes = masks_to_xyxy_boxes(coarse_masks)
         log("REFINER", f"running SAM3 refine with {len(coarse_boxes)} coarse boxes")
