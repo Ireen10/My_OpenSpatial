@@ -151,7 +151,7 @@ class Localizer:
 
         results = self.sam3_processor.post_process_instance_segmentation(
             outputs,
-            threshold=0.5,
+            threshold=0.0,
             mask_threshold=0.5,
             target_sizes=inputs.get("original_sizes").tolist(),
         )
