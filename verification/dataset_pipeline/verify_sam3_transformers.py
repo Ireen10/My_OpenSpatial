@@ -62,7 +62,7 @@ from utils.data_utils import merge_overlapping_boxes, merge_overlapping_masks
 class Localizer:
     """Grounding DINO + SAM3 pipeline using transformers model loading."""
 
-    MIN_SCORE = 0.7
+    MIN_SCORE = 0.0
 
     def __init__(self, args):
         grounding_model = args.get("grounding_model", "IDEA-Research/grounding-dino-base")
@@ -151,11 +151,15 @@ class Localizer:
 
         results = self.sam3_processor.post_process_instance_segmentation(
             outputs,
-            threshold=0.0,
+            threshold=0.5,
             mask_threshold=0.5,
             target_sizes=inputs.get("original_sizes").tolist(),
         )
         if not results:
+            _log(
+                "LOCALIZER",
+                "sam3 post process instance segmentation failed",
+            )
             return None, None
         result = results[0]
 
