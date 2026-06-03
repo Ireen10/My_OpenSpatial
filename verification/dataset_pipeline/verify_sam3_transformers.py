@@ -243,12 +243,6 @@ def main() -> int:
     parser.add_argument("--mask_paths", type=Path, nargs="*", default=None)
 
     parser.add_argument("--device", type=str, default=None, help="sam3 device (e.g. npu:0/cuda:0/cpu)")
-    parser.add_argument(
-        "--detector_device",
-        type=str,
-        default="cpu",
-        help="grounding-dino device (cpu recommended on Ascend)",
-    )
     parser.add_argument("--grounding_model", type=str, default="IDEA-Research/grounding-dino-base")
     parser.add_argument("--sam3_model", type=str, default="facebook/sam3")
     parser.add_argument("--segmenter_model", type=str, default=None, help="Alias for --sam3_model")
@@ -273,10 +267,10 @@ def main() -> int:
 
     sam_device = resolve_device(args.device)
     prepare_npu_if_needed(sam_device)
-    det_device = args.detector_device
+    det_device = sam_device
 
     args.save_dir.mkdir(parents=True, exist_ok=True)
-    log("INIT", f"mode={args.mode}, sam_device={sam_device}, detector_device={det_device}")
+    log("INIT", f"mode={args.mode}, device={sam_device}")
     log("INIT", f"grounding_model={args.grounding_model}, sam3_model={args.sam3_model}")
 
     log("LOAD", f"loading image: {args.image}")
