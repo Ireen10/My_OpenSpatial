@@ -42,6 +42,8 @@ class BaseTask:
 
         num_workers = self.args.get('num_workers', 8)
         examples = list(enumerate(dataset.to_dict('records')))
+        print(f"  [{type(self).__name__}] {len(examples)} examples, {num_workers} workers",
+              flush=True)
 
         processed = []
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -54,4 +56,5 @@ class BaseTask:
                 if flag:
                     processed.append(result)
 
+        print(f"  [{type(self).__name__}] {len(processed)}/{len(examples)} passed", flush=True)
         return pd.DataFrame(processed).reset_index(drop=True)
