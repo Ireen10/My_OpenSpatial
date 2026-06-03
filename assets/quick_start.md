@@ -203,7 +203,69 @@ Coming soon (expected May 2025).
 python run.py --config <config.yaml> --output_dir <output_directory>
 ```
 
-### 3.2 Config File Structure
+### 3.2 High-Throughput Parallel Execution (Large-Scale Datasets)
+
+For large datasets (e.g. 800 K+ ARKitScenes frames), use `run_parallel.py` to split the
+data into N independent shards and run one pipeline subprocess per NPU device.
+Every stage — both CPU-bound and NPU-bound — achieves roughly N× throughput.
+
+**Recommended command (2 × Ascend 910B 32 GB):**
+
+```bash
+python run_parallel.py \
+    --config config/preprocessing/demo_preprocessing_embodiedscan_sam3.yaml \
+    --output_dir /path/to/output \
+    --num_pipelines 2 \
+    --devices "npu:0 npu:1" \
+    --replicas_per_device 3 \
+    --cpu_workers 20
+```
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `--num_pipelines` | `2` | Number of parallel pipeline subprocesses |
+| `--devices` | inferred from YAML `device` field | Space-separated NPU device list assigned round-robin to workers |
+| `--replicas_per_device` | `2` | SAM3 model replicas per NPU per worker (tune to fill VRAM) |
+| `--cpu_workers` | `20` | `num_workers` for CPU-bound stages (filter, scene_fusion) per worker |
+
+**VRAM sizing guide for SAM3 (bfloat16, per worker):**
+
+| replicas_per_device | Est. peak / card | Safe on 32 GB? |
+|---|---|---|
+| 2 | ~14 GB | ✅ conservative |
+| 3 | ~21 GB | ✅ recommended |
+| 4 | ~28 GB | ⚠️ tight, test first |
+
+**Output layout** — each worker writes to its own subdirectory; concatenate the final
+`data.parquet` files for downstream use:
+
+```
+<output_dir>/
+  worker_0/   ← shard 0 results (standard run.py output structure)
+  worker_1/   ← shard 1 results
+  ...
+```
+
+```python
+import pandas as pd, glob
+dfs = [pd.read_parquet(p) for p in sorted(glob.glob("<output_dir>/worker_*/*/data.parquet"))]
+combined = pd.concat(dfs, ignore_index=True)
+```
+
+Monitor progress in real time:
+
+```bash
+tail -f /path/to/output/worker_*/run.log
+```
+
+> **Single-process alternative:** If you prefer to keep using `run.py`, set
+> `num_workers: 40` for CPU-bound stages (filter, scene_fusion) in the YAML — the
+> GIL is released by cv2/numpy/open3d, so all 40 threads run truly in parallel.
+> SAM3 throughput is still capped by the replica pool (4 replicas = 4 concurrent
+> forward passes regardless of `num_workers`), so keep `num_workers: 4` for the
+> localization stage.
+
+### 3.3 Config File Structure
 
 Config files are in `config/` and define the dataset source, pipeline executor, and processing stages. Below is a full end-to-end pipeline config with annotations:
 
@@ -280,7 +342,7 @@ pipeline:
 
 Each stage is a list of tasks (the `-` items). A stage can contain multiple tasks that run sequentially. Stages execute in dependency order defined by `depends_on`. For annotation-only runs, a single `annotation_stage` is sufficient (see demo configs).
 
-### 3.3 Available Tasks
+### 3.4 Available Tasks
 
 > **Note:** This list is continuously updated. Check the `config/` directory for the latest available tasks.
 
@@ -312,7 +374,7 @@ Each stage is a list of tasks (the `-` items). A stage can contain multiple task
 | `localization_stage` | `Sam2Refiner` | Refine masks with SAM2 box prompts |
 | `scene_fusion` | `DepthBackProjecter` | Back-project depth to per-object point clouds |
 
-### 3.4 Annotation Pipeline by Data Mode
+### 3.5 Annotation Pipeline by Data Mode
 
 Input data falls into two modes depending on the Parquet structure. The preprocessing pipeline differs slightly between them:
 

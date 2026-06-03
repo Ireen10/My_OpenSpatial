@@ -35,7 +35,6 @@ pipeline:
         output_dir:
 
         segmenter_model: facebook/sam3
-        # segmenter_checkpoint_path: /path/to/sam3     # local weights dir (optional)
 
         # ── Multi-card parallel inference (2× 910B 32G) ──────────────────────
         # run.py (single process): both cards, 4 replicas, 4 workers, batch 4
