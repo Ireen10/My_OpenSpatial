@@ -140,36 +140,28 @@ class Localizer:
         with torch.no_grad():
             outputs = self.sam3_model(**inputs, multimask_output=True)
 
-        pred_masks = getattr(outputs, "pred_masks", None)
-        iou_scores = getattr(outputs, "iou_scores", None)
-        if pred_masks is None:
-            return None, None
-
-        original_sizes = inputs.get("original_sizes")
-        reshaped_input_sizes = inputs.get("reshaped_input_sizes")
-        if original_sizes is None or reshaped_input_sizes is None:
-            return None, None
-
-        post_masks = self.sam3_processor.post_process_masks(
-            pred_masks=pred_masks,
-            original_sizes=original_sizes,
-            reshaped_input_sizes=reshaped_input_sizes,
+        results = self.sam3_processor.post_process_instance_segmentation(
+            outputs,
+            threshold=0.0,
+            mask_threshold=0.5,
+            target_sizes=inputs.get("original_sizes").tolist(),
         )
-        if not post_masks or len(post_masks[0]) == 0:
+        if not results:
+            return None, None
+        result = results[0]
+
+        masks = result.get("masks")
+        scores = result.get("scores")
+        if masks is None or scores is None or len(scores) == 0 or len(masks) == 0:
             return None, None
 
-        mask_candidates = post_masks[0]
-        if iou_scores is not None and len(iou_scores) > 0:
-            score_candidates = iou_scores[0].detach().float().cpu()
-        else:
-            score_candidates = torch.ones(len(mask_candidates), dtype=torch.float32)
-
+        score_candidates = scores.detach().float().cpu().flatten()
         best_idx = int(torch.argmax(score_candidates).item())
         best_score = float(score_candidates[best_idx].item())
-        best_mask = mask_candidates[best_idx]
+        best_mask = masks[best_idx]
         if best_mask.ndim == 2:
             best_mask = best_mask.unsqueeze(0)
-        best_mask_np = (best_mask.detach().float().cpu().numpy() > 0).astype(np.uint8)
+        best_mask_np = (best_mask.detach().cpu().numpy() > 0).astype(np.uint8)
         return best_mask_np, best_score
 
     def _sam3_masks_from_boxes(self, image, det_boxes):
@@ -351,36 +343,28 @@ class Sam3Refiner:
         with torch.no_grad():
             outputs = self.sam3_model(**inputs, multimask_output=True)
 
-        pred_masks = getattr(outputs, "pred_masks", None)
-        iou_scores = getattr(outputs, "iou_scores", None)
-        if pred_masks is None:
-            return None, None
-
-        original_sizes = inputs.get("original_sizes")
-        reshaped_input_sizes = inputs.get("reshaped_input_sizes")
-        if original_sizes is None or reshaped_input_sizes is None:
-            return None, None
-
-        post_masks = self.sam3_processor.post_process_masks(
-            pred_masks=pred_masks,
-            original_sizes=original_sizes,
-            reshaped_input_sizes=reshaped_input_sizes,
+        results = self.sam3_processor.post_process_instance_segmentation(
+            outputs,
+            threshold=0.0,
+            mask_threshold=0.5,
+            target_sizes=inputs.get("original_sizes").tolist(),
         )
-        if not post_masks or len(post_masks[0]) == 0:
+        if not results:
+            return None, None
+        result = results[0]
+
+        masks = result.get("masks")
+        scores = result.get("scores")
+        if masks is None or scores is None or len(scores) == 0 or len(masks) == 0:
             return None, None
 
-        mask_candidates = post_masks[0]
-        if iou_scores is not None and len(iou_scores) > 0:
-            score_candidates = iou_scores[0].detach().float().cpu()
-        else:
-            score_candidates = torch.ones(len(mask_candidates), dtype=torch.float32)
-
+        score_candidates = scores.detach().float().cpu().flatten()
         best_idx = int(torch.argmax(score_candidates).item())
         score = float(score_candidates[best_idx].item())
-        mask = mask_candidates[best_idx]
+        mask = masks[best_idx]
         if mask.ndim == 3 and mask.shape[0] == 1:
             mask = mask[0]
-        mask_np = (mask.detach().float().cpu().numpy() > 0).astype(np.uint8)
+        mask_np = (mask.detach().cpu().numpy() > 0).astype(np.uint8)
         return mask_np, score
 
     def refine_masks(self, image, masks):
