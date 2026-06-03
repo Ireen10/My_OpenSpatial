@@ -169,14 +169,7 @@ class Localizer:
         mask_candidates = mask_candidates[:valid_len]
         score_candidates = score_candidates[:valid_len]
 
-        keep = score_candidates > self.MIN_SCORE
-        if not bool(torch.any(keep)):
-            return None, None
-        kept_indices = torch.nonzero(keep, as_tuple=False).flatten()
-        kept_scores = score_candidates[kept_indices]
-        best_keep_idx = int(torch.argmax(kept_scores).item())
-        best_idx = int(kept_indices[best_keep_idx].item())
-
+        best_idx = int(torch.argmax(score_candidates).item())
         best_score = float(score_candidates[best_idx].item())
         best_mask = mask_candidates[best_idx]
         if best_mask.ndim == 2:
@@ -407,14 +400,7 @@ class Sam3Refiner:
         mask_candidates = mask_candidates[:valid_len]
         score_candidates = score_candidates[:valid_len]
 
-        keep = score_candidates > self.MIN_SCORE
-        if not bool(torch.any(keep)):
-            return None, None
-        kept_indices = torch.nonzero(keep, as_tuple=False).flatten()
-        kept_scores = score_candidates[kept_indices]
-        best_keep_idx = int(torch.argmax(kept_scores).item())
-        best_idx = int(kept_indices[best_keep_idx].item())
-
+        best_idx = int(torch.argmax(score_candidates).item())
         score = float(score_candidates[best_idx].item())
         mask = mask_candidates[best_idx]
         if mask.ndim == 3 and mask.shape[0] == 1:
