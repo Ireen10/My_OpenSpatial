@@ -291,7 +291,7 @@ class Localizer:
 class Sam3Refiner:
     """Refine coarse masks using SAM3 geometric box prompts."""
 
-    MIN_SCORE = 0.6
+    MIN_SCORE = 0.0
     MIN_MASK_PIXELS = 20
 
     def __init__(self, args):
