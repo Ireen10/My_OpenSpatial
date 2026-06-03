@@ -230,6 +230,21 @@ class Localizer:
         det_boxes = det_boxes[:valid_len]
         masks = masks[:valid_len]
         scores = scores[:valid_len]
+        _log(
+            "LOCALIZER",
+            (
+                f"raw mask scores before filter: "
+                f"{[round(float(s), 4) for s in scores.tolist()]}"
+            ),
+        )
+        if len(scores) > 0:
+            _log(
+                "LOCALIZER",
+                (
+                    f"score stats: min={float(np.min(scores)):.4f}, "
+                    f"max={float(np.max(scores)):.4f}, mean={float(np.mean(scores)):.4f}"
+                ),
+            )
 
         keep = [i for i, score in enumerate(scores) if score >= self.MIN_SCORE]
         _log(
