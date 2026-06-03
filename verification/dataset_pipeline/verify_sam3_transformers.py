@@ -166,21 +166,34 @@ class Localizer:
 
     def _sam3_masks_from_boxes(self, image, det_boxes):
         masks, scores = [], []
+        invalid_box_count = 0
+        prompt_fail_count = 0
         for box_xyxy in det_boxes:
             if (box_xyxy[2] <= box_xyxy[0]) or (box_xyxy[3] <= box_xyxy[1]):
+                invalid_box_count += 1
                 continue
             mask_np, best_score = self._run_sam3_box_prompt(image, box_xyxy)
             if mask_np is None:
+                prompt_fail_count += 1
                 continue
             masks.append(mask_np)
             scores.append(best_score)
 
+        _log(
+            "LOCALIZER",
+            (
+                f"SAM3 box prompts: input_boxes={len(det_boxes)}, "
+                f"invalid_boxes={invalid_box_count}, prompt_failed={prompt_fail_count}, "
+                f"masks_generated={len(masks)}"
+            ),
+        )
         if len(masks) == 0:
             return None, None
         return np.stack(masks, axis=0), np.array(scores)
 
     def detect_and_segment(self, image, obj_tags):
         text_prompt = ". ".join(obj_tags)
+        _log("LOCALIZER", f"running grounding detector with {len(obj_tags)} tags")
         inputs = self.processor(images=image, text=text_prompt, return_tensors="pt").to(self.device)
         with torch.no_grad():
             outputs = self.detector(**inputs)
@@ -194,11 +207,20 @@ class Localizer:
         )
         det_tags = results[0]["text_labels"]
         det_boxes = results[0]["boxes"].cpu().numpy()
+        _log(
+            "LOCALIZER",
+            f"grounding detections before merge: count={len(det_tags)}",
+        )
 
         if len(det_tags) <= 1:
             return None
 
+        before_merge = len(det_tags)
         det_boxes, det_tags = merge_overlapping_boxes(det_tags, det_boxes, overlap_threshold=0.8)
+        _log(
+            "LOCALIZER",
+            f"detections after box merge: {before_merge} -> {len(det_tags)}",
+        )
         masks, scores = self._sam3_masks_from_boxes(image, det_boxes)
         if masks is None or scores is None:
             return None
@@ -210,6 +232,10 @@ class Localizer:
         scores = scores[:valid_len]
 
         keep = [i for i, score in enumerate(scores) if score >= self.MIN_SCORE]
+        _log(
+            "LOCALIZER",
+            f"masks after score filter (>= {self.MIN_SCORE}): {len(keep)}/{len(scores)}",
+        )
         if len(keep) == 0:
             return None
 
@@ -217,8 +243,13 @@ class Localizer:
         det_tags = [det_tags[i] for i in keep]
         det_boxes = det_boxes[keep]
 
+        pre_mask_merge = len(det_tags)
         masks, det_tags, det_boxes = merge_overlapping_masks(
             masks, det_tags, det_boxes, overlap_threshold=0.8
+        )
+        _log(
+            "LOCALIZER",
+            f"masks after overlap merge: {pre_mask_merge} -> {len(det_tags)}",
         )
         if len(det_tags) <= 1:
             return None
@@ -339,16 +370,24 @@ class Sam3Refiner:
     def refine_masks(self, image, masks):
         input_boxes = self._masks_to_bboxes(masks)
         refined, bboxes_2d, keep_indices = [], [], []
+        invalid_box_count = 0
+        prompt_fail_count = 0
+        low_score_count = 0
+        tiny_mask_count = 0
         for i, box_xyxy in enumerate(input_boxes):
             if (box_xyxy[2] <= box_xyxy[0]) or (box_xyxy[3] <= box_xyxy[1]):
+                invalid_box_count += 1
                 continue
 
             mask_np, score = self._run_sam3_box_prompt(image, box_xyxy)
             if mask_np is None:
+                prompt_fail_count += 1
                 continue
             if score < self.MIN_SCORE:
+                low_score_count += 1
                 continue
             if np.sum(mask_np) <= self.MIN_MASK_PIXELS:
+                tiny_mask_count += 1
                 continue
 
             refined.append(mask_np)
@@ -357,6 +396,14 @@ class Sam3Refiner:
             )
             keep_indices.append(i)
 
+        _log(
+            "REFINER",
+            (
+                f"refine stats: input_masks={len(masks)}, valid_boxes={len(input_boxes) - invalid_box_count}, "
+                f"prompt_failed={prompt_fail_count}, low_score={low_score_count}, "
+                f"tiny_mask={tiny_mask_count}, kept={len(keep_indices)}"
+            ),
+        )
         if not keep_indices:
             return [], [], []
         return refined, bboxes_2d, keep_indices
@@ -547,6 +594,7 @@ def run_localizer(parsed) -> tuple[np.ndarray, list, list] | None:
         print("FAIL: --tags is required for localizer/both mode")
         return None
     _log("LOCALIZER", f"parsed {len(tags)} tags: {tags}")
+    _log("LOCALIZER", f"image size: {image.size[0]}x{image.size[1]}")
 
     with tempfile.TemporaryDirectory(prefix="verify_sam3_localizer_") as tmp_dir:
         localizer_args = {
@@ -564,6 +612,10 @@ def run_localizer(parsed) -> tuple[np.ndarray, list, list] | None:
             return None
 
         masks, boxes, det_tags = result
+        _log(
+            "LOCALIZER",
+            f"final outputs: instances={len(det_tags)}, masks={len(masks)}, boxes={len(boxes)}",
+        )
         print(
             f"PASS: Localizer produced {len(det_tags)} instances, "
             f"{len(masks)} masks, {len(boxes)} boxes."
@@ -599,12 +651,17 @@ def run_refiner(parsed, coarse_masks: list[np.ndarray] | None = None) -> tuple[l
         else:
             _log("REFINER", f"using localizer-produced coarse masks: {len(coarse_masks)}")
 
+        _log("REFINER", f"coarse mask count before refine: {len(coarse_masks)}")
         with _timed_stage("REFINER", f"running refine_masks on {len(coarse_masks)} masks"):
             refined_masks, bboxes_2d, keep_indices = refiner.refine_masks(image, coarse_masks)
         if len(keep_indices) == 0:
             print("FAIL: Refiner kept 0 masks after score/area filtering.")
             return None
 
+        _log(
+            "REFINER",
+            f"final outputs: kept={len(keep_indices)}, refined_masks={len(refined_masks)}",
+        )
         print(
             f"PASS: Refiner kept {len(keep_indices)}/{len(coarse_masks)} masks, "
             f"produced {len(refined_masks)} refined masks."
