@@ -209,24 +209,35 @@ For large datasets (e.g. 800 K+ ARKitScenes frames), use `run_parallel.py` to sp
 data into N independent shards and run one pipeline subprocess per NPU device.
 Every stage — both CPU-bound and NPU-bound — achieves roughly N× throughput.
 
-**Recommended command (2 × Ascend 910B 32 GB):**
+**Minimal invocation — all hardware params read from the YAML automatically:**
 
 ```bash
 python run_parallel.py \
     --config config/preprocessing/demo_preprocessing_embodiedscan_sam3.yaml \
     --output_dir /path/to/output \
+    --num_pipelines 2
+```
+
+Only `--config`, `--output_dir`, and `--num_pipelines` are required.
+`devices`, `replicas_per_device`, and `cpu_workers` are read directly from the
+YAML (`device`, `replicas_per_device`, and `num_workers` fields respectively).
+Pass them on the CLI only to **override** the YAML values on the fly:
+
+```bash
+# Override replica count without editing the YAML:
+python run_parallel.py \
+    --config config/preprocessing/demo_preprocessing_embodiedscan_sam3.yaml \
+    --output_dir /path/to/output \
     --num_pipelines 2 \
-    --devices "npu:0 npu:1" \
-    --replicas_per_device 3 \
-    --cpu_workers 20
+    --replicas_per_device 3
 ```
 
 | Argument | Default | Meaning |
 |---|---|---|
 | `--num_pipelines` | `2` | Number of parallel pipeline subprocesses |
-| `--devices` | inferred from YAML `device` field | Space-separated NPU device list assigned round-robin to workers |
-| `--replicas_per_device` | `2` | SAM3 model replicas per NPU per worker (tune to fill VRAM) |
-| `--cpu_workers` | `20` | `num_workers` for CPU-bound stages (filter, scene_fusion) per worker |
+| `--devices` | YAML `device` field | Space-separated NPU list assigned round-robin to workers |
+| `--replicas_per_device` | YAML `replicas_per_device` | SAM3 replicas per NPU per worker (tune to fill VRAM) |
+| `--cpu_workers` | YAML `num_workers` of first CPU stage | Per-pipeline workers for filter / scene_fusion; recommended ≈ `vCPUs / num_pipelines` |
 
 **VRAM sizing guide for SAM3 (bfloat16, per worker):**
 
@@ -259,11 +270,11 @@ tail -f /path/to/output/worker_*/run.log
 ```
 
 > **Single-process alternative:** If you prefer to keep using `run.py`, set
-> `num_workers: 40` for CPU-bound stages (filter, scene_fusion) in the YAML — the
-> GIL is released by cv2/numpy/open3d, so all 40 threads run truly in parallel.
-> SAM3 throughput is still capped by the replica pool (4 replicas = 4 concurrent
-> forward passes regardless of `num_workers`), so keep `num_workers: 4` for the
-> localization stage.
+> `num_workers: 40` for CPU-bound stages (filter, scene_fusion) in the YAML —
+> cv2/numpy/open3d release the GIL so all 40 threads run truly in parallel on
+> 48 vCPUs (~83% utilisation).  SAM3 throughput is still capped by the replica
+> pool, so keep `num_workers` equal to `replicas_per_device × len(devices)` for
+> the localization stage.
 
 ### 3.3 Config File Structure
 

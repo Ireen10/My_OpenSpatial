@@ -4,15 +4,25 @@ Splits the input dataset across N independent pipeline subprocesses, each
 pinned to a dedicated NPU device.  Because every subprocess handles only 1/N
 of the data, all stages (both CPU-bound and NPU-bound) achieve ~N× throughput.
 
-Recommended config for 2 × 910B 32 GB:
+All hardware parameters (devices, replicas_per_device, cpu_workers) are read
+directly from the YAML config.  Only --config, --output_dir, and
+--num_pipelines are required; the remaining flags are pure overrides.
+
+Minimal invocation:
+
+    python run_parallel.py \\
+        --config config/preprocessing/demo_preprocessing_embodiedscan_sam3.yaml \\
+        --output_dir /data/output \\
+        --num_pipelines 2
+
+Override any YAML value when needed, e.g. to test a different replica count
+without editing the file:
 
     python run_parallel.py \\
         --config config/preprocessing/demo_preprocessing_embodiedscan_sam3.yaml \\
         --output_dir /data/output \\
         --num_pipelines 2 \\
-        --devices "npu:0 npu:1" \\
-        --replicas_per_device 2 \\
-        --cpu_workers 20
+        --replicas_per_device 3
 
 Output layout:
     <output_dir>/worker_0/    ← shard 0 results
@@ -49,6 +59,45 @@ def _load_yaml(path: str) -> dict:
 def _dump_yaml(cfg: dict, path: str) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         yaml.dump(cfg, fh, default_flow_style=False, allow_unicode=True)
+
+
+def _iter_all_tasks(stages):
+    """Yield every task dict found in stages (handles dict or list-of-dicts)."""
+    if isinstance(stages, dict):
+        for tasks in stages.values():
+            if isinstance(tasks, list):
+                yield from (t for t in tasks if isinstance(t, dict))
+    elif isinstance(stages, list):
+        for entry in stages:
+            if isinstance(entry, dict):
+                yield from _iter_all_tasks(entry)
+
+
+def _infer_devices(config_dict: dict) -> list[str]:
+    """Read the 'device' field from the first NPU-bound task in the YAML."""
+    stages = config_dict.get("pipeline", {}).get("stages", {})
+    for task in _iter_all_tasks(stages):
+        if "device" in task:
+            return [d.strip() for d in str(task["device"]).split(",")]
+    return ["cpu"]
+
+
+def _infer_replicas_per_device(config_dict: dict) -> int:
+    """Read 'replicas_per_device' from the first NPU-bound task in the YAML."""
+    stages = config_dict.get("pipeline", {}).get("stages", {})
+    for task in _iter_all_tasks(stages):
+        if "replicas_per_device" in task:
+            return int(task["replicas_per_device"])
+    return 1
+
+
+def _infer_cpu_workers(config_dict: dict) -> int:
+    """Read 'num_workers' from the first CPU-bound task that declares it."""
+    stages = config_dict.get("pipeline", {}).get("stages", {})
+    for task in _iter_all_tasks(stages):
+        if "device" not in task and "num_workers" in task:
+            return int(task["num_workers"])
+    return 8
 
 
 # ---------------------------------------------------------------------------
@@ -173,13 +222,14 @@ def main() -> None:
                         help="Number of parallel pipeline processes (default: 2).")
     parser.add_argument("--devices", type=str, default=None,
                         help="Space-separated NPU device list, e.g. 'npu:0 npu:1'. "
-                             "Overrides the 'device' field in the YAML.")
-    parser.add_argument("--replicas_per_device", type=int, default=2,
-                        help="SAM3 model replicas per NPU device per worker (default: 2). "
-                             "Each replica uses ~3–4 GB in bfloat16 on a 910B card.")
-    parser.add_argument("--cpu_workers", type=int, default=20,
-                        help="num_workers for CPU-bound stages per pipeline (default: 20). "
-                             "Recommended: floor(total_vCPUs / num_pipelines) – a few.")
+                             "Default: read from the 'device' field in the YAML.")
+    parser.add_argument("--replicas_per_device", type=int, default=None,
+                        help="SAM3 replicas per NPU device per worker. "
+                             "Default: read from 'replicas_per_device' in the YAML.")
+    parser.add_argument("--cpu_workers", type=int, default=None,
+                        help="num_workers for CPU-bound stages per pipeline. "
+                             "Default: read from the first CPU stage 'num_workers' in the YAML. "
+                             "Recommended value ≈ vCPUs / num_pipelines.")
     args = parser.parse_args()
 
     # ── Resolve paths ────────────────────────────────────────────────────────
@@ -196,27 +246,15 @@ def main() -> None:
     base_cfg = _load_yaml(config_path)
     n = args.num_pipelines
 
-    # ── Determine devices per worker ─────────────────────────────────────────
-    if args.devices:
-        devices = args.devices.split()
-    else:
-        # Infer from YAML: look for 'device' in any stage task
-        stages = base_cfg.get("pipeline", {}).get("stages", {})
-        device_str = None
-        for stage_tasks in (stages.values() if isinstance(stages, dict) else []):
-            if not isinstance(stage_tasks, list):
-                continue
-            for task in stage_tasks:
-                if isinstance(task, dict) and "device" in task:
-                    device_str = task["device"]
-                    break
-            if device_str:
-                break
-        devices = [d.strip() for d in (device_str or "cpu").split(",")]
+    # ── Resolve hardware params: CLI arg > YAML value > built-in fallback ────
+    devices = args.devices.split() if args.devices else _infer_devices(base_cfg)
+    replicas_per_device = args.replicas_per_device or _infer_replicas_per_device(base_cfg)
+    cpu_workers = args.cpu_workers or _infer_cpu_workers(base_cfg)
 
     print(f"[run_parallel] num_pipelines={n}  devices={devices}  "
-          f"replicas_per_device={args.replicas_per_device}  "
-          f"cpu_workers={args.cpu_workers}")
+          f"replicas_per_device={replicas_per_device}  "
+          f"cpu_workers={cpu_workers}  "
+          f"(all read from YAML unless overridden via CLI)")
 
     # ── Split data ───────────────────────────────────────────────────────────
     data_dir = base_cfg["dataset"]["data_dir"]
@@ -246,8 +284,8 @@ def main() -> None:
             worker_idx=i,
             data_dir=data_shards[i],
             device=device,
-            replicas_per_device=args.replicas_per_device,
-            cpu_workers=args.cpu_workers,
+            replicas_per_device=replicas_per_device,
+            cpu_workers=cpu_workers,
         )
         cfg_path = os.path.join(tmpdir, f"config_worker_{i:03d}.yaml")
         _dump_yaml(cfg, cfg_path)

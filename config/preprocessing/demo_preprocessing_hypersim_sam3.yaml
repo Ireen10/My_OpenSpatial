@@ -22,7 +22,7 @@ pipeline:
         filter_tags: ["ceiling", "floor", "wall", "object"]
         output_dir:
         use_multi_processing: true
-        num_workers: 20
+        num_workers: 24
 
     localization_stage:
       -
@@ -48,7 +48,7 @@ pipeline:
         depends_on: localization_stage/sam3_refiner
         output_dir:
         use_multi_processing: true
-        num_workers: 20
+        num_workers: 24
 
     group_stage:
       -
