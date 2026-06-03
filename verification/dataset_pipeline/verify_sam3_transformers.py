@@ -71,6 +71,7 @@ class Localizer:
 
         segmenter_model = args.get("segmenter_model", "facebook/sam3")
         segmenter_checkpoint_path = args.get("segmenter_checkpoint_path")
+        segmenter_resolution = args.get("segmenter_resolution", 1008)
         segmenter_source = segmenter_checkpoint_path or segmenter_model
 
         self.processor = AutoProcessor.from_pretrained(grounding_model)
@@ -82,6 +83,12 @@ class Localizer:
         self.sam3_processor = Sam3Processor.from_pretrained(segmenter_source)
         self.sam3_model = Sam3Model.from_pretrained(segmenter_source).to(self.device)
         self.sam3_model.eval()
+        if hasattr(self.sam3_processor, "image_processor"):
+            ip = self.sam3_processor.image_processor
+            if hasattr(ip, "size"):
+                ip.size = {"height": int(segmenter_resolution), "width": int(segmenter_resolution)}
+            if hasattr(self.sam3_processor, "target_size"):
+                self.sam3_processor.target_size = int(segmenter_resolution)
         processor_name = type(self.sam3_processor).__name__.lower()
         if "video" in processor_name:
             raise ValueError(
@@ -97,6 +104,15 @@ class Localizer:
                 f"model={type(self.sam3_model).__name__}"
             ),
         )
+        if hasattr(self.sam3_processor, "image_processor"):
+            ip = self.sam3_processor.image_processor
+            _log(
+                "LOCALIZER",
+                (
+                    f"sam3 preprocess config: size={getattr(ip, 'size', None)}, "
+                    f"mean={getattr(ip, 'image_mean', None)}, std={getattr(ip, 'image_std', None)}"
+                ),
+            )
 
     @staticmethod
     def _resolve_device(args):
@@ -284,11 +300,18 @@ class Sam3Refiner:
 
         segmenter_model = args.get("segmenter_model", "facebook/sam3")
         segmenter_checkpoint_path = args.get("segmenter_checkpoint_path")
+        segmenter_resolution = args.get("segmenter_resolution", 1008)
         segmenter_source = segmenter_checkpoint_path or segmenter_model
 
         self.sam3_processor = Sam3Processor.from_pretrained(segmenter_source)
         self.sam3_model = Sam3Model.from_pretrained(segmenter_source).to(self.device)
         self.sam3_model.eval()
+        if hasattr(self.sam3_processor, "image_processor"):
+            ip = self.sam3_processor.image_processor
+            if hasattr(ip, "size"):
+                ip.size = {"height": int(segmenter_resolution), "width": int(segmenter_resolution)}
+            if hasattr(self.sam3_processor, "target_size"):
+                self.sam3_processor.target_size = int(segmenter_resolution)
         processor_name = type(self.sam3_processor).__name__.lower()
         if "video" in processor_name:
             raise ValueError(
@@ -304,6 +327,15 @@ class Sam3Refiner:
                 f"model={type(self.sam3_model).__name__}"
             ),
         )
+        if hasattr(self.sam3_processor, "image_processor"):
+            ip = self.sam3_processor.image_processor
+            _log(
+                "REFINER",
+                (
+                    f"sam3 preprocess config: size={getattr(ip, 'size', None)}, "
+                    f"mean={getattr(ip, 'image_mean', None)}, std={getattr(ip, 'image_std', None)}"
+                ),
+            )
 
     @staticmethod
     def _resolve_device(args):
