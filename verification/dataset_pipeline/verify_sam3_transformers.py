@@ -132,7 +132,6 @@ class Localizer:
         box = [float(v) for v in box_xyxy]
         inputs = self.sam3_processor(
             images=image,
-            text="visual",
             input_boxes=[[box]],
             input_boxes_labels=[[1]],
             return_tensors="pt",
@@ -140,16 +139,6 @@ class Localizer:
         inputs = self._move_to_device(inputs, self.device)
         with torch.no_grad():
             outputs = self.sam3_model(**inputs, multimask_output=True)
-
-        pred_masks = getattr(outputs, "pred_masks", None)
-        pred_logits = getattr(outputs, "pred_logits", None)
-        if pred_masks is None or pred_logits is None or pred_logits.shape[0] == 0:
-            return None, None
-
-        score_candidates = pred_logits[0].detach().float().sigmoid()
-        presence_logits = getattr(outputs, "presence_logits", None)
-        if presence_logits is not None and presence_logits.shape[0] > 0:
-            score_candidates = score_candidates * presence_logits[0].detach().float().sigmoid()
 
         results = self.sam3_processor.post_process_instance_segmentation(
             outputs,
@@ -160,18 +149,16 @@ class Localizer:
         if not results:
             return None, None
         result = results[0]
-        mask_candidates = result.get("masks")
-        if mask_candidates is None or len(mask_candidates) == 0:
-            return None, None
-        valid_len = min(len(mask_candidates), len(score_candidates))
-        if valid_len == 0:
-            return None, None
-        mask_candidates = mask_candidates[:valid_len]
-        score_candidates = score_candidates[:valid_len]
 
+        masks = result.get("masks")
+        scores = result.get("scores")
+        if masks is None or scores is None or len(scores) == 0 or len(masks) == 0:
+            return None, None
+
+        score_candidates = scores.detach().float().cpu().flatten()
         best_idx = int(torch.argmax(score_candidates).item())
         best_score = float(score_candidates[best_idx].item())
-        best_mask = mask_candidates[best_idx]
+        best_mask = masks[best_idx]
         if best_mask.ndim == 2:
             best_mask = best_mask.unsqueeze(0)
         best_mask_np = (best_mask.detach().cpu().numpy() > 0).astype(np.uint8)
@@ -363,7 +350,6 @@ class Sam3Refiner:
         box = [float(v) for v in box_xyxy]
         inputs = self.sam3_processor(
             images=image,
-            text="visual",
             input_boxes=[[box]],
             input_boxes_labels=[[1]],
             return_tensors="pt",
@@ -371,16 +357,6 @@ class Sam3Refiner:
         inputs = self._move_to_device(inputs, self.device)
         with torch.no_grad():
             outputs = self.sam3_model(**inputs, multimask_output=True)
-
-        pred_masks = getattr(outputs, "pred_masks", None)
-        pred_logits = getattr(outputs, "pred_logits", None)
-        if pred_masks is None or pred_logits is None or pred_logits.shape[0] == 0:
-            return None, None
-
-        score_candidates = pred_logits[0].detach().float().sigmoid()
-        presence_logits = getattr(outputs, "presence_logits", None)
-        if presence_logits is not None and presence_logits.shape[0] > 0:
-            score_candidates = score_candidates * presence_logits[0].detach().float().sigmoid()
 
         results = self.sam3_processor.post_process_instance_segmentation(
             outputs,
@@ -391,18 +367,16 @@ class Sam3Refiner:
         if not results:
             return None, None
         result = results[0]
-        mask_candidates = result.get("masks")
-        if mask_candidates is None or len(mask_candidates) == 0:
-            return None, None
-        valid_len = min(len(mask_candidates), len(score_candidates))
-        if valid_len == 0:
-            return None, None
-        mask_candidates = mask_candidates[:valid_len]
-        score_candidates = score_candidates[:valid_len]
 
+        masks = result.get("masks")
+        scores = result.get("scores")
+        if masks is None or scores is None or len(scores) == 0 or len(masks) == 0:
+            return None, None
+
+        score_candidates = scores.detach().float().cpu().flatten()
         best_idx = int(torch.argmax(score_candidates).item())
         score = float(score_candidates[best_idx].item())
-        mask = mask_candidates[best_idx]
+        mask = masks[best_idx]
         if mask.ndim == 3 and mask.shape[0] == 1:
             mask = mask[0]
         mask_np = (mask.detach().cpu().numpy() > 0).astype(np.uint8)
