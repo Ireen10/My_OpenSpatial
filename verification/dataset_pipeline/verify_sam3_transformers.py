@@ -151,19 +151,18 @@ class Localizer:
         if presence_logits is not None and presence_logits.shape[0] > 0:
             score_candidates = score_candidates * presence_logits[0].detach().float().sigmoid()
 
-        original_sizes = inputs.get("original_sizes")
-        if original_sizes is None:
-            return None, None
-        post_masks = self.sam3_processor.post_process_masks(
-            pred_masks.detach().cpu(),
-            original_sizes.detach().cpu(),
+        results = self.sam3_processor.post_process_instance_segmentation(
+            outputs,
+            threshold=0.0,
             mask_threshold=0.5,
-            binarize=True,
+            target_sizes=inputs.get("original_sizes").tolist(),
         )
-        if not post_masks or len(post_masks[0]) == 0:
+        if not results:
             return None, None
-
-        mask_candidates = post_masks[0]
+        result = results[0]
+        mask_candidates = result.get("masks")
+        if mask_candidates is None or len(mask_candidates) == 0:
+            return None, None
         valid_len = min(len(mask_candidates), len(score_candidates))
         if valid_len == 0:
             return None, None
@@ -390,19 +389,18 @@ class Sam3Refiner:
         if presence_logits is not None and presence_logits.shape[0] > 0:
             score_candidates = score_candidates * presence_logits[0].detach().float().sigmoid()
 
-        original_sizes = inputs.get("original_sizes")
-        if original_sizes is None:
-            return None, None
-        post_masks = self.sam3_processor.post_process_masks(
-            pred_masks.detach().cpu(),
-            original_sizes.detach().cpu(),
+        results = self.sam3_processor.post_process_instance_segmentation(
+            outputs,
+            threshold=0.0,
             mask_threshold=0.5,
-            binarize=True,
+            target_sizes=inputs.get("original_sizes").tolist(),
         )
-        if not post_masks or len(post_masks[0]) == 0:
+        if not results:
             return None, None
-
-        mask_candidates = post_masks[0]
+        result = results[0]
+        mask_candidates = result.get("masks")
+        if mask_candidates is None or len(mask_candidates) == 0:
+            return None, None
         valid_len = min(len(mask_candidates), len(score_candidates))
         if valid_len == 0:
             return None, None
