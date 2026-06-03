@@ -278,7 +278,7 @@ def _monitor_workers(procs: list, poll_interval: float = 10.0) -> None:
                 if stage or tqdm_line:
                     out.append(f"  [W{worker_idx}] {stage or '(loading…)'}")
                     if tqdm_line:
-                        out.append(f"           {tqdm_line[:105]}")
+                        out.append(f"           {tqdm_line}")
                 else:
                     out.append(f"  [W{worker_idx}] starting…")
             else:
