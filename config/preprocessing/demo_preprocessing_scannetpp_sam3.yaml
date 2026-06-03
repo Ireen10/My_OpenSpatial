@@ -30,7 +30,7 @@ pipeline:
         depends_on: flatten_stage/flatten
         output_dir:
         use_multi_processing: true
-        num_workers: 24
+        num_workers: 40
 
     localization_stage:
       -
@@ -56,7 +56,7 @@ pipeline:
         depends_on: localization_stage/sam3_refiner
         output_dir:
         use_multi_processing: true
-        num_workers: 24
+        num_workers: 40
 
     group_stage:
       -

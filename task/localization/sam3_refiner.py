@@ -378,16 +378,23 @@ class Sam3Refiner(BaseTask):
             for i in range(0, len(examples), batch_size)
         ]
 
+        # Submit at most (num_workers * 2) futures at a time so the pending-
+        # futures dict never holds the entire dataset in memory simultaneously.
         processed = []
+        window = num_workers * 2
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            futures = {executor.submit(self._process_batch, b): b for b in batches}
-            for future in tqdm.tqdm(
-                as_completed(futures), total=len(futures), desc="SAM3 batched"
+            for chunk_start in tqdm.tqdm(
+                range(0, len(batches), window),
+                total=(len(batches) + window - 1) // window,
+                desc="SAM3 batched",
             ):
-                try:
-                    processed.extend(future.result())
-                except Exception as exc:
-                    print(f"[WARN] SAM3 batch failed: {exc}")
+                chunk = batches[chunk_start : chunk_start + window]
+                futures = {executor.submit(self._process_batch, b): None for b in chunk}
+                for future in as_completed(futures):
+                    try:
+                        processed.extend(future.result())
+                    except Exception as exc:
+                        print(f"[WARN] SAM3 batch failed: {exc}")
 
         if not processed:
             return pd.DataFrame()
