@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -17,6 +18,12 @@ from transformers import (
     Sam3Model,
     Sam3Processor,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from utils.data_utils import merge_overlapping_boxes, merge_overlapping_masks
 
 
 def log(stage: str, message: str):
@@ -118,6 +125,12 @@ def infer_input_from_parquet(parsed):
             ]
 
 
+def parse_tags(tags_text: str | None) -> list[str]:
+    if not tags_text:
+        return []
+    return [t.strip() for t in tags_text.split(",") if t.strip()]
+
+
 def load_binary_masks(mask_paths: list[Path]) -> list[np.ndarray]:
     masks = []
     for p in mask_paths:
@@ -171,20 +184,17 @@ def postprocess_masks_and_scores(post_result: dict) -> tuple[list[np.ndarray], l
     return masks, scores
 
 
-def run_sam3_box_prompt(
+def run_sam3_single_box_prompt(
     image: Image.Image,
-    boxes_xyxy: np.ndarray,
+    box_xyxy: np.ndarray,
     model: Sam3Model,
     processor: Sam3Processor,
     device: str,
-    threshold: float,
+    threshold: float = 0.0,
     mask_threshold: float,
-) -> tuple[list[np.ndarray], list[float]]:
-    if boxes_xyxy.shape[0] == 0:
-        return [], []
-
-    input_boxes = [np_boxes_to_nested_list(boxes_xyxy)]
-    input_boxes_labels = [[1] * len(input_boxes[0])]
+) -> tuple[np.ndarray | None, float | None]:
+    input_boxes = [[[float(box_xyxy[0]), float(box_xyxy[1]), float(box_xyxy[2]), float(box_xyxy[3])]]]
+    input_boxes_labels = [[1]]
 
     model_inputs = processor(
         images=image,
@@ -205,7 +215,12 @@ def run_sam3_box_prompt(
         mask_threshold=mask_threshold,
         target_sizes=model_inputs["original_sizes"].detach().cpu().tolist(),
     )[0]
-    return postprocess_masks_and_scores(processed)
+    masks, scores = postprocess_masks_and_scores(processed)
+    if len(masks) == 0:
+        return None, None
+
+    best_idx = int(np.argmax(np.asarray(scores, dtype=np.float32)))
+    return masks[best_idx], float(scores[best_idx])
 
 
 def save_masks(mask_dir: Path, masks: list[np.ndarray]) -> list[str]:
@@ -248,8 +263,26 @@ def main() -> int:
 
     parser.add_argument("--det_threshold", type=float, default=0.3)
     parser.add_argument("--text_threshold", type=float, default=0.3)
-    parser.add_argument("--sam_threshold", type=float, default=0.5)
+    parser.add_argument("--sam_threshold", type=float, default=0.0)
     parser.add_argument("--sam_mask_threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--localizer_min_score",
+        type=float,
+        default=0.7,
+        help="Match old verify_sam3_modules localizer score filter.",
+    )
+    parser.add_argument(
+        "--refiner_min_score",
+        type=float,
+        default=0.6,
+        help="Match old verify_sam3_modules refiner score filter.",
+    )
+    parser.add_argument(
+        "--refiner_min_mask_pixels",
+        type=int,
+        default=20,
+        help="Match old verify_sam3_modules refiner area filter.",
+    )
     parser.add_argument("--save_dir", type=Path, default=Path("output/verify_sam3_transformers"))
     args = parser.parse_args()
 
@@ -287,10 +320,9 @@ def main() -> int:
     localizer_scores: list[float] = []
 
     if args.mode in ("localizer", "both"):
-        tags_text = args.tags or "chair,table"
-        tags = [t.strip() for t in tags_text.split(",") if t.strip()]
+        tags = parse_tags(args.tags)
         if not tags:
-            raise ValueError("--tags is empty in localizer/both mode")
+            raise ValueError("--tags is required in localizer/both mode")
 
         text_prompt = ". ".join(tags)
         log("LOCALIZER", f"running detector with prompt: {text_prompt}")
@@ -309,19 +341,58 @@ def main() -> int:
         det_tags = det_result["text_labels"]
         localizer_boxes = det_result["boxes"].detach().cpu().numpy()
         log("LOCALIZER", f"detected boxes: {len(localizer_boxes)}")
+
+        if len(det_tags) <= 1:
+            raise RuntimeError("Localizer detected <=1 object after GroundingDINO.")
+
+        localizer_boxes, det_tags = merge_overlapping_boxes(
+            det_tags, localizer_boxes, overlap_threshold=0.8
+        )
+        log("LOCALIZER", f"boxes after merge_overlapping_boxes: {len(localizer_boxes)}")
         save_boxes_visualization(args.save_dir / "localizer_boxes.png", image, localizer_boxes, det_tags)
 
-        log("LOCALIZER", "running SAM3 with detector boxes")
-        localizer_masks, localizer_scores = run_sam3_box_prompt(
-            image=image,
-            boxes_xyxy=localizer_boxes,
-            model=sam3_model,
-            processor=sam3_processor,
-            device=sam_device,
-            threshold=args.sam_threshold,
-            mask_threshold=args.sam_mask_threshold,
-        )
-        log("LOCALIZER", f"sam3 masks: {len(localizer_masks)}")
+        log("LOCALIZER", f"running SAM3 per box ({len(localizer_boxes)} boxes)")
+        per_box_masks: list[np.ndarray] = []
+        per_box_scores: list[float] = []
+        kept_tags: list[str] = []
+        kept_boxes: list[list[float]] = []
+        for i, box in enumerate(localizer_boxes):
+            if box[2] <= box[0] or box[3] <= box[1]:
+                continue
+            best_mask, best_score = run_sam3_single_box_prompt(
+                image=image,
+                box_xyxy=box,
+                model=sam3_model,
+                processor=sam3_processor,
+                device=sam_device,
+                threshold=args.sam_threshold,
+                mask_threshold=args.sam_mask_threshold,
+            )
+            if best_mask is None or best_score is None:
+                continue
+            if best_score < args.localizer_min_score:
+                continue
+            per_box_masks.append(best_mask)
+            per_box_scores.append(best_score)
+            kept_tags.append(det_tags[i])
+            kept_boxes.append([float(v) for v in box.tolist()])
+
+        if len(per_box_masks) == 0:
+            localizer_masks = []
+            localizer_scores = []
+            localizer_boxes = np.zeros((0, 4), dtype=np.float32)
+            det_tags = []
+        else:
+            masks_np = np.stack(per_box_masks, axis=0)
+            boxes_np = np.asarray(kept_boxes, dtype=np.float32)
+            masks_np, det_tags, boxes_np = merge_overlapping_masks(
+                masks_np, kept_tags, boxes_np, overlap_threshold=0.8
+            )
+            localizer_masks = [m.astype(np.uint8) for m in masks_np]
+            localizer_boxes = boxes_np
+            localizer_scores = per_box_scores[: len(localizer_masks)]
+
+        log("LOCALIZER", f"sam3 masks after filtering/merge: {len(localizer_masks)}")
         save_masks(args.save_dir / "localizer_masks", localizer_masks)
 
         with open(args.save_dir / "localizer_summary.json", "w", encoding="utf-8") as f:
@@ -352,17 +423,35 @@ def main() -> int:
                 )
 
         coarse_boxes = masks_to_xyxy_boxes(coarse_masks)
-        log("REFINER", f"running SAM3 refine with {len(coarse_boxes)} coarse boxes")
-        refined_masks, refined_scores = run_sam3_box_prompt(
-            image=image,
-            boxes_xyxy=coarse_boxes,
-            model=sam3_model,
-            processor=sam3_processor,
-            device=sam_device,
-            threshold=args.sam_threshold,
-            mask_threshold=args.sam_mask_threshold,
-        )
-        log("REFINER", f"refined masks: {len(refined_masks)}")
+        log("REFINER", f"running SAM3 refine per box ({len(coarse_boxes)} coarse boxes)")
+        refined_masks: list[np.ndarray] = []
+        refined_scores: list[float] = []
+        keep_indices: list[int] = []
+        refined_boxes: list[list[int]] = []
+        for i, box in enumerate(coarse_boxes):
+            if box[2] <= box[0] or box[3] <= box[1]:
+                continue
+            best_mask, best_score = run_sam3_single_box_prompt(
+                image=image,
+                box_xyxy=box,
+                model=sam3_model,
+                processor=sam3_processor,
+                device=sam_device,
+                threshold=args.sam_threshold,
+                mask_threshold=args.sam_mask_threshold,
+            )
+            if best_mask is None or best_score is None:
+                continue
+            if best_score < args.refiner_min_score:
+                continue
+            if int(np.sum(best_mask > 0)) <= args.refiner_min_mask_pixels:
+                continue
+            refined_masks.append(best_mask.astype(np.uint8))
+            refined_scores.append(best_score)
+            keep_indices.append(i)
+            refined_boxes.append([int(box[0]), int(box[1]), int(box[2]), int(box[3])])
+
+        log("REFINER", f"refined masks after filtering: {len(refined_masks)}")
         save_masks(args.save_dir / "refiner_masks", refined_masks)
 
         with open(args.save_dir / "refiner_summary.json", "w", encoding="utf-8") as f:
@@ -371,6 +460,8 @@ def main() -> int:
                     "num_input_masks": len(coarse_masks),
                     "input_boxes": coarse_boxes.tolist(),
                     "num_refined_masks": len(refined_masks),
+                    "boxes": refined_boxes,
+                    "keep_indices": keep_indices,
                     "scores": refined_scores,
                 },
                 f,
