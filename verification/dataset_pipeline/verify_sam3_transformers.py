@@ -191,7 +191,7 @@ def run_sam3_single_box_prompt(
     processor: Sam3Processor,
     device: str,
     threshold: float = 0.0,
-    mask_threshold: float,
+    mask_threshold: float = 0.5,
 ) -> tuple[np.ndarray | None, float | None]:
     input_boxes = [[[float(box_xyxy[0]), float(box_xyxy[1]), float(box_xyxy[2]), float(box_xyxy[3])]]]
     input_boxes_labels = [[1]]
