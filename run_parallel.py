@@ -37,11 +37,12 @@ downstream use.
 import argparse
 import copy
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
-import threading
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -209,40 +210,85 @@ def _make_worker_config(base_cfg: dict, worker_idx: int, data_dir,
 
 def _launch_worker(worker_idx: int, config_path: str, output_dir: str,
                    run_script: str, log_path: str):
-    """Launch a worker subprocess with stdout/stderr piped for live streaming.
+    """Launch a worker subprocess, redirecting all output to *log_path*.
 
-    Returns (proc, log_fh) — the caller is responsible for starting a
-    _stream_worker thread and closing log_fh after the thread finishes.
+    ``-u`` (unbuffered) ensures every print/tqdm line is flushed to the log
+    file immediately rather than being held in Python's 8 KB block buffer.
     """
     cmd = [
-        sys.executable, run_script,
+        sys.executable, "-u", run_script,
         "--config", config_path,
         "--output_dir", output_dir,
     ]
     log_fh = open(log_path, "w", encoding="utf-8")
     print(f"  [worker {worker_idx}] cmd: {' '.join(cmd)}")
     print(f"  [worker {worker_idx}] log: {log_path}")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh)
     return proc, log_fh
 
 
-def _stream_worker(worker_idx: int, proc: subprocess.Popen, log_fh) -> None:
-    """Forward worker output to both the log file and the parent terminal.
+# ---------------------------------------------------------------------------
+# Periodic progress monitor (reads log files; does NOT flood the terminal)
+# ---------------------------------------------------------------------------
 
-    Each line is prefixed with ``[W<worker_idx>]`` so output from multiple
-    workers is distinguishable without being garbled.  tqdm in non-TTY (pipe)
-    mode writes one ``\\n``-terminated line per update, so progress bars appear
-    as scrolling lines rather than in-place rewrites.  All ``>>> Running Task``
-    stage headers and summary lines are forwarded verbatim.
+_TQDM_RE = re.compile(r'\d+%\|[^|]*\|\s*\d+/\d+')
+_STAGE_RE = re.compile(r'>>> Running (?:Task|Pipeline)')
+
+
+def _last_status(log_path: str) -> tuple:
+    """Return (last_stage_line, last_tqdm_line) from the tail of a log file."""
+    try:
+        with open(log_path, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 8192))
+            tail = fh.read().decode("utf-8", errors="replace")
+        last_stage = last_tqdm = None
+        for line in reversed(tail.splitlines()):
+            s = line.strip()
+            if last_tqdm is None and _TQDM_RE.search(s):
+                last_tqdm = s
+            if last_stage is None and _STAGE_RE.search(s):
+                last_stage = s
+            if last_stage and last_tqdm:
+                break
+        return last_stage, last_tqdm
+    except OSError:
+        return None, None
+
+
+def _monitor_workers(procs: list, poll_interval: float = 10.0) -> None:
+    """Print a brief status block every *poll_interval* seconds until all
+    worker processes finish.  Only two lines per worker are shown (current
+    pipeline stage + latest tqdm progress), so the terminal stays clean.
     """
-    prefix = f"[W{worker_idx}]"
-    for raw in proc.stdout:
-        line = raw.decode("utf-8", errors="replace")
-        log_fh.write(line)
-        log_fh.flush()
-        sys.stdout.write(f"{prefix} {line}")
-        sys.stdout.flush()
-    proc.wait()
+    start = time.time()
+    while True:
+        elapsed = int(time.time() - start)
+        h, rem = divmod(elapsed, 3600)
+        m, s = divmod(rem, 60)
+        ts = f"{h:02d}:{m:02d}:{s:02d}"
+
+        out = [f"\n[run_parallel | {ts} elapsed]"]
+        all_done = True
+        for worker_idx, proc, log_path in procs:
+            rc = proc.poll()
+            if rc is None:
+                all_done = False
+                stage, tqdm_line = _last_status(log_path)
+                if stage or tqdm_line:
+                    out.append(f"  [W{worker_idx}] {stage or '(loading…)'}")
+                    if tqdm_line:
+                        out.append(f"           {tqdm_line[:105]}")
+                else:
+                    out.append(f"  [W{worker_idx}] starting…")
+            else:
+                status = "done" if rc == 0 else f"FAILED (rc={rc})"
+                out.append(f"  [W{worker_idx}] {status}")
+
+        print("\n".join(out), flush=True)
+        if all_done:
+            break
+        time.sleep(poll_interval)
 
 
 # ---------------------------------------------------------------------------
@@ -357,28 +403,21 @@ def main() -> None:
               f"data_dir={data_shards[i] if isinstance(data_shards[i], str) else f'[{len(data_shards[i])} files]'}, "
               f"output={worker_output}")
 
-    # ── Launch all workers; one streaming thread per worker ──────────────────
+    # ── Launch all workers in parallel ───────────────────────────────────────
     print(f"\n[run_parallel] Launching {n} pipeline subprocesses …")
-    print(f"[run_parallel] Output prefixed [W0], [W1], … per worker; "
-          f"logs also saved to {output_root}/worker_*/run.log\n")
+    print(f"[run_parallel] Progress printed every 10 s; "
+          f"full logs at {output_root}/worker_*/run.log\n")
     procs = []
-    threads = []
     log_fhs = []
     for i, cfg_path, worker_output, log_path in worker_cfgs:
         proc, log_fh = _launch_worker(i, cfg_path, worker_output, run_script, log_path)
-        t = threading.Thread(
-            target=_stream_worker, args=(i, proc, log_fh), daemon=True, name=f"stream-w{i}"
-        )
-        t.start()
         procs.append((i, proc, log_path))
-        threads.append(t)
         log_fhs.append(log_fh)
 
-    # ── Wait for all streaming threads (they exit when their proc exits) ─────
-    for t in threads:
-        t.join()
+    # ── Periodic progress monitor + wait ────────────────────────────────────
+    _monitor_workers(procs, poll_interval=10.0)
 
-    # Close log file handles
+    # Close log file handles after all workers exit
     for fh in log_fhs:
         fh.close()
 
