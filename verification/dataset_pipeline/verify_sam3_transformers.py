@@ -62,7 +62,7 @@ from utils.data_utils import merge_overlapping_boxes, merge_overlapping_masks
 class Localizer:
     """Grounding DINO + SAM3 pipeline using transformers model loading."""
 
-    MIN_SCORE = 0.0
+    MIN_SCORE = 0.7
 
     def __init__(self, args):
         grounding_model = args.get("grounding_model", "IDEA-Research/grounding-dino-base")
@@ -71,6 +71,7 @@ class Localizer:
 
         segmenter_model = args.get("segmenter_model", "facebook/sam3")
         segmenter_checkpoint_path = args.get("segmenter_checkpoint_path")
+        segmenter_resolution = args.get("segmenter_resolution", 1008)
         segmenter_source = segmenter_checkpoint_path or segmenter_model
 
         self.processor = AutoProcessor.from_pretrained(grounding_model)
@@ -82,6 +83,12 @@ class Localizer:
         self.sam3_processor = Sam3Processor.from_pretrained(segmenter_source)
         self.sam3_model = Sam3Model.from_pretrained(segmenter_source).to(self.device)
         self.sam3_model.eval()
+        if hasattr(self.sam3_processor, "image_processor"):
+            ip = self.sam3_processor.image_processor
+            if hasattr(ip, "size"):
+                ip.size = {"height": int(segmenter_resolution), "width": int(segmenter_resolution)}
+            if hasattr(self.sam3_processor, "target_size"):
+                self.sam3_processor.target_size = int(segmenter_resolution)
         processor_name = type(self.sam3_processor).__name__.lower()
         if "video" in processor_name:
             raise ValueError(
@@ -156,10 +163,6 @@ class Localizer:
             target_sizes=inputs.get("original_sizes").tolist(),
         )
         if not results:
-            _log(
-                "LOCALIZER",
-                "sam3 post process instance segmentation failed",
-            )
             return None, None
         result = results[0]
 
@@ -297,11 +300,18 @@ class Sam3Refiner:
 
         segmenter_model = args.get("segmenter_model", "facebook/sam3")
         segmenter_checkpoint_path = args.get("segmenter_checkpoint_path")
+        segmenter_resolution = args.get("segmenter_resolution", 1008)
         segmenter_source = segmenter_checkpoint_path or segmenter_model
 
         self.sam3_processor = Sam3Processor.from_pretrained(segmenter_source)
         self.sam3_model = Sam3Model.from_pretrained(segmenter_source).to(self.device)
         self.sam3_model.eval()
+        if hasattr(self.sam3_processor, "image_processor"):
+            ip = self.sam3_processor.image_processor
+            if hasattr(ip, "size"):
+                ip.size = {"height": int(segmenter_resolution), "width": int(segmenter_resolution)}
+            if hasattr(self.sam3_processor, "target_size"):
+                self.sam3_processor.target_size = int(segmenter_resolution)
         processor_name = type(self.sam3_processor).__name__.lower()
         if "video" in processor_name:
             raise ValueError(
@@ -382,7 +392,7 @@ class Sam3Refiner:
 
         results = self.sam3_processor.post_process_instance_segmentation(
             outputs,
-            threshold=0.5,
+            threshold=0.0,
             mask_threshold=0.5,
             target_sizes=inputs.get("original_sizes").tolist(),
         )
