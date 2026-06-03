@@ -49,8 +49,8 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image, ImageDraw
-from transformers import AutoModelForMaskGeneration
 from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+from transformers import Sam3Model, Sam3Processor
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -79,15 +79,24 @@ class Localizer:
         )
         self.detector.eval()
 
-        self.sam3_processor = AutoProcessor.from_pretrained(
-            segmenter_source,
-            trust_remote_code=True,
-        )
-        self.sam3_model = AutoModelForMaskGeneration.from_pretrained(
-            segmenter_source,
-            trust_remote_code=True,
-        ).to(self.device)
+        self.sam3_processor = Sam3Processor.from_pretrained(segmenter_source)
+        self.sam3_model = Sam3Model.from_pretrained(segmenter_source).to(self.device)
         self.sam3_model.eval()
+        processor_name = type(self.sam3_processor).__name__.lower()
+        if "video" in processor_name:
+            raise ValueError(
+                "Loaded a SAM3 video processor for segmenter_source. "
+                "Please pass an image SAM3 model directory/repo for --segmenter_model "
+                "or --segmenter_checkpoint_path."
+            )
+        _log(
+            "LOCALIZER",
+            (
+                f"loaded SAM3 via transformers: "
+                f"processor={type(self.sam3_processor).__name__}, "
+                f"model={type(self.sam3_model).__name__}"
+            ),
+        )
 
     @staticmethod
     def _resolve_device(args):
@@ -120,17 +129,16 @@ class Localizer:
         return moved
 
     def _run_sam3_box_prompt(self, image: Image.Image, box_xyxy):
+        box = [float(v) for v in box_xyxy]
         inputs = self.sam3_processor(
             images=image,
-            input_boxes=[[[float(v) for v in box_xyxy]]],
+            input_boxes=[[box]],
+            input_boxes_labels=[[1]],
             return_tensors="pt",
         )
         inputs = self._move_to_device(inputs, self.device)
         with torch.no_grad():
-            try:
-                outputs = self.sam3_model(**inputs, multimask_output=True)
-            except TypeError:
-                outputs = self.sam3_model(**inputs)
+            outputs = self.sam3_model(**inputs, multimask_output=True)
 
         pred_masks = getattr(outputs, "pred_masks", None)
         iou_scores = getattr(outputs, "iou_scores", None)
@@ -271,15 +279,24 @@ class Sam3Refiner:
         segmenter_checkpoint_path = args.get("segmenter_checkpoint_path")
         segmenter_source = segmenter_checkpoint_path or segmenter_model
 
-        self.sam3_processor = AutoProcessor.from_pretrained(
-            segmenter_source,
-            trust_remote_code=True,
-        )
-        self.sam3_model = AutoModelForMaskGeneration.from_pretrained(
-            segmenter_source,
-            trust_remote_code=True,
-        ).to(self.device)
+        self.sam3_processor = Sam3Processor.from_pretrained(segmenter_source)
+        self.sam3_model = Sam3Model.from_pretrained(segmenter_source).to(self.device)
         self.sam3_model.eval()
+        processor_name = type(self.sam3_processor).__name__.lower()
+        if "video" in processor_name:
+            raise ValueError(
+                "Loaded a SAM3 video processor for segmenter_source. "
+                "Please pass an image SAM3 model directory/repo for --segmenter_model "
+                "or --segmenter_checkpoint_path."
+            )
+        _log(
+            "REFINER",
+            (
+                f"loaded SAM3 via transformers: "
+                f"processor={type(self.sam3_processor).__name__}, "
+                f"model={type(self.sam3_model).__name__}"
+            ),
+        )
 
     @staticmethod
     def _resolve_device(args):
@@ -323,17 +340,16 @@ class Sam3Refiner:
         return moved
 
     def _run_sam3_box_prompt(self, image: Image.Image, box_xyxy):
+        box = [float(v) for v in box_xyxy]
         inputs = self.sam3_processor(
             images=image,
-            input_boxes=[[[float(v) for v in box_xyxy]]],
+            input_boxes=[[box]],
+            input_boxes_labels=[[1]],
             return_tensors="pt",
         )
         inputs = self._move_to_device(inputs, self.device)
         with torch.no_grad():
-            try:
-                outputs = self.sam3_model(**inputs, multimask_output=True)
-            except TypeError:
-                outputs = self.sam3_model(**inputs)
+            outputs = self.sam3_model(**inputs, multimask_output=True)
 
         pred_masks = getattr(outputs, "pred_masks", None)
         iou_scores = getattr(outputs, "iou_scores", None)
