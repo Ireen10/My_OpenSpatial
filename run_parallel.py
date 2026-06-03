@@ -41,6 +41,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import pandas as pd
@@ -207,7 +208,12 @@ def _make_worker_config(base_cfg: dict, worker_idx: int, data_dir,
 # ---------------------------------------------------------------------------
 
 def _launch_worker(worker_idx: int, config_path: str, output_dir: str,
-                   run_script: str, log_path: str) -> subprocess.Popen:
+                   run_script: str, log_path: str):
+    """Launch a worker subprocess with stdout/stderr piped for live streaming.
+
+    Returns (proc, log_fh) — the caller is responsible for starting a
+    _stream_worker thread and closing log_fh after the thread finishes.
+    """
     cmd = [
         sys.executable, run_script,
         "--config", config_path,
@@ -216,7 +222,27 @@ def _launch_worker(worker_idx: int, config_path: str, output_dir: str,
     log_fh = open(log_path, "w", encoding="utf-8")
     print(f"  [worker {worker_idx}] cmd: {' '.join(cmd)}")
     print(f"  [worker {worker_idx}] log: {log_path}")
-    return subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh), log_fh
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return proc, log_fh
+
+
+def _stream_worker(worker_idx: int, proc: subprocess.Popen, log_fh) -> None:
+    """Forward worker output to both the log file and the parent terminal.
+
+    Each line is prefixed with ``[W<worker_idx>]`` so output from multiple
+    workers is distinguishable without being garbled.  tqdm in non-TTY (pipe)
+    mode writes one ``\\n``-terminated line per update, so progress bars appear
+    as scrolling lines rather than in-place rewrites.  All ``>>> Running Task``
+    stage headers and summary lines are forwarded verbatim.
+    """
+    prefix = f"[W{worker_idx}]"
+    for raw in proc.stdout:
+        line = raw.decode("utf-8", errors="replace")
+        log_fh.write(line)
+        log_fh.flush()
+        sys.stdout.write(f"{prefix} {line}")
+        sys.stdout.flush()
+    proc.wait()
 
 
 # ---------------------------------------------------------------------------
@@ -331,28 +357,36 @@ def main() -> None:
               f"data_dir={data_shards[i] if isinstance(data_shards[i], str) else f'[{len(data_shards[i])} files]'}, "
               f"output={worker_output}")
 
-    # ── Launch all workers in parallel ───────────────────────────────────────
-    print(f"\n[run_parallel] Launching {n} pipeline subprocesses …\n")
+    # ── Launch all workers; one streaming thread per worker ──────────────────
+    print(f"\n[run_parallel] Launching {n} pipeline subprocesses …")
+    print(f"[run_parallel] Output prefixed [W0], [W1], … per worker; "
+          f"logs also saved to {output_root}/worker_*/run.log\n")
     procs = []
+    threads = []
     log_fhs = []
     for i, cfg_path, worker_output, log_path in worker_cfgs:
         proc, log_fh = _launch_worker(i, cfg_path, worker_output, run_script, log_path)
+        t = threading.Thread(
+            target=_stream_worker, args=(i, proc, log_fh), daemon=True, name=f"stream-w{i}"
+        )
+        t.start()
         procs.append((i, proc, log_path))
+        threads.append(t)
         log_fhs.append(log_fh)
 
-    # ── Wait and report ──────────────────────────────────────────────────────
-    print(f"\n[run_parallel] Waiting for {n} workers to finish "
-          f"(tail logs with: tail -f {output_root}/worker_*/run.log) …\n")
-    exit_codes = {}
-    for i, proc, log_path in procs:
-        rc = proc.wait()
-        exit_codes[i] = rc
-        status = "OK" if rc == 0 else f"FAILED (rc={rc})"
-        print(f"  [worker {i}] {status}  →  {log_path}")
+    # ── Wait for all streaming threads (they exit when their proc exits) ─────
+    for t in threads:
+        t.join()
 
     # Close log file handles
     for fh in log_fhs:
         fh.close()
+
+    exit_codes = {i: proc.poll() for i, proc, _ in procs}
+    for i, rc in exit_codes.items():
+        log_path = next(lp for wi, _, lp in procs if wi == i)
+        status = "OK" if rc == 0 else f"FAILED (rc={rc})"
+        print(f"  [worker {i}] {status}  →  {log_path}")
 
     # ── Cleanup temp dir (worker configs + optional row-split shards) ────────
     shutil.rmtree(tmpdir, ignore_errors=True)
