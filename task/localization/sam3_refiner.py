@@ -8,15 +8,80 @@ import tqdm
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from transformers import Sam3TrackerProcessor, Sam3TrackerModel
 from task.base_task import BaseTask
 
 
-class Sam3Refiner(BaseTask):
-    """Refine coarse masks using SAM3 Tracker box-prompt segmentation (via transformers).
+def _validate_model_path(model_name_or_path: str) -> None:
+    """Raise a clear FileNotFoundError when a local path does not exist.
 
-    Drop-in replacement for Sam2Refiner. Uses Sam3TrackerModel from the transformers
-    library instead of the sam2 package, preserving all filtering and saving logic.
+    HuggingFace raises a cryptic "Repo id must be in the form …" error when a
+    local path is passed but the directory is missing.  This check surfaces the
+    real problem early.
+    """
+    is_local = (
+        os.path.isabs(model_name_or_path)
+        or model_name_or_path.startswith("./")
+        or model_name_or_path.startswith("../")
+    )
+    if is_local and not os.path.isdir(model_name_or_path):
+        raise FileNotFoundError(
+            f"SAM3 weights directory not found: {model_name_or_path!r}\n"
+            "Check the 'segmenter_model' field in your YAML — it must be either:\n"
+            "  • an absolute path to a local directory containing config.json "
+            "and model weights, OR\n"
+            "  • a HuggingFace Hub repo ID such as 'facebook/sam3'."
+        )
+
+
+def _load_sam3_replica(segmenter_model: str, load_kwargs: dict, device: str):
+    """Load one SAM3 (processor, model) pair in single-image mode.
+
+    Prefers Sam3Processor + Sam3Model (image predictor, no memory module).
+    Falls back to Sam3TrackerProcessor + Sam3TrackerModel if the image-predictor
+    classes are not yet available in the installed transformers version.
+
+    Why prefer the image model:
+    - Sam3TrackerModel includes a memory encoder that calls torchvision.roi_align,
+      which is unsupported on Ascend NPU and silently falls back to CPU.  The
+      resulting CPU↔NPU tensor transfer can corrupt the IoU prediction head output,
+      causing all scores to cluster around 0.03–0.05 regardless of mask quality.
+    - The tracker's IoU score measures temporal-tracking quality, not segmentation
+      quality, so single-frame scores are systematically low even without the NPU bug.
+    """
+    _validate_model_path(segmenter_model)
+
+    suppress = warnings.catch_warnings()
+    suppress.__enter__()
+    warnings.filterwarnings(
+        "ignore",
+        message=r"You are using a model of type sam3_video",
+        category=UserWarning,
+    )
+    try:
+        from transformers import Sam3Processor, Sam3Model
+        proc = Sam3Processor.from_pretrained(segmenter_model)
+        model = Sam3Model.from_pretrained(segmenter_model, **load_kwargs).to(device)
+        suppress.__exit__(None, None, None)
+        return proc, model
+    except (ImportError, AttributeError, OSError, ValueError):
+        # ImportError/AttributeError: class not available in this transformers version.
+        # OSError/ValueError: model_type mismatch or config incompatibility with
+        # Sam3Model — fall back to the tracker variant which accepts sam3_video configs.
+        pass
+
+    from transformers import Sam3TrackerProcessor, Sam3TrackerModel
+    proc = Sam3TrackerProcessor.from_pretrained(segmenter_model)
+    model = Sam3TrackerModel.from_pretrained(segmenter_model, **load_kwargs).to(device)
+    suppress.__exit__(None, None, None)
+    return proc, model
+
+
+class Sam3Refiner(BaseTask):
+    """Refine coarse masks using SAM3 box-prompt segmentation (via transformers).
+
+    Drop-in replacement for Sam2Refiner. Uses Sam3Model (image predictor) from the
+    transformers library instead of the sam2 package, preserving all filtering and
+    saving logic.  Falls back to Sam3TrackerModel if Sam3Model is not available.
     Recommended: transformers >= 5.0.0
 
     Multi-card parallel inference
@@ -77,23 +142,15 @@ class Sam3Refiner(BaseTask):
         if torch_dtype is not None:
             load_kwargs["torch_dtype"] = torch_dtype
 
+        _variant_logged = False
         for dev in devices:
             for _ in range(replicas_per_device):
-                # Suppress the spurious "model of type sam3_video" warning.
-                # The facebook/sam3 checkpoint registers model_type=sam3_video in
-                # config.json to support four architectures from one file; loading
-                # Sam3TrackerModel (sam3_tracker) from it triggers a type-mismatch
-                # warning that is cosmetic only.  Tracked upstream: issue #43408.
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore",
-                        message=r"You are using a model of type sam3_video",
-                        category=UserWarning,
-                    )
-                    proc = Sam3TrackerProcessor.from_pretrained(segmenter_model)
-                    model = Sam3TrackerModel.from_pretrained(
-                        segmenter_model, **load_kwargs
-                    ).to(dev)
+                proc, model = _load_sam3_replica(segmenter_model, load_kwargs, dev)
+                if not _variant_logged:
+                    _cls = type(model).__name__
+                    print(f"[Sam3Refiner] SAM3 loaded as {_cls} on {dev} "
+                          f"(dtype={torch_dtype or 'float32'})")
+                    _variant_logged = True
                 model.eval()
                 self._replica_pool.put((proc, model, dev))
 

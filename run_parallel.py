@@ -104,30 +104,45 @@ def _infer_cpu_workers(config_dict: dict) -> int:
 # Data splitting
 # ---------------------------------------------------------------------------
 
+def _discover_parquets(directory: str) -> list[str]:
+    """Return all .parquet files under a directory, sorted for reproducibility."""
+    import glob as _glob
+    # Prefer top-level files first; fall back to recursive search
+    files = sorted(_glob.glob(os.path.join(directory, "*.parquet")))
+    if not files:
+        files = sorted(_glob.glob(os.path.join(directory, "**", "*.parquet"), recursive=True))
+    return files
+
+
+def _split_list(paths: list, n: int) -> list[list]:
+    """Distribute a list of paths across N workers (round-robin, no data copying)."""
+    chunks: list[list] = [[] for _ in range(n)]
+    for i, p in enumerate(paths):
+        chunks[i % n].append(p)
+    return [c for c in chunks if c]
+
+
 def _split_single_parquet(data_path: str, n: int, tmpdir: str) -> list[str]:
-    """Split one parquet file into N roughly equal shards; return their paths."""
-    df = pd.read_parquet(data_path, engine="pyarrow")
-    total = len(df)
+    """Row-split a single parquet into N shards.  Only used when data_dir is one file.
+
+    Preserves the original pyarrow schema by reading and writing with the same
+    engine/backend settings used by ImageBaseDataset.
+    """
+    import pyarrow.parquet as pq
+    table = pq.read_table(data_path)
+    total = len(table)
     chunk = (total + n - 1) // n  # ceiling division
 
     shard_paths = []
     for i in range(n):
-        shard = df.iloc[i * chunk : (i + 1) * chunk]
+        shard = table.slice(i * chunk, min(chunk, total - i * chunk))
         if len(shard) == 0:
             continue
         out = os.path.join(tmpdir, f"shard_{i:03d}.parquet")
-        shard.to_parquet(out, index=False, engine="pyarrow")
+        pq.write_table(shard, out)
         shard_paths.append(out)
         print(f"  Shard {i}: {len(shard):,} rows → {out}")
     return shard_paths
-
-
-def _split_list(data_dirs: list, n: int) -> list[list]:
-    """Distribute a list of parquet paths across N workers (round-robin)."""
-    chunks: list[list] = [[] for _ in range(n)]
-    for i, p in enumerate(data_dirs):
-        chunks[i % n].append(p)
-    return [c for c in chunks if c]
 
 
 # ---------------------------------------------------------------------------
@@ -259,15 +274,34 @@ def main() -> None:
     # ── Split data ───────────────────────────────────────────────────────────
     data_dir = base_cfg["dataset"]["data_dir"]
     tmpdir = tempfile.mkdtemp(prefix="openspatial_shards_")
-    print(f"[run_parallel] Splitting data into {n} shards (tmpdir: {tmpdir}) …")
+    needs_cleanup = False  # only True when we wrote temp parquet shards
 
-    if isinstance(data_dir, list):
-        raw_chunks = _split_list(data_dir, n)
-        # Flatten single-item lists to strings so run.py takes the fast path
+    if os.path.isdir(data_dir):
+        # ── Directory with multiple parquet files: distribute files directly ──
+        all_files = _discover_parquets(data_dir)
+        if not all_files:
+            sys.exit(f"[ERROR] No .parquet files found under {data_dir}")
+        print(f"[run_parallel] Found {len(all_files)} parquet file(s) in {data_dir} "
+              f"→ distributing across {n} workers (no row-splitting)")
+        raw_chunks = _split_list(all_files, n)
         data_shards = [c[0] if len(c) == 1 else c for c in raw_chunks]
+
+    elif isinstance(data_dir, list):
+        # ── Explicit list of parquet files: distribute files directly ─────────
+        print(f"[run_parallel] Distributing {len(data_dir)} listed file(s) across "
+              f"{n} workers (no row-splitting)")
+        raw_chunks = _split_list(data_dir, n)
+        data_shards = [c[0] if len(c) == 1 else c for c in raw_chunks]
+
     else:
+        # ── Single parquet file: must row-split into temp shards ──────────────
+        print(f"[run_parallel] Single parquet file detected — row-splitting into "
+              f"{n} shards (tmpdir: {tmpdir}) …")
+        print("  TIP: place your parquet files in a directory and set "
+              "data_dir to that path to skip this step.")
         shard_paths = _split_single_parquet(data_dir, n, tmpdir)
         data_shards = shard_paths
+        needs_cleanup = True
 
     actual_n = len(data_shards)
     if actual_n < n:
@@ -320,7 +354,7 @@ def main() -> None:
     for fh in log_fhs:
         fh.close()
 
-    # ── Cleanup temp dir ─────────────────────────────────────────────────────
+    # ── Cleanup temp dir (worker configs + optional row-split shards) ────────
     shutil.rmtree(tmpdir, ignore_errors=True)
 
     failures = [i for i, rc in exit_codes.items() if rc != 0]

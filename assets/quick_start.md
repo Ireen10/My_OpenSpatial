@@ -218,6 +218,19 @@ python run_parallel.py \
     --num_pipelines 2
 ```
 
+Set `data_dir` in the YAML to the **folder** containing your parquet shards for
+zero-copy parallelism (files are distributed directly across workers, no
+row-splitting):
+
+```yaml
+dataset:
+  data_dir: /path/to/parquet_folder/   # folder with data-*.parquet files
+```
+
+`run_parallel.py` auto-discovers all `.parquet` files in the folder and
+distributes them round-robin across workers.  Row-splitting only happens
+when `data_dir` points to a single file.
+
 Only `--config`, `--output_dir`, and `--num_pipelines` are required.
 `devices`, `replicas_per_device`, and `cpu_workers` are read directly from the
 YAML (`device`, `replicas_per_device`, and `num_workers` fields respectively).
@@ -235,7 +248,7 @@ python run_parallel.py \
 | Argument | Default | Meaning |
 |---|---|---|
 | `--num_pipelines` | `2` | Number of parallel pipeline subprocesses |
-| `--devices` | YAML `device` field | Space-separated NPU list assigned round-robin to workers |
+| `--devices` | YAML `device` field | Space-separated NPU list assigned round-robin to workers; inferred from YAML when omitted |
 | `--replicas_per_device` | YAML `replicas_per_device` | SAM3 replicas per NPU per worker (tune to fill VRAM) |
 | `--cpu_workers` | YAML `num_workers` of first CPU stage | Per-pipeline workers for filter / scene_fusion; recommended ≈ `vCPUs / num_pipelines` |
 

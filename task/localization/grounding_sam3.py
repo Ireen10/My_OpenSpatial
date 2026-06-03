@@ -5,7 +5,6 @@ import os
 from PIL import Image
 
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-from transformers import Sam3TrackerProcessor, Sam3TrackerModel
 
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
@@ -13,11 +12,72 @@ from utils.data_utils import merge_overlapping_masks, merge_overlapping_boxes
 from task.base_task import BaseTask
 
 
-class Localizer(BaseTask):
-    """Grounding DINO + SAM3 Tracker pipeline: detect objects and generate segmentation masks.
+def _validate_model_path(model_name_or_path: str) -> None:
+    """Raise a clear FileNotFoundError when a local path does not exist."""
+    import os as _os
+    is_local = (
+        _os.path.isabs(model_name_or_path)
+        or model_name_or_path.startswith("./")
+        or model_name_or_path.startswith("../")
+    )
+    if is_local and not _os.path.isdir(model_name_or_path):
+        raise FileNotFoundError(
+            f"SAM3 weights directory not found: {model_name_or_path!r}\n"
+            "Check 'segmenter_model' in your YAML — must be an absolute local path "
+            "or a HuggingFace Hub repo ID (e.g. 'facebook/sam3')."
+        )
 
-    Replaces the SAM2 segmenter with SAM3 Tracker loaded via the transformers library,
-    preserving all detection, merging, and mask-saving logic from the SAM2 version.
+
+def _load_sam3_image_model(segmenter_model, torch_dtype, device):
+    """Load SAM3 in single-image mode.
+
+    Prefers Sam3Processor + Sam3Model (image predictor, no memory module) which
+    produces standard segmentation-quality IoU scores.  Falls back to the Tracker
+    variant if the image-predictor classes are not available in the installed
+    transformers version.
+
+    Using the Tracker variant (Sam3TrackerModel) for single-frame inference causes
+    two problems:
+      1. roi_align (used in the memory encoder) is not supported on Ascend NPU and
+         falls back to CPU, causing dtype-mismatch artefacts that depress IoU scores.
+      2. The tracker's IoU score measures temporal-tracking quality, not segmentation
+         quality, so single-frame scores are systematically ~0.03–0.05 instead of the
+         expected 0.7–0.99 range.
+    """
+    _validate_model_path(segmenter_model)
+    load_kwargs = {"torch_dtype": torch_dtype} if torch_dtype is not None else {}
+    suppress_ctx = warnings.catch_warnings()
+    suppress_ctx.__enter__()
+    warnings.filterwarnings(
+        "ignore",
+        message=r"You are using a model of type sam3_video",
+        category=UserWarning,
+    )
+
+    try:
+        from transformers import Sam3Processor, Sam3Model  # image-predictor variant
+        proc = Sam3Processor.from_pretrained(segmenter_model)
+        model = Sam3Model.from_pretrained(segmenter_model, **load_kwargs).to(device)
+        suppress_ctx.__exit__(None, None, None)
+        return proc, model, "Sam3Model"
+    except (ImportError, AttributeError, OSError, ValueError):
+        # OSError/ValueError: model_type mismatch with Sam3Model (sam3_video config)
+        # — fall back to tracker variant which accepts the shared checkpoint.
+        pass
+
+    # Fallback: tracker variant (acceptable if transformers < version with Sam3Model)
+    from transformers import Sam3TrackerProcessor, Sam3TrackerModel
+    proc = Sam3TrackerProcessor.from_pretrained(segmenter_model)
+    model = Sam3TrackerModel.from_pretrained(segmenter_model, **load_kwargs).to(device)
+    suppress_ctx.__exit__(None, None, None)
+    return proc, model, "Sam3TrackerModel (fallback)"
+
+
+class Localizer(BaseTask):
+    """Grounding DINO + SAM3 pipeline: detect objects and generate segmentation masks.
+
+    Uses Sam3Model (image-predictor variant) for segmentation to avoid the
+    roi_align NPU fallback and tracker-specific IoU score semantics.
     Recommended: transformers >= 5.0.0
     """
 
@@ -28,23 +88,18 @@ class Localizer(BaseTask):
         device = args.get("device") or device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
 
+        torch_dtype_str = args.get("torch_dtype", None)
+        torch_dtype = getattr(torch, torch_dtype_str) if torch_dtype_str else None
+
         # Grounding DINO for open-vocabulary detection (unchanged)
         self.processor = AutoProcessor.from_pretrained(grounding_model)
         self.detector = AutoModelForZeroShotObjectDetection.from_pretrained(grounding_model).to(device)
 
-        # SAM3 Tracker for segmentation via transformers (replaces SAM2ImagePredictor).
-        # Suppress the spurious "model of type sam3_video" warning: the facebook/sam3
-        # checkpoint sets model_type=sam3_video in config.json to serve four architectures
-        # from one file; loading Sam3TrackerModel triggers a cosmetic type-mismatch
-        # warning that does not affect inference.  Tracked upstream: issue #43408.
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r"You are using a model of type sam3_video",
-                category=UserWarning,
-            )
-            self.seg_processor = Sam3TrackerProcessor.from_pretrained(segmenter_model)
-            self.seg_model = Sam3TrackerModel.from_pretrained(segmenter_model).to(device)
+        # SAM3 image predictor — loads Sam3Model if available, else Sam3TrackerModel
+        self.seg_processor, self.seg_model, _variant = _load_sam3_image_model(
+            segmenter_model, torch_dtype, device
+        )
+        print(f"[Localizer] SAM3 loaded as {_variant} on {device}")
         self.seg_model.eval()
 
         self.output_dir = args.get("output_dir")
@@ -110,8 +165,8 @@ class Localizer(BaseTask):
         )[0]  # (N, 1, H, W) tensor
         scores = seg_outputs.iou_scores[0, :, 0].cpu().numpy()  # (N,)
 
-        # Filter by confidence score
-        keep = [i for i, score in enumerate(scores) if score >= 0.7]
+        # Filter by confidence score (same threshold as Sam3Refiner.MIN_SCORE)
+        keep = [i for i, score in enumerate(scores) if score >= 0.6]
         if len(keep) == 0:
             return None
 
