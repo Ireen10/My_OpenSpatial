@@ -37,11 +37,15 @@ pipeline:
         update_keys: ["obj_tags", "bboxes_3d_world_coords"]
         depends_on: filter_stage/3dbox_filter
         output_dir:
-        device: npu:0
         segmenter_model: facebook/sam3
-        # segmenter_checkpoint_path: /path/to/sam3.pt
-        # Optional:
-        # segmenter_bpe_path: /path/to/bpe_simple_vocab_16e6.txt.gz
+        # segmenter_checkpoint_path: /path/to/sam3     # local weights dir (optional)
+
+        # ── Multi-card parallel inference (2× 910B 32G) ──────────────────────
+        device: "npu:0,npu:1"        # comma-separated NPU device list
+        replicas_per_device: 2       # 2 instances/card ≈ 4–6 GB/card (bfloat16)
+        torch_dtype: bfloat16        # native 910B dtype; halves memory, no accuracy loss
+        use_multi_processing: true
+        num_workers: 4               # = devices(2) × replicas_per_device(2)
 
     scene_fusion_stage:
       -
