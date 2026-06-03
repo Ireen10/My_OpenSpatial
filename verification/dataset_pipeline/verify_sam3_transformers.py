@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from PIL import Image, ImageDraw
 from transformers import (
@@ -44,6 +46,76 @@ def load_image(image_path: Path) -> Image.Image:
     if image.mode != "RGB":
         image = image.convert("RGB")
     return image
+
+
+def to_py_list(value):
+    if value is None:
+        return []
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if hasattr(value, "tolist") and not isinstance(value, (list, tuple, dict, str)):
+        return value.tolist()
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def resolve_asset_path(path_value, raw_data_root: str | None) -> str:
+    if not isinstance(path_value, str):
+        raise ValueError(f"Expected a string asset path, got: {type(path_value)}")
+    if os.path.isabs(path_value) or not raw_data_root:
+        return path_value
+    return os.path.normpath(os.path.join(raw_data_root, path_value))
+
+
+def select_view(value, view_idx: int):
+    seq = to_py_list(value)
+    if not seq:
+        return value
+    if isinstance(seq[0], list):
+        if view_idx >= len(seq):
+            raise ValueError(f"view_idx={view_idx} out of range for sequence length {len(seq)}")
+        return seq[view_idx]
+    return value
+
+
+def infer_input_from_parquet(parsed):
+    if parsed.parquet is None:
+        return
+    if not parsed.parquet.is_file():
+        raise ValueError(f"Parquet not found: {parsed.parquet}")
+
+    log("INPUT", f"loading parquet: {parsed.parquet}")
+    df = pd.read_parquet(parsed.parquet)
+    if len(df) == 0:
+        raise ValueError(f"Parquet is empty: {parsed.parquet}")
+    if parsed.row_idx < 0 or parsed.row_idx >= len(df):
+        raise ValueError(f"row_idx out of range: {parsed.row_idx}, len={len(df)}")
+
+    row = df.iloc[parsed.row_idx]
+
+    if parsed.image is None:
+        if "image" not in row.index:
+            raise ValueError("Parquet row does not contain 'image'.")
+        row_image = select_view(row["image"], parsed.view_idx)
+        parsed.image = Path(resolve_asset_path(row_image, parsed.raw_data_root))
+
+    if parsed.tags is None and "obj_tags" in row.index:
+        row_tags = select_view(row["obj_tags"], parsed.view_idx)
+        tags_list = [str(x) for x in to_py_list(row_tags) if str(x).strip()]
+        if tags_list:
+            parsed.tags = ",".join(tags_list)
+
+    if (parsed.mask_paths is None or len(parsed.mask_paths) == 0) and "masks" in row.index:
+        row_masks = select_view(row["masks"], parsed.view_idx)
+        masks = to_py_list(row_masks)
+        if masks:
+            parsed.mask_paths = [
+                Path(resolve_asset_path(str(mask_path), parsed.raw_data_root))
+                for mask_path in masks
+            ]
 
 
 def load_binary_masks(mask_paths: list[Path]) -> list[np.ndarray]:
@@ -162,8 +234,12 @@ def save_boxes_visualization(
 def main() -> int:
     parser = argparse.ArgumentParser("Transformers-based SAM3 verifier")
     parser.add_argument("--mode", choices=["localizer", "refiner", "both"], default="both")
-    parser.add_argument("--image", type=Path, required=True)
-    parser.add_argument("--tags", type=str, default="chair,table")
+    parser.add_argument("--image", type=Path, required=False)
+    parser.add_argument("--parquet", type=Path, default=None)
+    parser.add_argument("--row_idx", type=int, default=0)
+    parser.add_argument("--view_idx", type=int, default=0)
+    parser.add_argument("--raw_data_root", type=str, default=None)
+    parser.add_argument("--tags", type=str, default=None)
     parser.add_argument("--mask_paths", type=Path, nargs="*", default=None)
 
     parser.add_argument("--device", type=str, default=None, help="sam3 device (e.g. npu:0/cuda:0/cpu)")
@@ -175,6 +251,7 @@ def main() -> int:
     )
     parser.add_argument("--grounding_model", type=str, default="IDEA-Research/grounding-dino-base")
     parser.add_argument("--sam3_model", type=str, default="facebook/sam3")
+    parser.add_argument("--segmenter_model", type=str, default=None, help="Alias for --sam3_model")
 
     parser.add_argument("--det_threshold", type=float, default=0.3)
     parser.add_argument("--text_threshold", type=float, default=0.3)
@@ -183,6 +260,12 @@ def main() -> int:
     parser.add_argument("--save_dir", type=Path, default=Path("output/verify_sam3_transformers"))
     args = parser.parse_args()
 
+    if args.segmenter_model:
+        args.sam3_model = args.segmenter_model
+
+    infer_input_from_parquet(args)
+    if args.image is None:
+        raise ValueError("must provide --image or --parquet")
     if not args.image.is_file():
         raise FileNotFoundError(f"Image not found: {args.image}")
     if args.mode == "refiner" and not args.mask_paths:
@@ -213,7 +296,8 @@ def main() -> int:
     det_tags: list[str] = []
 
     if args.mode in ("localizer", "both"):
-        tags = [t.strip() for t in args.tags.split(",") if t.strip()]
+        tags_text = args.tags or "chair,table"
+        tags = [t.strip() for t in tags_text.split(",") if t.strip()]
         if not tags:
             raise ValueError("--tags is empty in localizer/both mode")
 
