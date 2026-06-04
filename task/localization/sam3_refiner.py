@@ -166,32 +166,40 @@ def _post_process(processor, outputs, min_score: float, target_sizes: list):
     )
 
 
-# Running stats for score diagnostics (logged every SCORE_LOG_INTERVAL images).
-_score_log_state: dict = {"count": 0, "total": 0, "below_06": 0, "below_03": 0}
+# Running keep/drop statistics (logged every SCORE_LOG_INTERVAL images).
+_score_log_state: dict = {
+    "images": 0, "boxes_in": 0, "boxes_kept": 0,
+}
 SCORE_LOG_INTERVAL = 500
 
 
-def _log_score_stats(scores_np: np.ndarray, n_boxes: int) -> None:
-    """Accumulate and periodically print ROI-coverage statistics.
+def _log_score_stats(
+    coverages_np: np.ndarray,
+    precisions_np: np.ndarray,
+    min_coverage: float,
+    min_precision: float,
+) -> None:
+    """Accumulate and periodically print keep/drop statistics.
 
-    After the switch to proposal-matching, scores_np holds coverage ratios
-    (fraction of box area covered by the best SAM3 proposal), not IoU scores.
-    Thresholds are re-interpreted accordingly: <0.3 means <30% box coverage,
-    <0.1 means <10% coverage (effectively unmatched).
+    Reports how many boxes pass both the coverage and precision gates,
+    giving a running picture of how much data the refiner is retaining.
     """
     s = _score_log_state
-    s["count"] += 1
-    s["total"] += len(scores_np)
-    s["below_06"] += int((scores_np < 0.3).sum())   # "poor coverage"
-    s["below_03"] += int((scores_np < 0.1).sum())   # "unmatched"
-    if s["count"] % SCORE_LOG_INTERVAL == 0:
-        t = s["total"]
-        pct_poor = 100.0 * s["below_06"] / t if t else 0.0
-        pct_unmatched = 100.0 * s["below_03"] / t if t else 0.0
+    s["images"] += 1
+    s["boxes_in"] += len(coverages_np)
+    s["boxes_kept"] += int(
+        ((coverages_np >= min_coverage) & (precisions_np >= min_precision)).sum()
+    )
+
+    if s["images"] % SCORE_LOG_INTERVAL == 0:
+        total_in   = s["boxes_in"]
+        total_kept = s["boxes_kept"]
+        pct = 100.0 * total_kept / total_in if total_in else 0.0
         print(
-            f"[Sam3Refiner] coverage-diag after {s['count']} images | "
-            f"boxes={t} coverage<30%={s['below_06']}({pct_poor:.1f}%) "
-            f"coverage<10%={s['below_03']}({pct_unmatched:.1f}%)",
+            f"[Sam3Refiner] after {s['images']} images | "
+            f"boxes_in={total_in}  "
+            f"kept={total_kept} ({pct:.1f}%)  "
+            f"dropped={total_in - total_kept} ({100.0 - pct:.1f}%)",
             flush=True,
         )
 
@@ -363,7 +371,6 @@ def _infer_refiner(processor, model, device, images, boxes_per_image, texts_per_
 
         cov_np  = np.array(coverages_out,  dtype=np.float32)
         prec_np = np.array(precisions_out, dtype=np.float32)
-        _log_score_stats(cov_np, n_boxes=len(boxes))
 
         per_image[orig_idx] = (masks_out, cov_np, prec_np)
 
@@ -537,6 +544,11 @@ class Sam3Refiner(BaseTask):
     def _results_from_infer(self, per_image):
         out = []
         for pred_masks, coverages, precisions in per_image:
+            _log_score_stats(
+                np.asarray(coverages,  dtype=np.float32),
+                np.asarray(precisions, dtype=np.float32),
+                self.min_coverage, self.min_precision,
+            )
             refined, keep_indices = _filter_by_pixels_and_coverage(
                 pred_masks, coverages, precisions,
                 self.min_mask_pixels, self.min_coverage, self.min_precision,
