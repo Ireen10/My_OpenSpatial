@@ -123,6 +123,13 @@ class BasePipeline:
         # Build dataset
         self.dataset = build_dataset(self.data_cfg)
 
+        # Debug: honour --max_samples if set
+        max_samples = getattr(cfg, "max_samples", None)
+        if max_samples is not None:
+            full_len = len(self.dataset.data)
+            self.dataset.data = self.dataset.data.iloc[:max_samples].reset_index(drop=True)
+            print(f">>> [debug] max_samples={max_samples}: using {len(self.dataset.data)}/{full_len} rows.")
+
         # Initialize dataset from first task's depends_on if present
         if not self.task_queue:
             raise ValueError("No tasks found in pipeline stages")

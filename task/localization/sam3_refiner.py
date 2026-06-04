@@ -72,6 +72,30 @@ def _post_process(processor, outputs, min_score: float, target_sizes: list):
     )
 
 
+# Running stats for score diagnostics (logged every SCORE_LOG_INTERVAL images).
+_score_log_state: dict = {"count": 0, "total": 0, "below_06": 0, "below_03": 0}
+SCORE_LOG_INTERVAL = 500
+
+
+def _log_score_stats(scores_np: np.ndarray, n_boxes: int) -> None:
+    """Accumulate and periodically print SAM3 IoU score statistics."""
+    s = _score_log_state
+    s["count"] += 1
+    s["total"] += len(scores_np)
+    s["below_06"] += int((scores_np < 0.6).sum())
+    s["below_03"] += int((scores_np < 0.3).sum())
+    if s["count"] % SCORE_LOG_INTERVAL == 0:
+        t = s["total"]
+        pct_06 = 100.0 * s["below_06"] / t if t else 0.0
+        pct_03 = 100.0 * s["below_03"] / t if t else 0.0
+        print(
+            f"[Sam3Refiner] score-diag after {s['count']} images | "
+            f"masks={t} below_0.6={s['below_06']}({pct_06:.1f}%) "
+            f"below_0.3={s['below_03']}({pct_03:.1f}%)",
+            flush=True,
+        )
+
+
 def _best_mask_from_seg(seg_item):
     scores = seg_item["scores"]
     if scores is None or len(scores) == 0:
@@ -87,54 +111,91 @@ def _best_mask_from_seg(seg_item):
     return m, float(scores[best])
 
 
-def _infer_refiner(processor, model, device, min_score, images, boxes_per_image, texts_per_image):
-    """One Sam3 forward per input box; results align with coarse-mask indices."""
-    flat_images, flat_boxes, flat_texts = [], [], []
-    spans = []
-    offset = 0
+def _infer_refiner(processor, model, device, images, boxes_per_image, texts_per_image):
+    """One SAM3 forward per image, passing ALL boxes for that image together.
+
+    This mirrors the calling convention of _segment_boxes (grounding_sam3.py):
+      input_boxes=[all_boxes_for_image]  →  one result with N masks
+
+    The original "one box per batch slot" design caused SAM3 (a video model) to
+    treat repeated copies of the same image as video frames, corrupting temporal
+    attention and producing near-zero IoU scores for every prompt.
+
+    Scoring note: depth-projected bounding boxes (from ThreeDBoxFilter) are
+    inherently coarser than GroundingDINO boxes, so SAM3's IoU self-estimates are
+    lower. We therefore pass threshold=0.0 to post_process and rely exclusively on
+    MIN_MASK_PIXELS as the quality gate.
+    """
+    per_image = []
+
     for i, (image, boxes) in enumerate(zip(images, boxes_per_image)):
         boxes = np.asarray(boxes, dtype=np.float32)
         if boxes.ndim == 1:
             boxes = boxes.reshape(1, 4)
+
+        if boxes.shape[0] == 0:
+            per_image.append(([], np.array([])))
+            continue
+
         text = texts_per_image[i] if texts_per_image else None
-        for box in boxes:
-            flat_images.append(image)
-            flat_boxes.append([box.tolist()])
-            flat_texts.append(text)
-        spans.append((offset, offset + len(boxes)))
-        offset += len(boxes)
+        proc_kwargs = dict(
+            images=image,
+            input_boxes=[boxes.tolist()],
+            input_boxes_labels=[[1] * len(boxes)],
+            return_tensors="pt",
+        )
+        if text is not None:
+            proc_kwargs["text"] = text
 
-    if offset == 0:
-        return [([], np.array([])) for _ in images]
+        inputs = processor(**proc_kwargs).to(device)
+        target_sizes = _target_sizes(inputs)
+        h_px, w_px = int(target_sizes[0][0]), int(target_sizes[0][1])
 
-    proc_kwargs = dict(
-        images=flat_images,
-        input_boxes=flat_boxes,
-        input_boxes_labels=[[1] for _ in flat_boxes],
-        return_tensors="pt",
-    )
-    if texts_per_image and any(flat_texts):
-        proc_kwargs["text"] = flat_texts
+        with torch.no_grad():
+            outputs = model(**inputs)
 
-    inputs = processor(**proc_kwargs).to(device)
-    target_sizes = _target_sizes(inputs)
-    with torch.no_grad():
-        outputs = model(**inputs)
-    seg_list = _post_process(processor, outputs, min_score, target_sizes)
+        # threshold=0.0 keeps all N mask predictions regardless of IoU score;
+        # coarse depth-projected prompts systematically score below 0.6 and
+        # would be silently dropped by a strict threshold.
+        seg_list = _post_process(processor, outputs, 0.0, target_sizes)
+        seg = seg_list[0]
 
-    per_image = []
-    for start, end in spans:
+        seg_masks = seg.get("masks")
+        seg_scores = seg.get("scores")
+        n_got = len(seg_masks) if seg_masks is not None else 0
+
+        # Diagnostic: log score distribution once per image (debug-level only)
+        if seg_scores is not None and len(seg_scores) > 0:
+            scores_np = (
+                seg_scores.float().cpu().numpy()
+                if hasattr(seg_scores, "cpu")
+                else np.asarray(seg_scores, dtype=np.float32)
+            )
+            _log_score_stats(scores_np, n_boxes=len(boxes))
+
         masks_out, scores_out = [], []
-        for k in range(start, end):
-            m, score = _best_mask_from_seg(seg_list[k])
-            if m is None:
-                h, w = int(target_sizes[k][0]), int(target_sizes[k][1])
-                masks_out.append(np.zeros((h, w), dtype=np.float32))
-                scores_out.append(0.0)
-            else:
+        for k in range(len(boxes)):
+            if k < n_got:
+                m = seg_masks[k]
+                if hasattr(m, "float"):
+                    m = m.float()
+                if hasattr(m, "cpu"):
+                    m = m.cpu().numpy()
+                if m.ndim == 3:
+                    m = m[0]
+                sc = (
+                    float(seg_scores[k])
+                    if seg_scores is not None and k < len(seg_scores)
+                    else 0.0
+                )
                 masks_out.append(m)
-                scores_out.append(score)
+                scores_out.append(sc)
+            else:
+                masks_out.append(np.zeros((h_px, w_px), dtype=np.float32))
+                scores_out.append(0.0)
+
         per_image.append((masks_out, np.array(scores_out, dtype=np.float32)))
+
     return per_image
 
 
@@ -211,7 +272,7 @@ class Sam3Refiner(BaseTask):
         processor, model, dev = self._replica_pool.get()
         try:
             return _infer_refiner(
-                processor, model, dev, self.MIN_SCORE,
+                processor, model, dev,
                 images, boxes_per_image,
                 texts if any(texts) else None,
             )

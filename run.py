@@ -112,6 +112,10 @@ def get_config():
     parser = argparse.ArgumentParser(description="Pipeline runner")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory for results")
+    parser.add_argument(
+        "--max_samples", type=int, default=None,
+        help="Debug: truncate input dataset to at most N rows before running the pipeline.",
+    )
     args = parser.parse_args()
 
     config_dict = _load_yaml_config(args.config)
@@ -120,6 +124,7 @@ def get_config():
 
     args.output_dir = _normalize_output_dir(args.output_dir)
     config.output_dir = _build_run_output_dir(args.output_dir, config.pipeline.file_name, args.config)
+    config.max_samples = args.max_samples
     return args, config
 
 
