@@ -148,7 +148,8 @@ def _side_by_side(*panels: Image.Image, gap: int = 6) -> Image.Image:
 
 def diagnose_sample(row: dict, data_root: Path | None,
                     processor, model, device: str,
-                    output_dir: Path, rank: int) -> dict:
+                    output_dir: Path, rank: int,
+                    min_coverage: float = 0.10) -> dict:
     """
     Run one sample through the full refiner chain and save a 3-panel image:
       [original + coarse masks + bboxes] | [SAM3 output masks] | [score table]
@@ -255,10 +256,12 @@ def diagnose_sample(row: dict, data_root: Path | None,
     print(f"  SAM3 returned {n_proposals} proposals for {len(boxes)} boxes")
     print(f"  (SAM3 is DETR-style: always ~200 proposals; matching by ROI coverage)")
 
-    # Convert all proposals to numpy, then match to boxes by coverage
+    # Convert all proposals to numpy, then match to boxes by coverage.
+    # min_coverage=0.0 here so we always display the best match regardless of
+    # threshold — the summary table shows how many would survive the real gate.
     proposals = [_extract_mask(seg_masks_raw[k]) for k in range(n_proposals)]
     sam3_masks_np, sam3_scores = _match_proposals_to_boxes(
-        proposals, boxes, h_px, w_px, min_coverage=0.0  # show all in verify
+        proposals, boxes, h_px, w_px, min_coverage=0.0
     )
 
     for k, (m, cov) in enumerate(zip(sam3_masks_np, sam3_scores)):
@@ -266,8 +269,10 @@ def diagnose_sample(row: dict, data_root: Path | None,
         tag = tags[k] if k < len(tags) else "?"
         box = boxes[k]
         box_area = max(int((box[2] - box[0]) * (box[3] - box[1])), 1)
+        verdict = "KEEP" if (cov >= min_coverage and px > 20) else "DROP"
         print(f"    [{k}] {tag:20s}  coverage={cov:.3f} "
-              f"({int(cov*box_area)}/{box_area}px covered)  mask_pixels={px}")
+              f"({int(cov*box_area)}/{box_area}px covered)  "
+              f"mask_pixels={px}  [{verdict}]")
 
     # ── Panel 2: SAM3 output (coverage-matched) ──────────────────────────────
     panel_sam3 = _draw_sam3_masks(
@@ -287,8 +292,7 @@ def diagnose_sample(row: dict, data_root: Path | None,
         "n_boxes": len(boxes),
         "n_proposals": n_proposals,
         "coverages": sam3_scores,
-        "min_coverage": min(sam3_scores) if sam3_scores else None,
-        "max_coverage": max(sam3_scores) if sam3_scores else None,
+        "min_coverage_used": min_coverage,
     }
 
 
@@ -314,6 +318,13 @@ def parse_args():
     p.add_argument("--device", default=None)
     p.add_argument("--seed", type=int, default=None,
                    help="if set, sample randomly instead of sequentially")
+    p.add_argument(
+        "--min_coverage", type=float, default=0.10,
+        help="ROI-coverage threshold: matched mask must cover at least this "
+             "fraction of the input box area to be kept (mirrors "
+             "Sam3Refiner.MIN_COVERAGE / YAML min_coverage). "
+             "E.g. 0.10 = 10%%. Set to 0.0 to show all matches in diagnostics.",
+    )
     return p.parse_args()
 
 
@@ -349,7 +360,8 @@ def main():
         row = df.iloc[row_idx].to_dict()
         print(f"\n[{rank+1}/{len(indices)}] row={row_idx}")
         r = diagnose_sample(row, args.data_root, processor, model, device,
-                            args.output_dir, rank)
+                            args.output_dir, rank,
+                            min_coverage=args.min_coverage)
         results.append(r)
 
     # ── Summary ───────────────────────────────────────────────────────────────
@@ -364,12 +376,14 @@ def main():
         print(f"  Total boxes         : {sum(r['n_boxes'] for r in ok)}")
         print(f"  Total SAM3 proposals: {total_proposals}")
         if all_cov:
-            matched = sum(1 for c in all_cov if c >= 0.05)
+            thr = args.min_coverage
+            kept = sum(1 for c in all_cov if c >= thr)
+            print(f"  min_coverage used   : {thr:.2f}")
             print(f"  Coverage range      : {min(all_cov):.3f} – {max(all_cov):.3f}")
             print(f"  Coverage mean       : {sum(all_cov)/len(all_cov):.3f}")
-            print(f"  Matched (cov≥5%)    : {matched}/{len(all_cov)}")
-            print(f"  Poor    (cov<30%)   : {sum(1 for c in all_cov if c < 0.3)}/{len(all_cov)}")
-            print(f"  Unmatched (cov<5%)  : {len(all_cov)-matched}/{len(all_cov)}")
+            print(f"  Would keep (≥{thr:.0%}) : {kept}/{len(all_cov)}")
+            print(f"  Partial  (5%–{thr:.0%}) : {sum(1 for c in all_cov if 0.05<=c<thr)}/{len(all_cov)}")
+            print(f"  Unmatched (<5%)     : {sum(1 for c in all_cov if c < 0.05)}/{len(all_cov)}")
     print(f"  Outputs saved to    : {args.output_dir.resolve()}")
     print("=" * 60)
     return 0

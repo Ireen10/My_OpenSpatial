@@ -282,13 +282,63 @@ def _filter_by_pixels(pred_masks, min_pixels: int):
     return refined, keep_indices
 
 
+def _filter_by_pixels_and_coverage(
+    pred_masks, coverages, min_pixels: int, min_coverage: float
+):
+    """Combined quality gate: mask must pass both pixel-count AND coverage thresholds.
+
+    Why two gates are necessary:
+    - min_pixels alone accepts any large mask regardless of whether it lands on
+      the right object (a 30 000-px wall segment could pass).
+    - min_coverage alone accepts any mask that overlaps the box, even if the
+      mask itself has only a handful of pixels.
+    Together they require: the mask is non-trivially large AND it genuinely
+    overlaps the input box by at least min_coverage of the box's area.
+    """
+    refined, keep_indices = [], []
+    cov_arr = np.asarray(coverages, dtype=np.float32) if len(coverages) else np.array([])
+    for i, arr in enumerate(pred_masks):
+        if hasattr(arr, "float"):
+            arr = arr.float()
+        if hasattr(arr, "cpu"):
+            arr = arr.cpu().numpy()
+        elif hasattr(arr, "numpy"):
+            arr = arr.numpy()
+        if arr.ndim == 3:
+            arr = arr[0]
+        cov = float(cov_arr[i]) if i < len(cov_arr) else 0.0
+        if np.sum(arr) > min_pixels and cov >= min_coverage:
+            refined.append(arr)
+            keep_indices.append(i)
+    return refined, keep_indices
+
+
 class Sam3Refiner(BaseTask):
     """Refine filter-stage masks with Sam3Model box prompts (Sam2Refiner replacement)."""
 
-    # MIN_SCORE removed: SAM3 is a DETR-style model whose IoU self-estimates for
-    # coarse depth-projected box prompts are always < 0.15.  Quality filtering is
-    # done solely by MIN_MASK_PIXELS and the ROI-coverage gate in
-    # _match_proposals_to_boxes (min_coverage=0.05).
+    # SAM3 quality gates
+    # ─────────────────────────────────────────────────────────────────────────
+    # SAM3 is a DETR-style model.  Its per-proposal classification score is
+    # systematically low (~0.04–0.11) for coarse depth-projected prompts and
+    # is NOT comparable to SAM2's IoU self-estimate.  We therefore use two
+    # geometry-derived thresholds instead of a score threshold:
+    #
+    #   MIN_COVERAGE  – the best-matched proposal must cover at least this
+    #                   fraction of the input box area.  Coarse depth-projected
+    #                   boxes tend to be tight-to-loose depending on depth
+    #                   accuracy; 0.10 (10 %) accepts partial but real matches
+    #                   while rejecting accidental overlaps.  Tune upward if
+    #                   downstream tasks complain about noisy masks.
+    #
+    #   MIN_MATCH_COVERAGE (in _match_proposals_to_boxes) – 0.05 (5 %) is the
+    #                   floor used during MATCHING to avoid returning an empty
+    #                   mask.  It is intentionally looser than MIN_COVERAGE so
+    #                   that the diagnostic coverage number is always visible
+    #                   even when the box ultimately fails MIN_COVERAGE.
+    #
+    #   MIN_MASK_PIXELS – sanity check: a mask with < 20 px is effectively
+    #                   empty regardless of coverage.
+    MIN_COVERAGE = 0.10
     MIN_MASK_PIXELS = 20
 
     def __init__(self, args, device=None):
@@ -303,6 +353,11 @@ class Sam3Refiner(BaseTask):
             devices = [d.strip() for d in str(device_raw).split(",")]
         self.device = devices[0]
 
+        # Allow YAML to override the class-level default for min_coverage.
+        # Example YAML entry:
+        #   min_coverage: 0.15   # stricter: mask must cover ≥15% of box area
+        self.min_coverage = float(args.get("min_coverage", self.MIN_COVERAGE))
+
         replicas_per_device = int(args.get("replicas_per_device", 1))
         self._replica_pool: queue.Queue = queue.Queue()
         logged = False
@@ -310,7 +365,10 @@ class Sam3Refiner(BaseTask):
             for _ in range(replicas_per_device):
                 proc, model = _load_sam3_replica(segmenter_model, {}, dev)
                 if not logged:
-                    print(f"[Sam3Refiner] Sam3Model on {dev}")
+                    print(
+                        f"[Sam3Refiner] Sam3Model on {dev} | "
+                        f"min_coverage={self.min_coverage:.2f}"
+                    )
                     logged = True
                 model.eval()
                 self._replica_pool.put((proc, model, dev))
@@ -350,8 +408,10 @@ class Sam3Refiner(BaseTask):
 
     def _results_from_infer(self, per_image):
         out = []
-        for pred_masks, scores in per_image:
-            refined, keep_indices = _filter_by_pixels(pred_masks, self.MIN_MASK_PIXELS)
+        for pred_masks, coverages in per_image:
+            refined, keep_indices = _filter_by_pixels_and_coverage(
+                pred_masks, coverages, self.MIN_MASK_PIXELS, self.min_coverage
+            )
             if keep_indices:
                 bboxes = self._masks_to_bboxes([m.astype(bool) for m in refined]).tolist()
                 out.append((refined, bboxes, keep_indices))
