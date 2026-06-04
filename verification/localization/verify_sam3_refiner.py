@@ -172,23 +172,34 @@ def diagnose_sample(row: dict, data_root: Path | None,
     print(f"  image  : {img_path}  ({W}×{H})")
 
     # ── Load coarse masks ────────────────────────────────────────────────────
-    mask_paths = row.get("masks", [])
-    if not mask_paths:
+    # Parquet columns are often numpy arrays; avoid `if not array` ambiguity.
+    mask_paths_raw = row.get("masks")
+    mask_paths = (
+        list(mask_paths_raw)
+        if mask_paths_raw is not None and hasattr(mask_paths_raw, "__len__")
+        else (mask_paths_raw if mask_paths_raw is not None else [])
+    )
+    if len(mask_paths) == 0:
         print("  SKIP: no masks in row")
         return {"sample_id": sample_id, "status": "skip_no_masks"}
 
     coarse_masks = []
     for p in mask_paths:
         try:
-            m = _load_coarse_mask(p)
+            m = _load_coarse_mask(str(p))
             coarse_masks.append(m)
         except Exception as e:
             print(f"  WARN: cannot load mask {p}: {e}")
-    if not coarse_masks:
+    if len(coarse_masks) == 0:
         print("  SKIP: all masks failed to load")
         return {"sample_id": sample_id, "status": "skip_mask_load_error"}
 
-    tags = row.get("obj_tags") or ["?"] * len(coarse_masks)
+    tags_raw = row.get("obj_tags")
+    tags = (
+        list(tags_raw)
+        if tags_raw is not None and hasattr(tags_raw, "__len__") and len(tags_raw) > 0
+        else ["?"] * len(coarse_masks)
+    )
 
     # ── Derive bboxes from coarse masks ──────────────────────────────────────
     boxes = Sam3Refiner._masks_to_bboxes(coarse_masks)
@@ -210,7 +221,7 @@ def diagnose_sample(row: dict, data_root: Path | None,
     )
 
     # ── Run SAM3 ─────────────────────────────────────────────────────────────
-    text = ". ".join(tags) if tags else None
+    text = ". ".join(str(t) for t in tags) if tags else None
     proc_kwargs = dict(
         images=image,
         input_boxes=[boxes.tolist()],
@@ -220,16 +231,25 @@ def diagnose_sample(row: dict, data_root: Path | None,
     if text:
         proc_kwargs["text"] = text
 
-    inputs = processor(**proc_kwargs).to(device)
-    target_sizes = _target_sizes(inputs)
-    with torch.no_grad():
-        outputs = model(**inputs)
-
-    seg_list = _post_process(processor, outputs, 0.0, target_sizes)
-    seg = seg_list[0]
-    seg_masks = seg.get("masks")
-    seg_scores = seg.get("scores")
-    n_got = len(seg_masks) if seg_masks is not None else 0
+    try:
+        inputs = processor(**proc_kwargs).to(device)
+        target_sizes = _target_sizes(inputs)
+        h_px, w_px = int(target_sizes[0][0]), int(target_sizes[0][1])
+        with torch.no_grad():
+            outputs = model(**inputs)
+        seg_list = _post_process(processor, outputs, 0.0, target_sizes)
+        seg = seg_list[0]
+        seg_masks = seg.get("masks")
+        seg_scores = seg.get("scores")
+        n_got = len(seg_masks) if seg_masks is not None else 0
+    except Exception as exc:
+        print(f"  ERROR: SAM3 inference failed — {type(exc).__name__}: {exc}")
+        return {
+            "sample_id": sample_id,
+            "status": "error_sam3",
+            "n_boxes": len(boxes),
+            "error": str(exc),
+        }
 
     print(f"  SAM3 returned {n_got} masks for {len(boxes)} boxes")
 
@@ -249,7 +269,6 @@ def diagnose_sample(row: dict, data_root: Path | None,
             sam3_masks_np.append(m)
             sam3_scores.append(sc)
         else:
-            h_px, w_px = int(target_sizes[0][0]), int(target_sizes[0][1])
             sam3_masks_np.append(np.zeros((h_px, w_px), dtype=np.float32))
             sam3_scores.append(0.0)
             print(f"    [{k}] NO MASK RETURNED")
