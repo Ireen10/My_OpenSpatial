@@ -21,7 +21,7 @@ Notes:
     skipped automatically (they require masks from a prior stage).
   - The script calls detect_and_segment() directly, bypassing apply_transform(),
     so no pipeline state (output_dir, masks, etc.) is needed.
-  - Requires transformers >= 5.0.0 for Sam3TrackerModel/Sam3TrackerProcessor.
+  - Requires transformers >= 5.0.0 for Sam3Model/Sam3Processor.
 """
 
 from __future__ import annotations

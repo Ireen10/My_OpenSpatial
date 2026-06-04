@@ -1,4 +1,3 @@
-import warnings
 import numpy as np
 import torch
 import os
@@ -12,76 +11,11 @@ from utils.data_utils import merge_overlapping_masks, merge_overlapping_boxes
 from task.base_task import BaseTask
 
 
-def _validate_model_path(model_name_or_path: str) -> None:
-    """Raise a clear FileNotFoundError when a local path does not exist."""
-    import os as _os
-    is_local = (
-        _os.path.isabs(model_name_or_path)
-        or model_name_or_path.startswith("./")
-        or model_name_or_path.startswith("../")
-    )
-    if is_local and not _os.path.isdir(model_name_or_path):
-        raise FileNotFoundError(
-            f"SAM3 weights directory not found: {model_name_or_path!r}\n"
-            "Check 'segmenter_model' in your YAML — must be an absolute local path "
-            "or a HuggingFace Hub repo ID (e.g. 'facebook/sam3')."
-        )
-
-
-def _load_sam3_image_model(segmenter_model, device):
-    """Load SAM3 in single-image mode.
-
-    Prefers Sam3Processor + Sam3Model (image predictor, no memory module) which
-    produces standard segmentation-quality IoU scores.  Falls back to the Tracker
-    variant if the image-predictor classes are not available in the installed
-    transformers version.
-
-    Using the Tracker variant (Sam3TrackerModel) for single-frame inference causes
-    two problems:
-      1. roi_align (used in the memory encoder) is not supported on Ascend NPU and
-         falls back to CPU, causing dtype-mismatch artefacts that depress IoU scores.
-      2. The tracker's IoU score measures temporal-tracking quality, not segmentation
-         quality, so single-frame scores are systematically ~0.03–0.05 instead of the
-         expected 0.7–0.99 range.
-    """
-    _validate_model_path(segmenter_model)
-    load_kwargs = {}
-    suppress_ctx = warnings.catch_warnings()
-    suppress_ctx.__enter__()
-    warnings.filterwarnings(
-        "ignore",
-        message=r"You are using a model of type sam3_video",
-        category=UserWarning,
-    )
-
-    try:
-        from transformers import Sam3Processor, Sam3Model  # image-predictor variant
-        proc = Sam3Processor.from_pretrained(segmenter_model)
-        model = Sam3Model.from_pretrained(segmenter_model, **load_kwargs).to(device)
-        suppress_ctx.__exit__(None, None, None)
-        return proc, model, "image"
-    except (ImportError, AttributeError, OSError, ValueError):
-        # OSError/ValueError: model_type mismatch with Sam3Model (sam3_video config)
-        # — fall back to tracker variant which accepts the shared checkpoint.
-        pass
-
-    # Fallback: tracker variant (acceptable if transformers < version with Sam3Model)
-    from transformers import Sam3TrackerProcessor, Sam3TrackerModel
-    proc = Sam3TrackerProcessor.from_pretrained(segmenter_model)
-    model = Sam3TrackerModel.from_pretrained(segmenter_model, **load_kwargs).to(device)
-    suppress_ctx.__exit__(None, None, None)
-    return proc, model, "tracker"
-
-
+from task.localization.sam3_refiner import _load_sam3_replica, _forward_box_prompts
 
 
 class Localizer(BaseTask):
-    """Grounding DINO + SAM3 pipeline: detect objects and generate segmentation masks.
-
-    Uses Sam3Model (image-predictor variant) for segmentation to avoid the
-    roi_align NPU fallback and tracker-specific IoU score semantics.
-    Recommended: transformers >= 5.0.0
-    """
+    """Grounding DINO + Sam3Model segmentation. Requires transformers >= 5.0.0."""
 
     def __init__(self, args, device=None):
         super().__init__(args)
@@ -94,12 +28,8 @@ class Localizer(BaseTask):
         self.processor = AutoProcessor.from_pretrained(grounding_model)
         self.detector = AutoModelForZeroShotObjectDetection.from_pretrained(grounding_model).to(device)
 
-        # SAM3 image predictor — loads Sam3Model if available, else Sam3TrackerModel
-        self.seg_processor, self.seg_model, self._sam3_variant = _load_sam3_image_model(
-            segmenter_model, device
-        )
-        print(f"[Localizer] SAM3 loaded as {type(self.seg_model).__name__} "
-              f"({self._sam3_variant}) on {device}")
+        self.seg_processor, self.seg_model = _load_sam3_replica(segmenter_model, {}, device)
+        print(f"[Localizer] Sam3Model on {device}")
         self.seg_model.eval()
 
         self.output_dir = args.get("output_dir")
@@ -115,7 +45,7 @@ class Localizer(BaseTask):
         return img
 
     def detect_and_segment(self, image, obj_tags):
-        """Run grounding detection + SAM3 Tracker segmentation, filter and merge results.
+        """Run grounding detection + Sam3Model segmentation, filter and merge results.
 
         Args:
             image: RGB PIL Image.
@@ -147,20 +77,16 @@ class Localizer(BaseTask):
         # Merge overlapping boxes with same tag
         det_boxes, det_tags = merge_overlapping_boxes(det_tags, det_boxes, overlap_threshold=0.8)
 
-        from task.localization.sam3_refiner import _forward_box_prompts
-
         pred_masks, scores = _forward_box_prompts(
             self.seg_processor,
             self.seg_model,
-            self._sam3_variant,
             image,
             [det_boxes],
             self.device,
             min_score=0.6,
         )[0]
 
-        min_score = 0.0 if self._sam3_variant == "image" else 0.6
-        keep = [i for i, score in enumerate(scores) if float(score) >= min_score]
+        keep = [i for i, score in enumerate(scores) if float(score) >= 0.0]
         if len(keep) == 0:
             return None
 
@@ -186,7 +112,7 @@ class Localizer(BaseTask):
         """Save binary masks as PNG files.
 
         Args:
-            masks: array of shape (N, 1, H, W) — raw SAM3 Tracker output masks.
+            masks: array of shape (N, 1, H, W) — Sam3Model output masks.
             mask_dir: directory to save mask images.
             prefix: filename prefix (e.g. "mask_3" or "mask_3_0").
 
