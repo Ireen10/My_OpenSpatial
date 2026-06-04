@@ -203,91 +203,18 @@ Coming soon (expected May 2025).
 python run.py --config <config.yaml> --output_dir <output_directory>
 ```
 
-### 3.2 High-Throughput Parallel Execution (Large-Scale Datasets)
+### 3.2 Large-Scale Runs (`run.py`)
 
-For large datasets (e.g. 800 K+ ARKitScenes frames), use `run_parallel.py` to split the
-data into N independent shards and run one pipeline subprocess per NPU device.
-Every stage — both CPU-bound and NPU-bound — achieves roughly N× throughput.
+Use a single `run.py` process. Tune CPU stages with `num_workers` (e.g. 40 on 48 vCPU).
+For SAM3, set `device: "npu:0,npu:1"`, `replicas_per_device`, and `num_workers` to
+`devices × replicas_per_device` in the localization stage YAML.
 
-**Minimal invocation — all hardware params read from the YAML automatically:**
+**SAM3 VRAM guide (float32, per 32 GB card):**
 
-```bash
-python run_parallel.py \
-    --config config/preprocessing/demo_preprocessing_embodiedscan_sam3.yaml \
-    --output_dir /path/to/output \
-    --num_pipelines 2
-```
-
-Set `data_dir` in the YAML to the **folder** containing your parquet shards for
-zero-copy parallelism (files are distributed directly across workers, no
-row-splitting):
-
-```yaml
-dataset:
-  data_dir: /path/to/parquet_folder/   # folder with data-*.parquet files
-```
-
-`run_parallel.py` auto-discovers all `.parquet` files in the folder and
-distributes them round-robin across workers.  Row-splitting only happens
-when `data_dir` points to a single file.
-
-Only `--config`, `--output_dir`, and `--num_pipelines` are required.
-`devices`, `replicas_per_device`, and `cpu_workers` are read directly from the
-YAML (`device`, `replicas_per_device`, and `num_workers` fields respectively).
-Pass them on the CLI only to **override** the YAML values on the fly:
-
-```bash
-# Override replica count without editing the YAML:
-python run_parallel.py \
-    --config config/preprocessing/demo_preprocessing_embodiedscan_sam3.yaml \
-    --output_dir /path/to/output \
-    --num_pipelines 2 \
-    --replicas_per_device 3
-```
-
-| Argument | Default | Meaning |
+| replicas_per_device | Typical peak | Notes |
 |---|---|---|
-| `--num_pipelines` | `2` | Number of parallel pipeline subprocesses |
-| `--devices` | YAML `device` field | Space-separated NPU list assigned round-robin to workers; inferred from YAML when omitted |
-| `--replicas_per_device` | YAML `replicas_per_device` | SAM3 replicas per NPU per worker (tune to fill VRAM) |
-| `--cpu_workers` | YAML `num_workers` of first CPU stage | Per-pipeline workers for filter / scene_fusion; recommended ≈ `vCPUs / num_pipelines` |
-
-**VRAM sizing guide for SAM3 (bfloat16, per worker):**
-
-| replicas_per_device | Est. peak / card | Safe on 32 GB? |
-|---|---|---|
-| 2 | ~14 GB | ✅ conservative |
-| 3 | ~21 GB | ✅ recommended |
-| 4 | ~28 GB | ⚠️ tight, test first |
-
-**Output layout** — each worker writes to its own subdirectory; concatenate the final
-`data.parquet` files for downstream use:
-
-```
-<output_dir>/
-  worker_0/   ← shard 0 results (standard run.py output structure)
-  worker_1/   ← shard 1 results
-  ...
-```
-
-```python
-import pandas as pd, glob
-dfs = [pd.read_parquet(p) for p in sorted(glob.glob("<output_dir>/worker_*/*/data.parquet"))]
-combined = pd.concat(dfs, ignore_index=True)
-```
-
-Monitor progress in real time:
-
-```bash
-tail -f /path/to/output/worker_*/run.log
-```
-
-> **Single-process alternative:** If you prefer to keep using `run.py`, set
-> `num_workers: 40` for CPU-bound stages (filter, scene_fusion) in the YAML —
-> cv2/numpy/open3d release the GIL so all 40 threads run truly in parallel on
-> 48 vCPUs (~83% utilisation).  SAM3 throughput is still capped by the replica
-> pool, so keep `num_workers` equal to `replicas_per_device × len(devices)` for
-> the localization stage.
+| 2 | ~17 GB | Current default |
+| 3 | ~22–26 GB | Raise if headroom on `npu-smi` |
 
 ### 3.3 Config File Structure
 

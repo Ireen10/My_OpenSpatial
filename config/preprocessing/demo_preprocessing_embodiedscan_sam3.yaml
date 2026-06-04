@@ -36,10 +36,7 @@ pipeline:
 
         segmenter_model: facebook/sam3
 
-        # ── Multi-card parallel inference (2× 910B 32G) ──────────────────────
-        # run.py (single process): both cards, 4 replicas, 4 workers, batch 4
-        # run_parallel.py (2 procs): each proc gets 1 card (patched automatically)
-        device: "npu:0,npu:1"        # comma-separated NPU device list
+        device: "npu:0,npu:1"
         replicas_per_device: 2       # 2 instances/card (float32)
         use_multi_processing: true
         num_workers: 4               # = devices(2) × replicas_per_device(2)
