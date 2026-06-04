@@ -39,8 +39,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from task.localization.sam3_refiner import (
     Sam3Refiner,
+    _extract_mask,
     _load_coarse_mask,
     _load_sam3_replica,
+    _match_proposals_to_boxes,
     _post_process,
     _target_sizes,
 )
@@ -239,9 +241,8 @@ def diagnose_sample(row: dict, data_root: Path | None,
             outputs = model(**inputs)
         seg_list = _post_process(processor, outputs, 0.0, target_sizes)
         seg = seg_list[0]
-        seg_masks = seg.get("masks")
-        seg_scores = seg.get("scores")
-        n_got = len(seg_masks) if seg_masks is not None else 0
+        seg_masks_raw = seg.get("masks")
+        n_proposals = len(seg_masks_raw) if seg_masks_raw is not None else 0
     except Exception as exc:
         print(f"  ERROR: SAM3 inference failed — {type(exc).__name__}: {exc}")
         return {
@@ -251,32 +252,27 @@ def diagnose_sample(row: dict, data_root: Path | None,
             "error": str(exc),
         }
 
-    print(f"  SAM3 returned {n_got} masks for {len(boxes)} boxes")
+    print(f"  SAM3 returned {n_proposals} proposals for {len(boxes)} boxes")
+    print(f"  (SAM3 is DETR-style: always ~200 proposals; matching by ROI coverage)")
 
-    sam3_masks_np, sam3_scores = [], []
-    for k in range(len(boxes)):
-        if k < n_got:
-            m = seg_masks[k]
-            if hasattr(m, "float"):
-                m = m.float()
-            if hasattr(m, "cpu"):
-                m = m.cpu().numpy()
-            if m.ndim == 3:
-                m = m[0]
-            sc = float(seg_scores[k]) if seg_scores is not None and k < len(seg_scores) else 0.0
-            px = int((m > 0.5).sum())
-            print(f"    [{k}] score={sc:.4f}  mask_pixels={px}")
-            sam3_masks_np.append(m)
-            sam3_scores.append(sc)
-        else:
-            sam3_masks_np.append(np.zeros((h_px, w_px), dtype=np.float32))
-            sam3_scores.append(0.0)
-            print(f"    [{k}] NO MASK RETURNED")
+    # Convert all proposals to numpy, then match to boxes by coverage
+    proposals = [_extract_mask(seg_masks_raw[k]) for k in range(n_proposals)]
+    sam3_masks_np, sam3_scores = _match_proposals_to_boxes(
+        proposals, boxes, h_px, w_px, min_coverage=0.0  # show all in verify
+    )
 
-    # ── Panel 2: SAM3 output ─────────────────────────────────────────────────
+    for k, (m, cov) in enumerate(zip(sam3_masks_np, sam3_scores)):
+        px = int((m > 0.5).sum())
+        tag = tags[k] if k < len(tags) else "?"
+        box = boxes[k]
+        box_area = max(int((box[2] - box[0]) * (box[3] - box[1])), 1)
+        print(f"    [{k}] {tag:20s}  coverage={cov:.3f} "
+              f"({int(cov*box_area)}/{box_area}px covered)  mask_pixels={px}")
+
+    # ── Panel 2: SAM3 output (coverage-matched) ──────────────────────────────
     panel_sam3 = _draw_sam3_masks(
         image, sam3_masks_np, sam3_scores, tags,
-        title=f"SAM3 output masks  (threshold=0.0)"
+        title=f"SAM3 output (coverage-matched, {n_proposals} proposals)"
     )
 
     # ── Save composite ───────────────────────────────────────────────────────
@@ -289,10 +285,10 @@ def diagnose_sample(row: dict, data_root: Path | None,
         "sample_id": sample_id,
         "status": "ok",
         "n_boxes": len(boxes),
-        "n_sam3_masks": n_got,
-        "scores": sam3_scores,
-        "min_score": min(sam3_scores) if sam3_scores else None,
-        "max_score": max(sam3_scores) if sam3_scores else None,
+        "n_proposals": n_proposals,
+        "coverages": sam3_scores,
+        "min_coverage": min(sam3_scores) if sam3_scores else None,
+        "max_coverage": max(sam3_scores) if sam3_scores else None,
     }
 
 
@@ -362,15 +358,18 @@ def main():
     print("=" * 60)
     ok = [r for r in results if r["status"] == "ok"]
     if ok:
-        all_scores = [s for r in ok for s in r["scores"]]
+        all_cov = [s for r in ok for s in r["coverages"]]
+        total_proposals = sum(r.get("n_proposals", 0) for r in ok)
         print(f"  Samples OK          : {len(ok)}/{len(results)}")
         print(f"  Total boxes         : {sum(r['n_boxes'] for r in ok)}")
-        print(f"  Total SAM3 masks    : {sum(r['n_sam3_masks'] for r in ok)}")
-        if all_scores:
-            print(f"  Score range         : {min(all_scores):.4f} – {max(all_scores):.4f}")
-            print(f"  Score mean          : {sum(all_scores)/len(all_scores):.4f}")
-            print(f"  Scores < 0.3        : {sum(1 for s in all_scores if s < 0.3)}/{len(all_scores)}")
-            print(f"  Scores < 0.1        : {sum(1 for s in all_scores if s < 0.1)}/{len(all_scores)}")
+        print(f"  Total SAM3 proposals: {total_proposals}")
+        if all_cov:
+            matched = sum(1 for c in all_cov if c >= 0.05)
+            print(f"  Coverage range      : {min(all_cov):.3f} – {max(all_cov):.3f}")
+            print(f"  Coverage mean       : {sum(all_cov)/len(all_cov):.3f}")
+            print(f"  Matched (cov≥5%)    : {matched}/{len(all_cov)}")
+            print(f"  Poor    (cov<30%)   : {sum(1 for c in all_cov if c < 0.3)}/{len(all_cov)}")
+            print(f"  Unmatched (cov<5%)  : {len(all_cov)-matched}/{len(all_cov)}")
     print(f"  Outputs saved to    : {args.output_dir.resolve()}")
     print("=" * 60)
     return 0

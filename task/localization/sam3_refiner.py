@@ -78,20 +78,26 @@ SCORE_LOG_INTERVAL = 500
 
 
 def _log_score_stats(scores_np: np.ndarray, n_boxes: int) -> None:
-    """Accumulate and periodically print SAM3 IoU score statistics."""
+    """Accumulate and periodically print ROI-coverage statistics.
+
+    After the switch to proposal-matching, scores_np holds coverage ratios
+    (fraction of box area covered by the best SAM3 proposal), not IoU scores.
+    Thresholds are re-interpreted accordingly: <0.3 means <30% box coverage,
+    <0.1 means <10% coverage (effectively unmatched).
+    """
     s = _score_log_state
     s["count"] += 1
     s["total"] += len(scores_np)
-    s["below_06"] += int((scores_np < 0.6).sum())
-    s["below_03"] += int((scores_np < 0.3).sum())
+    s["below_06"] += int((scores_np < 0.3).sum())   # "poor coverage"
+    s["below_03"] += int((scores_np < 0.1).sum())   # "unmatched"
     if s["count"] % SCORE_LOG_INTERVAL == 0:
         t = s["total"]
-        pct_06 = 100.0 * s["below_06"] / t if t else 0.0
-        pct_03 = 100.0 * s["below_03"] / t if t else 0.0
+        pct_poor = 100.0 * s["below_06"] / t if t else 0.0
+        pct_unmatched = 100.0 * s["below_03"] / t if t else 0.0
         print(
-            f"[Sam3Refiner] score-diag after {s['count']} images | "
-            f"masks={t} below_0.6={s['below_06']}({pct_06:.1f}%) "
-            f"below_0.3={s['below_03']}({pct_03:.1f}%)",
+            f"[Sam3Refiner] coverage-diag after {s['count']} images | "
+            f"boxes={t} coverage<30%={s['below_06']}({pct_poor:.1f}%) "
+            f"coverage<10%={s['below_03']}({pct_unmatched:.1f}%)",
             flush=True,
         )
 
@@ -122,24 +128,80 @@ def _extract_mask(m) -> np.ndarray:
     return m
 
 
+def _match_proposals_to_boxes(
+    proposals: list[np.ndarray],
+    boxes: np.ndarray,
+    h: int,
+    w: int,
+    min_coverage: float = 0.05,
+) -> tuple[list[np.ndarray], list[float]]:
+    """Match SAM3 proposals to input boxes by ROI coverage (vectorised).
+
+    SAM3 is a DETR-style video model with ~200 fixed query slots.  It always
+    returns ~200 proposals regardless of how many box prompts were given, so
+    seg_masks[k] does NOT correspond to input box k.
+
+    For each input box we find the proposal whose binary mask maximally covers
+    the box region:
+        coverage = pixels_of_proposal_inside_box / box_area
+
+    If the best coverage for a box is below `min_coverage` (default 5 %) the
+    box is considered unmatched and gets an empty mask.
+
+    Returns (masks_out, coverages_out) — both length == len(boxes).
+    """
+    if not proposals:
+        empty = np.zeros((h, w), dtype=np.float32)
+        return [empty] * len(boxes), [0.0] * len(boxes)
+
+    # Stack all proposals into a bool array (N_prop, H, W) once
+    prop_bin = np.stack([(p > 0.5) for p in proposals])  # bool (N_prop, H, W)
+
+    masks_out: list[np.ndarray] = []
+    coverages_out: list[float] = []
+
+    for box in boxes:
+        x1, y1 = max(0, int(box[0])), max(0, int(box[1]))
+        x2, y2 = min(w, int(box[2])), min(h, int(box[3]))
+        box_area = max((x2 - x1) * (y2 - y1), 1)
+
+        if x2 <= x1 or y2 <= y1:
+            masks_out.append(np.zeros((h, w), dtype=np.float32))
+            coverages_out.append(0.0)
+            continue
+
+        # coverage[k] = fraction of box area covered by proposal k
+        roi_hits = prop_bin[:, y1:y2, x1:x2].sum(axis=(1, 2))  # (N_prop,)
+        coverage = roi_hits / box_area  # (N_prop,)
+
+        best_k = int(coverage.argmax())
+        best_cov = float(coverage[best_k])
+
+        if best_cov < min_coverage:
+            masks_out.append(np.zeros((h, w), dtype=np.float32))
+        else:
+            masks_out.append(proposals[best_k].astype(np.float32))
+        coverages_out.append(best_cov)
+
+    return masks_out, coverages_out
+
+
 def _infer_refiner(processor, model, device, images, boxes_per_image, texts_per_image):
-    """Single SAM3 forward for the whole batch: each entry = one image + ALL its boxes.
+    """One SAM3 forward for the whole batch; proposals matched to boxes by ROI coverage.
 
-    Batch layout (correct for SAM3 / video model):
-      entry 0 → img_0,  [box_0_0, box_0_1, …]
-      entry 1 → img_1,  [box_1_0, box_1_1, …]
-      …
+    SAM3 (sam3_video) is a DETR-style model with ~200 fixed query slots.
+    It ALWAYS returns ~200 proposals per image regardless of how many box
+    prompts are given, so seg_masks[k] does NOT correspond to input box k.
 
-    Why this matters: SAM3 applies temporal attention across the batch dimension.
-    The original "one-box-per-entry" design repeated every image N_boxes times,
-    so the model saw N copies of the same frame as a "video" — corrupting its IoU
-    predictions.  Grouping all boxes under their parent image eliminates that
-    confusion while keeping the full batch on the NPU in one forward pass.
-
-    Quality gate: threshold=0.0 in post_process keeps every mask candidate; only
-    MIN_MASK_PIXELS is used to discard empty results.  Depth-projected box prompts
-    are coarser than GroundingDINO boxes, so their IoU self-estimates are lower and
-    a strict threshold would silently drop valid masks.
+    Strategy:
+      1. One SAM3 forward pass for the whole batch (images grouped by image,
+         all boxes for that image together) — same GPU/NPU efficiency as before.
+      2. All ~200 proposals retrieved per image (threshold=0.0).
+      3. For each input box, _match_proposals_to_boxes picks the proposal whose
+         binary mask maximally covers the box's ROI region (vectorised numpy,
+         negligible extra cost vs. the forward pass).
+      4. Coverage ratio (0–1) is reported instead of SAM3's own IoU estimate,
+         which is always < 0.15 for coarse depth-projected prompts.
     """
     # Normalise boxes; track which original indices have valid boxes
     all_boxes: list[np.ndarray] = []
@@ -152,7 +214,6 @@ def _infer_refiner(processor, model, device, images, boxes_per_image, texts_per_
         if b.shape[0] > 0:
             valid_idx.append(i)
 
-    # Pre-fill output with empty results for images that had no boxes
     per_image: list = [([], np.array([])) for _ in images]
 
     if not valid_idx:
@@ -180,40 +241,26 @@ def _infer_refiner(processor, model, device, images, boxes_per_image, texts_per_
     with torch.no_grad():
         outputs = model(**inputs)
 
-    # threshold=0.0 — let MIN_MASK_PIXELS be the sole quality gate
+    # threshold=0.0 — keep all ~200 proposals; coverage matching is the quality gate
     seg_list = _post_process(processor, outputs, 0.0, target_sizes)
 
     for seg_pos, orig_idx in enumerate(valid_idx):
         seg = seg_list[seg_pos]
-        seg_masks = seg.get("masks")
-        seg_scores = seg.get("scores")
-        n_got = len(seg_masks) if seg_masks is not None else 0
+        seg_masks_raw = seg.get("masks")
+        n_proposals = len(seg_masks_raw) if seg_masks_raw is not None else 0
         h_px, w_px = int(target_sizes[seg_pos][0]), int(target_sizes[seg_pos][1])
         boxes = all_boxes[orig_idx]
 
-        if seg_scores is not None and len(seg_scores) > 0:
-            scores_np = (
-                seg_scores.float().cpu().numpy()
-                if hasattr(seg_scores, "cpu")
-                else np.asarray(seg_scores, dtype=np.float32)
-            )
-            _log_score_stats(scores_np, n_boxes=len(boxes))
+        proposals = [_extract_mask(seg_masks_raw[k]) for k in range(n_proposals)]
 
-        masks_out, scores_out = [], []
-        for k in range(len(boxes)):
-            if k < n_got:
-                sc = (
-                    float(seg_scores[k])
-                    if seg_scores is not None and k < len(seg_scores)
-                    else 0.0
-                )
-                masks_out.append(_extract_mask(seg_masks[k]))
-                scores_out.append(sc)
-            else:
-                masks_out.append(np.zeros((h_px, w_px), dtype=np.float32))
-                scores_out.append(0.0)
+        masks_out, coverages_out = _match_proposals_to_boxes(
+            proposals, boxes, h_px, w_px
+        )
 
-        per_image[orig_idx] = (masks_out, np.array(scores_out, dtype=np.float32))
+        cov_np = np.array(coverages_out, dtype=np.float32)
+        _log_score_stats(cov_np, n_boxes=len(boxes))
+
+        per_image[orig_idx] = (masks_out, cov_np)
 
     return per_image
 
@@ -238,7 +285,10 @@ def _filter_by_pixels(pred_masks, min_pixels: int):
 class Sam3Refiner(BaseTask):
     """Refine filter-stage masks with Sam3Model box prompts (Sam2Refiner replacement)."""
 
-    MIN_SCORE = 0.6
+    # MIN_SCORE removed: SAM3 is a DETR-style model whose IoU self-estimates for
+    # coarse depth-projected box prompts are always < 0.15.  Quality filtering is
+    # done solely by MIN_MASK_PIXELS and the ROI-coverage gate in
+    # _match_proposals_to_boxes (min_coverage=0.05).
     MIN_MASK_PIXELS = 20
 
     def __init__(self, args, device=None):
