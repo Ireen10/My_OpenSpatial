@@ -1,4 +1,5 @@
 import queue
+import threading
 import warnings
 import numpy as np
 import torch
@@ -335,10 +336,18 @@ class Sam3Refiner(BaseTask):
                 pass
 
         if not valid_items:
-            return []
+            return [], {
+                "samples": len(batch_items),
+                "boxes_in": 0,
+                "boxes_kept": 0,
+                "samples_saved": 0,
+            }
 
         images_masks_list = [(item[2], item[3]) for item in valid_items]
         batch_results = self.refine_masks_batch(images_masks_list)
+
+        boxes_in = sum(len(item[3]) for item in valid_items)
+        boxes_kept = sum(len(ki) for _, _, ki in batch_results)
 
         outputs = []
         for (idx, example, _, _), (refined_masks, bboxes_2d, keep_indices) in zip(
@@ -360,7 +369,13 @@ class Sam3Refiner(BaseTask):
             example["bboxes_2d"] = bboxes_2d
             outputs.append(example)
 
-        return outputs
+        stats = {
+            "samples": len(batch_items),
+            "boxes_in": boxes_in,
+            "boxes_kept": boxes_kept,
+            "samples_saved": len(outputs),
+        }
+        return outputs, stats
 
     def _run_batched(self, dataset):
         """ThreadPoolExecutor-based batched runner.
@@ -383,6 +398,25 @@ class Sam3Refiner(BaseTask):
         # futures dict never holds the entire dataset in memory simultaneously.
         processed = []
         window = num_workers * 2
+        total_samples = 0
+        total_boxes_in = 0
+        total_boxes_kept = 0
+        total_samples_saved = 0
+        next_log_at = 1000
+        stats_lock = threading.Lock()
+
+        def _maybe_log_progress():
+            nonlocal next_log_at
+            while total_samples >= next_log_at:
+                filtered = total_boxes_in - total_boxes_kept
+                print(
+                    f"[Sam3Refiner] {total_samples} samples | "
+                    f"bbox in={total_boxes_in} filtered={filtered} kept={total_boxes_kept} | "
+                    f"samples saved={total_samples_saved}",
+                    flush=True,
+                )
+                next_log_at += 1000
+
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             for chunk_start in tqdm.tqdm(
                 range(0, len(batches), window),
@@ -393,9 +427,25 @@ class Sam3Refiner(BaseTask):
                 futures = {executor.submit(self._process_batch, b): None for b in chunk}
                 for future in as_completed(futures):
                     try:
-                        processed.extend(future.result())
+                        outs, st = future.result()
+                        processed.extend(outs)
+                        with stats_lock:
+                            total_samples += st["samples"]
+                            total_boxes_in += st["boxes_in"]
+                            total_boxes_kept += st["boxes_kept"]
+                            total_samples_saved += st["samples_saved"]
+                            _maybe_log_progress()
                     except Exception as exc:
                         print(f"[WARN] SAM3 batch failed: {exc}")
+
+        if total_samples > 0 and total_samples % 1000 != 0:
+            filtered = total_boxes_in - total_boxes_kept
+            print(
+                f"[Sam3Refiner] {total_samples} samples (final) | "
+                f"bbox in={total_boxes_in} filtered={filtered} kept={total_boxes_kept} | "
+                f"samples saved={total_samples_saved}",
+                flush=True,
+            )
 
         if not processed:
             return pd.DataFrame()
