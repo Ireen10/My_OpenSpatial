@@ -123,12 +123,11 @@ class BasePipeline:
         # Build dataset
         self.dataset = build_dataset(self.data_cfg)
 
-        # Debug: honour --max_samples if set
-        max_samples = getattr(cfg, "max_samples", None)
-        if max_samples is not None:
-            full_len = len(self.dataset.data)
-            self.dataset.data = self.dataset.data.iloc[:max_samples].reset_index(drop=True)
-            print(f">>> [debug] max_samples={max_samples}: using {len(self.dataset.data)}/{full_len} rows.")
+        # Debug: truncate dataset when --max_samples is given.
+        # Stored as self.max_samples so every subsequent override_data call can
+        # re-apply the limit (each call reloads from parquet, undoing truncation).
+        self.max_samples = getattr(cfg, "max_samples", None)
+        self._truncate_dataset_if_needed()
 
         # Initialize dataset from first task's depends_on if present
         if not self.task_queue:
@@ -138,6 +137,18 @@ class BasePipeline:
             resolved_path = self._resolve_dependency_path(first_task_cfg.depends_on, current_task_idx=0)
             print(f">>> Overriding dataset with {resolved_path}...")
             self.dataset.override_data(resolved_path)
+            self._truncate_dataset_if_needed()
+
+    def _truncate_dataset_if_needed(self) -> None:
+        """Trim self.dataset.data to self.max_samples rows (no-op when not set)."""
+        if not self.max_samples:
+            return
+        full_len = len(self.dataset.data)
+        self.dataset.data = self.dataset.data.iloc[: self.max_samples].reset_index(drop=True)
+        print(
+            f">>> [debug] max_samples={self.max_samples}: "
+            f"using {len(self.dataset.data)}/{full_len} rows."
+        )
 
     def _resolve_output_path(self, stage_name, task_name, task_cfg, default_rel_dir=None):
         """Resolve output directory for task results."""
@@ -185,6 +196,7 @@ class BasePipeline:
 
         resolved_path = self._resolve_dependency_path(depends_on, current_task_idx=current_task_idx)
         self.dataset.override_data(resolved_path)
+        self._truncate_dataset_if_needed()
 
     def run(self):
         """Execute all tasks in pipeline sequentially."""
