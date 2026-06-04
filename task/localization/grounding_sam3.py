@@ -73,6 +73,19 @@ def _load_sam3_image_model(segmenter_model, torch_dtype, device):
     return proc, model, "Sam3TrackerModel (fallback)"
 
 
+def _post_process_pred_masks(processor, pred_masks, original_sizes):
+    """Sam3TrackerProcessor vs Sam3Processor mask upscaling (see sam3_refiner)."""
+    masks = pred_masks.cpu() if hasattr(pred_masks, "cpu") else pred_masks
+    if hasattr(processor, "post_process_masks"):
+        return processor.post_process_masks(masks, original_sizes)
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is not None and hasattr(image_processor, "post_process_masks"):
+        return image_processor.post_process_masks(masks, original_sizes)
+    raise AttributeError(
+        f"{type(processor).__name__} has no post_process_masks."
+    )
+
+
 class Localizer(BaseTask):
     """Grounding DINO + SAM3 pipeline: detect objects and generate segmentation masks.
 
@@ -159,9 +172,8 @@ class Localizer(BaseTask):
             seg_outputs = self.seg_model(**seg_inputs, multimask_output=False)
 
         # post_process_masks → (N, 1, H, W) tensor; iou_scores → (1, N, 1)
-        pred_masks = self.seg_processor.post_process_masks(
-            seg_outputs.pred_masks.cpu(),
-            seg_inputs["original_sizes"],
+        pred_masks = _post_process_pred_masks(
+            self.seg_processor, seg_outputs.pred_masks, seg_inputs["original_sizes"]
         )[0]  # (N, 1, H, W) tensor
         scores = seg_outputs.iou_scores[0, :, 0].cpu().numpy()  # (N,)
 

@@ -77,6 +77,25 @@ def _load_sam3_replica(segmenter_model: str, load_kwargs: dict, device: str):
     return proc, model
 
 
+def _post_process_pred_masks(processor, pred_masks, original_sizes):
+    """Upscale low-res masks to original image size.
+
+    Sam3TrackerProcessor exposes ``post_process_masks`` on the processor itself.
+    Sam3Processor only has it on ``processor.image_processor`` — calling
+    ``processor.post_process_masks`` raises AttributeError.
+    """
+    masks = pred_masks.cpu() if hasattr(pred_masks, "cpu") else pred_masks
+    if hasattr(processor, "post_process_masks"):
+        return processor.post_process_masks(masks, original_sizes)
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is not None and hasattr(image_processor, "post_process_masks"):
+        return image_processor.post_process_masks(masks, original_sizes)
+    raise AttributeError(
+        f"{type(processor).__name__} has no post_process_masks "
+        "(expected Sam3TrackerProcessor or Sam3Processor with image_processor)."
+    )
+
+
 class Sam3Refiner(BaseTask):
     """Refine coarse masks using SAM3 box-prompt segmentation (via transformers).
 
@@ -224,9 +243,8 @@ class Sam3Refiner(BaseTask):
             # post_process_masks returns a list of tensors (one per image in batch).
             # Each tensor has shape (num_objects, num_candidates, H, W).
             # With multimask_output=False, num_candidates=1.
-            pred_masks = processor.post_process_masks(
-                outputs.pred_masks.cpu(),
-                inputs["original_sizes"],
+            pred_masks = _post_process_pred_masks(
+                processor, outputs.pred_masks, inputs["original_sizes"]
             )[0]  # (N, 1, H, W) tensor
 
             # iou_scores shape: (batch=1, num_objects, num_candidates=1)
@@ -282,9 +300,8 @@ class Sam3Refiner(BaseTask):
                 outputs = model(**inputs, multimask_output=False)
 
             # post_process_masks returns list[Tensor(N_i, 1, H_i, W_i)], one per image
-            all_pred_masks = processor.post_process_masks(
-                outputs.pred_masks.cpu(),
-                inputs["original_sizes"],
+            all_pred_masks = _post_process_pred_masks(
+                processor, outputs.pred_masks, inputs["original_sizes"]
             )
 
             # iou_scores: (B, max_N, 1) — slice to actual N per image after unpadding
@@ -393,11 +410,19 @@ class Sam3Refiner(BaseTask):
             examples[i : i + batch_size]
             for i in range(0, len(examples), batch_size)
         ]
+        window = num_workers * 2
+        n_micro_batches = len(batches)
+        n_rounds = (n_micro_batches + window - 1) // window
+        print(
+            f"[Sam3Refiner] {len(examples)} samples | "
+            f"{n_micro_batches} micro-batches (batch_size={batch_size}) | "
+            f"tqdm counts scheduler rounds={n_rounds} (window={window})",
+            flush=True,
+        )
 
         # Submit at most (num_workers * 2) futures at a time so the pending-
         # futures dict never holds the entire dataset in memory simultaneously.
         processed = []
-        window = num_workers * 2
         total_samples = 0
         total_boxes_in = 0
         total_boxes_kept = 0
@@ -418,11 +443,8 @@ class Sam3Refiner(BaseTask):
                 next_log_at += 1000
 
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            for chunk_start in tqdm.tqdm(
-                range(0, len(batches), window),
-                total=(len(batches) + window - 1) // window,
-                desc="SAM3 batched",
-            ):
+            pbar = tqdm.tqdm(total=len(examples), desc="SAM3 samples")
+            for chunk_start in range(0, len(batches), window):
                 chunk = batches[chunk_start : chunk_start + window]
                 futures = {executor.submit(self._process_batch, b): None for b in chunk}
                 for future in as_completed(futures):
@@ -434,9 +456,11 @@ class Sam3Refiner(BaseTask):
                             total_boxes_in += st["boxes_in"]
                             total_boxes_kept += st["boxes_kept"]
                             total_samples_saved += st["samples_saved"]
+                            pbar.update(st["samples"])
                             _maybe_log_progress()
                     except Exception as exc:
                         print(f"[WARN] SAM3 batch failed: {exc}")
+            pbar.close()
 
         if total_samples > 0 and total_samples % 1000 != 0:
             filtered = total_boxes_in - total_boxes_kept
