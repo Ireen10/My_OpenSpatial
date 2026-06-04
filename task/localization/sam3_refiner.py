@@ -91,7 +91,11 @@ def _filter_masks_from_scores(pred_masks, scores, min_score: float, min_pixels: 
         if float(score) < min_score:
             continue
         arr = pred_masks[i]
-        if hasattr(arr, "numpy"):
+        if hasattr(arr, "float"):
+            arr = arr.float()
+        if hasattr(arr, "cpu"):
+            arr = arr.cpu().numpy()
+        elif hasattr(arr, "numpy"):
             arr = arr.numpy()
         if arr.ndim == 3:
             arr = arr[0]
@@ -128,10 +132,10 @@ def _forward_box_prompts(processor, model, variant: str, images, boxes_per_image
     if variant == "tracker":
         # Official tracker batch: one post_process_masks call on full pred_masks tensor.
         all_masks = processor.post_process_masks(
-            outputs.pred_masks.cpu(), inputs["original_sizes"]
+            outputs.pred_masks.float().cpu(), inputs["original_sizes"]
         )
         for i, n_boxes in enumerate(n_per_image):
-            scores = outputs.iou_scores[i, :n_boxes, 0].cpu().numpy()
+            scores = outputs.iou_scores[i, :n_boxes, 0].float().cpu().numpy()
             per_image.append((all_masks[i], scores))
     else:
         # Official Sam3Model box path (transformers model_doc/sam3).
@@ -142,7 +146,11 @@ def _forward_box_prompts(processor, model, variant: str, images, boxes_per_image
             target_sizes=target_sizes,
         )
         for item in seg:
-            per_image.append((item["masks"], item["scores"].cpu().numpy()))
+            masks = item["masks"]
+            if hasattr(masks, "float"):
+                masks = masks.float()
+            scores = item["scores"].float().cpu().numpy()
+            per_image.append((masks, scores))
 
     return per_image
 
@@ -159,7 +167,7 @@ class Sam3Refiner(BaseTask):
     ─────────────────────────────
     Set ``device`` to a comma-separated list of device strings to enable data-parallel
     processing across multiple cards.  Each device gets ``replicas_per_device`` independent
-    model instances (useful on high-memory cards with bfloat16).  Worker threads compete
+    model instances per device.  Worker threads compete
     for replicas via a thread-safe queue; at most one thread uses each replica at a time.
 
     Typical configs (in YAML):
@@ -175,7 +183,6 @@ class Sam3Refiner(BaseTask):
       # Two 910B cards, two replicas per card → ~4× throughput (recommended)
       device: "npu:0,npu:1"
       replicas_per_device: 2
-      torch_dtype: bfloat16      # halves memory; bfloat16 is native on 910B
       use_multi_processing: true
       num_workers: 4
     """
@@ -199,28 +206,18 @@ class Sam3Refiner(BaseTask):
             devices = [d.strip() for d in str(device_raw).split(",")]
         self.device = devices[0]
 
-        # ── Optional dtype (e.g. "bfloat16" halves memory on 910B) ──────────
-        torch_dtype_str = args.get("torch_dtype", None)
-        torch_dtype = getattr(torch, torch_dtype_str) if torch_dtype_str else None
-
-        # ── Build replica pool ───────────────────────────────────────────────
-        # Each entry: (processor, model, device, variant) with variant in
-        # {"image", "tracker"} — selects the official HF post-processing path.
+        # ── Build replica pool (float32 — no torch_dtype override) ─────────
         replicas_per_device = int(args.get("replicas_per_device", 1))
         self._replica_pool: queue.Queue = queue.Queue()
-
-        load_kwargs = {}
-        if torch_dtype is not None:
-            load_kwargs["torch_dtype"] = torch_dtype
 
         _variant_logged = False
         for dev in devices:
             for _ in range(replicas_per_device):
-                proc, model, variant = _load_sam3_replica(segmenter_model, load_kwargs, dev)
+                proc, model, variant = _load_sam3_replica(segmenter_model, {}, dev)
                 if not _variant_logged:
                     _cls = type(model).__name__
                     print(f"[Sam3Refiner] SAM3 loaded as {_cls} ({variant}) on {dev} "
-                          f"(dtype={torch_dtype or 'float32'})")
+                          f"(dtype=float32)")
                     _variant_logged = True
                 model.eval()
                 self._replica_pool.put((proc, model, dev, variant))

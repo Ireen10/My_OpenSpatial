@@ -28,7 +28,7 @@ def _validate_model_path(model_name_or_path: str) -> None:
         )
 
 
-def _load_sam3_image_model(segmenter_model, torch_dtype, device):
+def _load_sam3_image_model(segmenter_model, device):
     """Load SAM3 in single-image mode.
 
     Prefers Sam3Processor + Sam3Model (image predictor, no memory module) which
@@ -45,7 +45,7 @@ def _load_sam3_image_model(segmenter_model, torch_dtype, device):
          expected 0.7–0.99 range.
     """
     _validate_model_path(segmenter_model)
-    load_kwargs = {"torch_dtype": torch_dtype} if torch_dtype is not None else {}
+    load_kwargs = {}
     suppress_ctx = warnings.catch_warnings()
     suppress_ctx.__enter__()
     warnings.filterwarnings(
@@ -90,16 +90,13 @@ class Localizer(BaseTask):
         device = args.get("device") or device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
 
-        torch_dtype_str = args.get("torch_dtype", None)
-        torch_dtype = getattr(torch, torch_dtype_str) if torch_dtype_str else None
-
         # Grounding DINO for open-vocabulary detection (unchanged)
         self.processor = AutoProcessor.from_pretrained(grounding_model)
         self.detector = AutoModelForZeroShotObjectDetection.from_pretrained(grounding_model).to(device)
 
         # SAM3 image predictor — loads Sam3Model if available, else Sam3TrackerModel
         self.seg_processor, self.seg_model, self._sam3_variant = _load_sam3_image_model(
-            segmenter_model, torch_dtype, device
+            segmenter_model, device
         )
         print(f"[Localizer] SAM3 loaded as {type(self.seg_model).__name__} "
               f"({self._sam3_variant}) on {device}")
@@ -167,7 +164,10 @@ class Localizer(BaseTask):
         if len(keep) == 0:
             return None
 
-        masks = pred_masks[keep].numpy()  # (keep, 1, H, W) numpy array
+        pm = pred_masks[keep]
+        if hasattr(pm, "float"):
+            pm = pm.float()
+        masks = pm.cpu().numpy() if hasattr(pm, "cpu") else np.asarray(pm)
         det_tags = [det_tags[i] for i in keep]
         det_boxes = det_boxes[keep]
 

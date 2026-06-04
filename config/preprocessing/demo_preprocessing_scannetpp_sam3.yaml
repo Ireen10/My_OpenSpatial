@@ -44,7 +44,6 @@ pipeline:
         # ── Multi-card parallel inference (2× 910B 32G) ──────────────────────
         device: "npu:0,npu:1"
         replicas_per_device: 2
-        torch_dtype: bfloat16
         use_multi_processing: true
         num_workers: 4
         batch_size: 4
