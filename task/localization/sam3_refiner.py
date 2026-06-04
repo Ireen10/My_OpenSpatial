@@ -111,60 +111,86 @@ def _best_mask_from_seg(seg_item):
     return m, float(scores[best])
 
 
+def _extract_mask(m) -> np.ndarray:
+    """Convert a SAM3 mask tensor/array to a 2-D float32 numpy array."""
+    if hasattr(m, "float"):
+        m = m.float()
+    if hasattr(m, "cpu"):
+        m = m.cpu().numpy()
+    if m.ndim == 3:
+        m = m[0]
+    return m
+
+
 def _infer_refiner(processor, model, device, images, boxes_per_image, texts_per_image):
-    """One SAM3 forward per image, passing ALL boxes for that image together.
+    """Single SAM3 forward for the whole batch: each entry = one image + ALL its boxes.
 
-    This mirrors the calling convention of _segment_boxes (grounding_sam3.py):
-      input_boxes=[all_boxes_for_image]  →  one result with N masks
+    Batch layout (correct for SAM3 / video model):
+      entry 0 → img_0,  [box_0_0, box_0_1, …]
+      entry 1 → img_1,  [box_1_0, box_1_1, …]
+      …
 
-    The original "one box per batch slot" design caused SAM3 (a video model) to
-    treat repeated copies of the same image as video frames, corrupting temporal
-    attention and producing near-zero IoU scores for every prompt.
+    Why this matters: SAM3 applies temporal attention across the batch dimension.
+    The original "one-box-per-entry" design repeated every image N_boxes times,
+    so the model saw N copies of the same frame as a "video" — corrupting its IoU
+    predictions.  Grouping all boxes under their parent image eliminates that
+    confusion while keeping the full batch on the NPU in one forward pass.
 
-    Scoring note: depth-projected bounding boxes (from ThreeDBoxFilter) are
-    inherently coarser than GroundingDINO boxes, so SAM3's IoU self-estimates are
-    lower. We therefore pass threshold=0.0 to post_process and rely exclusively on
-    MIN_MASK_PIXELS as the quality gate.
+    Quality gate: threshold=0.0 in post_process keeps every mask candidate; only
+    MIN_MASK_PIXELS is used to discard empty results.  Depth-projected box prompts
+    are coarser than GroundingDINO boxes, so their IoU self-estimates are lower and
+    a strict threshold would silently drop valid masks.
     """
-    per_image = []
+    # Normalise boxes; track which original indices have valid boxes
+    all_boxes: list[np.ndarray] = []
+    valid_idx: list[int] = []
+    for i, boxes in enumerate(boxes_per_image):
+        b = np.asarray(boxes, dtype=np.float32)
+        if b.ndim == 1:
+            b = b.reshape(1, 4)
+        all_boxes.append(b)
+        if b.shape[0] > 0:
+            valid_idx.append(i)
 
-    for i, (image, boxes) in enumerate(zip(images, boxes_per_image)):
-        boxes = np.asarray(boxes, dtype=np.float32)
-        if boxes.ndim == 1:
-            boxes = boxes.reshape(1, 4)
+    # Pre-fill output with empty results for images that had no boxes
+    per_image: list = [([], np.array([])) for _ in images]
 
-        if boxes.shape[0] == 0:
-            per_image.append(([], np.array([])))
-            continue
+    if not valid_idx:
+        return per_image
 
-        text = texts_per_image[i] if texts_per_image else None
-        proc_kwargs = dict(
-            images=image,
-            input_boxes=[boxes.tolist()],
-            input_boxes_labels=[[1] * len(boxes)],
-            return_tensors="pt",
-        )
-        if text is not None:
-            proc_kwargs["text"] = text
+    batch_images = [images[i] for i in valid_idx]
+    batch_boxes = [all_boxes[i].tolist() for i in valid_idx]
+    batch_labels = [[1] * len(all_boxes[i]) for i in valid_idx]
+    batch_texts = (
+        [texts_per_image[i] for i in valid_idx] if texts_per_image else None
+    )
 
-        inputs = processor(**proc_kwargs).to(device)
-        target_sizes = _target_sizes(inputs)
-        h_px, w_px = int(target_sizes[0][0]), int(target_sizes[0][1])
+    proc_kwargs = dict(
+        images=batch_images,
+        input_boxes=batch_boxes,
+        input_boxes_labels=batch_labels,
+        return_tensors="pt",
+    )
+    if batch_texts and any(t is not None for t in batch_texts):
+        proc_kwargs["text"] = [t or "" for t in batch_texts]
 
-        with torch.no_grad():
-            outputs = model(**inputs)
+    inputs = processor(**proc_kwargs).to(device)
+    target_sizes = _target_sizes(inputs)
 
-        # threshold=0.0 keeps all N mask predictions regardless of IoU score;
-        # coarse depth-projected prompts systematically score below 0.6 and
-        # would be silently dropped by a strict threshold.
-        seg_list = _post_process(processor, outputs, 0.0, target_sizes)
-        seg = seg_list[0]
+    with torch.no_grad():
+        outputs = model(**inputs)
 
+    # threshold=0.0 — let MIN_MASK_PIXELS be the sole quality gate
+    seg_list = _post_process(processor, outputs, 0.0, target_sizes)
+
+    for seg_pos, orig_idx in enumerate(valid_idx):
+        seg = seg_list[seg_pos]
         seg_masks = seg.get("masks")
         seg_scores = seg.get("scores")
         n_got = len(seg_masks) if seg_masks is not None else 0
+        h_px, w_px = int(target_sizes[seg_pos][0]), int(target_sizes[seg_pos][1])
+        boxes = all_boxes[orig_idx]
 
-        # Diagnostic: log score distribution once per image (debug-level only)
         if seg_scores is not None and len(seg_scores) > 0:
             scores_np = (
                 seg_scores.float().cpu().numpy()
@@ -176,25 +202,18 @@ def _infer_refiner(processor, model, device, images, boxes_per_image, texts_per_
         masks_out, scores_out = [], []
         for k in range(len(boxes)):
             if k < n_got:
-                m = seg_masks[k]
-                if hasattr(m, "float"):
-                    m = m.float()
-                if hasattr(m, "cpu"):
-                    m = m.cpu().numpy()
-                if m.ndim == 3:
-                    m = m[0]
                 sc = (
                     float(seg_scores[k])
                     if seg_scores is not None and k < len(seg_scores)
                     else 0.0
                 )
-                masks_out.append(m)
+                masks_out.append(_extract_mask(seg_masks[k]))
                 scores_out.append(sc)
             else:
                 masks_out.append(np.zeros((h_px, w_px), dtype=np.float32))
                 scores_out.append(0.0)
 
-        per_image.append((masks_out, np.array(scores_out, dtype=np.float32)))
+        per_image[orig_idx] = (masks_out, np.array(scores_out, dtype=np.float32))
 
     return per_image
 
