@@ -230,8 +230,41 @@ def _extract_mask(m) -> np.ndarray:
     return m
 
 
+def _proposals_to_numpy(seg_masks_raw) -> np.ndarray:
+    """Batch-convert SAM3 output masks to a single (N_prop, H, W) float32 array.
+
+    SAM3 returns masks either as a stacked tensor (N, 1, H, W) or a sequence
+    of per-proposal tensors/arrays.  This function issues ONE .cpu().numpy()
+    call regardless of N, avoiding 200 individual Python→C++ round-trips that
+    would occur if each mask were converted in a loop.
+
+    Returns shape (N_prop, H, W) float32.
+    """
+    if seg_masks_raw is None or len(seg_masks_raw) == 0:
+        return np.empty((0,), dtype=np.float32)
+
+    # Case 1: already a tensor with a batch dimension → one call suffices
+    if hasattr(seg_masks_raw, "cpu"):
+        arr = seg_masks_raw.float().cpu().numpy()           # (N, [1,] H, W)
+        if arr.ndim == 4:
+            arr = arr[:, 0]                                 # (N, H, W)
+        return arr.astype(np.float32, copy=False)
+
+    # Case 2: list/tuple of tensors or arrays — one stack after batch-moving
+    parts = []
+    for m in seg_masks_raw:
+        if hasattr(m, "cpu"):
+            m = m.float().cpu().numpy()
+        elif hasattr(m, "numpy"):
+            m = m.numpy()
+        if m.ndim == 3:
+            m = m[0]
+        parts.append(m)
+    return np.stack(parts).astype(np.float32, copy=False)  # (N, H, W)
+
+
 def _match_proposals_to_boxes(
-    proposals: list[np.ndarray],
+    prop_np: np.ndarray,
     boxes: np.ndarray,
     h: int,
     w: int,
@@ -243,6 +276,13 @@ def _match_proposals_to_boxes(
     returns ~200 proposals regardless of how many box prompts were given, so
     seg_masks[k] does NOT correspond to input box k.
 
+    Parameters
+    ----------
+    prop_np : (N_prop, H, W) float32 numpy array
+        All proposals for one image, pre-converted by _proposals_to_numpy.
+        Passing a pre-stacked array avoids rebuilding it here and allows the
+        caller to share a single copy across multiple uses.
+
     For each input box, the proposal with the highest *coverage* is selected:
         coverage  = intersection / box_area   (recall  — how much of the box)
         precision = intersection / mask_pixels (purity  — how much of the mask
@@ -253,17 +293,17 @@ def _match_proposals_to_boxes(
 
     Returns (masks_out, coverages_out, precisions_out) — all length == len(boxes).
     """
-    if not proposals:
+    n = len(boxes)
+    if prop_np.ndim < 3 or prop_np.shape[0] == 0:
         empty = np.zeros((h, w), dtype=np.float32)
-        n = len(boxes)
         return [empty] * n, [0.0] * n, [0.0] * n
 
-    # Stack all proposals into a bool array (N_prop, H, W) once
-    prop_bin = np.stack([(p > 0.5) for p in proposals])  # bool (N_prop, H, W)
+    # Binarize once; prop_pixels computed once — reused for every box
+    prop_bin    = prop_np > 0.5                                 # (N_prop, H, W) bool
     prop_pixels = prop_bin.sum(axis=(1, 2)).astype(np.float32)  # (N_prop,)
 
     masks_out: list[np.ndarray] = []
-    coverages_out: list[float] = []
+    coverages_out: list[float]  = []
     precisions_out: list[float] = []
 
     for box in boxes:
@@ -277,23 +317,20 @@ def _match_proposals_to_boxes(
             precisions_out.append(0.0)
             continue
 
-        roi_hits = prop_bin[:, y1:y2, x1:x2].sum(axis=(1, 2))  # (N_prop,) intersections
-        coverage = roi_hits / box_area                           # recall  per proposal
+        # Vectorised over all N_prop simultaneously — no Python loop over proposals
+        roi_hits = prop_bin[:, y1:y2, x1:x2].sum(axis=(1, 2))  # (N_prop,)
+        coverage = roi_hits / box_area
 
-        best_k = int(coverage.argmax())
-        best_cov = float(coverage[best_k])
-        best_hits = float(roi_hits[best_k])
-        best_mask_px = max(float(prop_pixels[best_k]), 1.0)
-        best_prec = best_hits / best_mask_px  # precision of the chosen proposal
+        best_k     = int(coverage.argmax())
+        best_cov   = float(coverage[best_k])
+        best_prec  = float(roi_hits[best_k]) / max(float(prop_pixels[best_k]), 1.0)
 
         if best_cov < min_coverage:
             masks_out.append(np.zeros((h, w), dtype=np.float32))
-            coverages_out.append(best_cov)
-            precisions_out.append(best_prec)
         else:
-            masks_out.append(proposals[best_k].astype(np.float32))
-            coverages_out.append(best_cov)
-            precisions_out.append(best_prec)
+            masks_out.append(prop_np[best_k])               # no copy — caller owns the array
+        coverages_out.append(best_cov)
+        precisions_out.append(best_prec)
 
     return masks_out, coverages_out, precisions_out
 
@@ -363,10 +400,11 @@ def _infer_refiner(processor, model, device, images, boxes_per_image, texts_per_
         h_px, w_px = int(target_sizes[seg_pos][0]), int(target_sizes[seg_pos][1])
         boxes = all_boxes[orig_idx]
 
-        proposals = [_extract_mask(seg_masks_raw[k]) for k in range(n_proposals)]
+        # Batch-convert all proposals in one call (avoids N_prop CPU round-trips)
+        prop_np = _proposals_to_numpy(seg_masks_raw)   # (N_prop, H, W) float32
 
         masks_out, coverages_out, precisions_out = _match_proposals_to_boxes(
-            proposals, boxes, h_px, w_px
+            prop_np, boxes, h_px, w_px
         )
 
         cov_np  = np.array(coverages_out,  dtype=np.float32)

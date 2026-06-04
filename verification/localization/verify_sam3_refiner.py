@@ -39,11 +39,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from task.localization.sam3_refiner import (
     Sam3Refiner,
-    _extract_mask,
     _load_coarse_mask,
     _load_sam3_replica,
     _match_proposals_to_boxes,
     _post_process,
+    _proposals_to_numpy,
     _target_sizes,
 )
 import torch
@@ -257,12 +257,12 @@ def diagnose_sample(row: dict, data_root: Path | None,
     print(f"  SAM3 returned {n_proposals} proposals for {len(boxes)} boxes")
     print(f"  (SAM3 is DETR-style: always ~200 proposals; matching by ROI coverage)")
 
-    # Convert all proposals to numpy, then match to boxes by coverage.
+    # Batch-convert all proposals (one CPU transfer) then match by coverage.
     # min_coverage=0.0 here so we always display the best match regardless of
     # threshold — the summary table shows how many would survive the real gate.
-    proposals = [_extract_mask(seg_masks_raw[k]) for k in range(n_proposals)]
+    prop_np = _proposals_to_numpy(seg_masks_raw)
     sam3_masks_np, sam3_scores, sam3_precisions = _match_proposals_to_boxes(
-        proposals, boxes, h_px, w_px, min_coverage=0.0
+        prop_np, boxes, h_px, w_px, min_coverage=0.0
     )
 
     for k, (m, cov, prec) in enumerate(zip(sam3_masks_np, sam3_scores, sam3_precisions)):
