@@ -12,6 +12,100 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from task.base_task import BaseTask
 
 
+def _try_patch_roi_align_for_npu() -> bool:
+    """Monkey-patch torchvision.ops.roi_align with the NPU-native implementation.
+
+    Background
+    ----------
+    SAM3's mask decoder calls torchvision.ops.roi_align internally.  On Ascend
+    NPU this operator is not natively supported by torch_npu and falls back to
+    CPU, forcing an NPU→CPU→NPU round-trip on every forward pass.
+
+    torch_npu exposes torch_npu.npu_roi_align which runs natively on NPU, but
+    its call signature differs from torchvision's:
+
+        torchvision.ops.roi_align(input, boxes, output_size,
+                                  spatial_scale, sampling_ratio, aligned)
+
+        torch_npu.npu_roi_align(features, rois,          # (K,5) tensor
+                                spatial_scale,
+                                pooled_height, pooled_width,
+                                sample_num, roi_end_mode)
+
+    This function installs a thin wrapper that bridges the two signatures.
+    It is called once at module import time and is a no-op when torch_npu is
+    absent or the patch has already been applied.
+
+    Returns True if the patch was applied, False otherwise.
+    """
+    try:
+        import torchvision.ops as _tvops
+        import torch_npu  # noqa: F401 – presence check only
+        _npu_roi_align_fn = torch_npu.npu_roi_align
+    except (ImportError, AttributeError):
+        return False
+
+    if getattr(_tvops.roi_align, "_npu_patched", False):
+        return True  # already patched in a previous call
+
+    _original_roi_align = _tvops.roi_align
+
+    def _roi_align_npu(
+        input, boxes, output_size,
+        spatial_scale=1.0, sampling_ratio=-1, aligned=False
+    ):
+        # Normalise output_size to (pooled_h, pooled_w)
+        if isinstance(output_size, (int, float)):
+            pooled_h = pooled_w = int(output_size)
+        else:
+            pooled_h, pooled_w = int(output_size[0]), int(output_size[1])
+
+        # torchvision accepts boxes as List[Tensor[K,4]] or Tensor[K,5].
+        # torch_npu.npu_roi_align requires Tensor[K,5] where col-0 is batch index.
+        if isinstance(boxes, (list, tuple)):
+            parts = []
+            for batch_idx, b in enumerate(boxes):
+                idx_col = b.new_full((b.shape[0], 1), batch_idx)
+                parts.append(torch.cat([idx_col, b], dim=1))
+            rois = torch.cat(parts, dim=0)
+        else:
+            rois = boxes  # already (K,5)
+
+        # aligned=True ↔ roi_end_mode=1  (half-pixel offset)
+        roi_end_mode = 1 if aligned else 0
+
+        try:
+            return _npu_roi_align_fn(
+                input, rois, spatial_scale,
+                pooled_h, pooled_w,
+                sampling_ratio, roi_end_mode,
+            )
+        except Exception:
+            # Safety fallback: if the NPU version fails for any reason,
+            # use the original CPU-backed torchvision implementation.
+            return _original_roi_align(
+                input, boxes, output_size, spatial_scale, sampling_ratio, aligned
+            )
+
+    _roi_align_npu._npu_patched = True
+    _tvops.roi_align = _roi_align_npu
+
+    # Also patch the functional reference inside torchvision.ops.poolers if
+    # it was already imported (some versions cache a local reference).
+    try:
+        import torchvision.ops.poolers as _poolers
+        if hasattr(_poolers, "roi_align"):
+            _poolers.roi_align = _roi_align_npu
+    except (ImportError, AttributeError):
+        pass
+
+    return True
+
+
+# Apply the patch at import time so it is in place before any SAM3 model is loaded.
+_NPU_ROI_ALIGN_PATCHED = _try_patch_roi_align_for_npu()
+
+
 def _validate_model_path(model_name_or_path: str) -> None:
     is_local = (
         os.path.isabs(model_name_or_path)
@@ -365,9 +459,13 @@ class Sam3Refiner(BaseTask):
             for _ in range(replicas_per_device):
                 proc, model = _load_sam3_replica(segmenter_model, {}, dev)
                 if not logged:
+                    roi_align_info = (
+                        "roi_align=NPU" if _NPU_ROI_ALIGN_PATCHED else "roi_align=CPU-fallback"
+                    )
                     print(
                         f"[Sam3Refiner] Sam3Model on {dev} | "
-                        f"min_coverage={self.min_coverage:.2f}"
+                        f"min_coverage={self.min_coverage:.2f} | "
+                        f"{roi_align_info}"
                     )
                     logged = True
                 model.eval()
