@@ -59,7 +59,7 @@ def _load_sam3_image_model(segmenter_model, torch_dtype, device):
         proc = Sam3Processor.from_pretrained(segmenter_model)
         model = Sam3Model.from_pretrained(segmenter_model, **load_kwargs).to(device)
         suppress_ctx.__exit__(None, None, None)
-        return proc, model, "Sam3Model"
+        return proc, model, "image"
     except (ImportError, AttributeError, OSError, ValueError):
         # OSError/ValueError: model_type mismatch with Sam3Model (sam3_video config)
         # — fall back to tracker variant which accepts the shared checkpoint.
@@ -70,20 +70,9 @@ def _load_sam3_image_model(segmenter_model, torch_dtype, device):
     proc = Sam3TrackerProcessor.from_pretrained(segmenter_model)
     model = Sam3TrackerModel.from_pretrained(segmenter_model, **load_kwargs).to(device)
     suppress_ctx.__exit__(None, None, None)
-    return proc, model, "Sam3TrackerModel (fallback)"
+    return proc, model, "tracker"
 
 
-def _post_process_pred_masks(processor, pred_masks, original_sizes):
-    """Sam3TrackerProcessor vs Sam3Processor mask upscaling (see sam3_refiner)."""
-    masks = pred_masks.cpu() if hasattr(pred_masks, "cpu") else pred_masks
-    if hasattr(processor, "post_process_masks"):
-        return processor.post_process_masks(masks, original_sizes)
-    image_processor = getattr(processor, "image_processor", None)
-    if image_processor is not None and hasattr(image_processor, "post_process_masks"):
-        return image_processor.post_process_masks(masks, original_sizes)
-    raise AttributeError(
-        f"{type(processor).__name__} has no post_process_masks."
-    )
 
 
 class Localizer(BaseTask):
@@ -109,10 +98,11 @@ class Localizer(BaseTask):
         self.detector = AutoModelForZeroShotObjectDetection.from_pretrained(grounding_model).to(device)
 
         # SAM3 image predictor — loads Sam3Model if available, else Sam3TrackerModel
-        self.seg_processor, self.seg_model, _variant = _load_sam3_image_model(
+        self.seg_processor, self.seg_model, self._sam3_variant = _load_sam3_image_model(
             segmenter_model, torch_dtype, device
         )
-        print(f"[Localizer] SAM3 loaded as {_variant} on {device}")
+        print(f"[Localizer] SAM3 loaded as {type(self.seg_model).__name__} "
+              f"({self._sam3_variant}) on {device}")
         self.seg_model.eval()
 
         self.output_dir = args.get("output_dir")
@@ -160,25 +150,20 @@ class Localizer(BaseTask):
         # Merge overlapping boxes with same tag
         det_boxes, det_tags = merge_overlapping_boxes(det_tags, det_boxes, overlap_threshold=0.8)
 
-        # SAM3 Tracker: pass detected boxes as per-object prompts.
-        # input_boxes format: [batch=1, num_objects=N, 4]
-        seg_inputs = self.seg_processor(
-            images=image,
-            input_boxes=[det_boxes.tolist()],
-            return_tensors="pt",
-        ).to(self.device)
+        from task.localization.sam3_refiner import _forward_box_prompts
 
-        with torch.no_grad():
-            seg_outputs = self.seg_model(**seg_inputs, multimask_output=False)
+        pred_masks, scores = _forward_box_prompts(
+            self.seg_processor,
+            self.seg_model,
+            self._sam3_variant,
+            image,
+            [det_boxes],
+            self.device,
+            min_score=0.6,
+        )[0]
 
-        # post_process_masks → (N, 1, H, W) tensor; iou_scores → (1, N, 1)
-        pred_masks = _post_process_pred_masks(
-            self.seg_processor, seg_outputs.pred_masks, seg_inputs["original_sizes"]
-        )[0]  # (N, 1, H, W) tensor
-        scores = seg_outputs.iou_scores[0, :, 0].cpu().numpy()  # (N,)
-
-        # Filter by confidence score (same threshold as Sam3Refiner.MIN_SCORE)
-        keep = [i for i, score in enumerate(scores) if score >= 0.6]
+        min_score = 0.0 if self._sam3_variant == "image" else 0.6
+        keep = [i for i, score in enumerate(scores) if float(score) >= min_score]
         if len(keep) == 0:
             return None
 

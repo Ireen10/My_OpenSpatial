@@ -63,7 +63,7 @@ def _load_sam3_replica(segmenter_model: str, load_kwargs: dict, device: str):
         proc = Sam3Processor.from_pretrained(segmenter_model)
         model = Sam3Model.from_pretrained(segmenter_model, **load_kwargs).to(device)
         suppress.__exit__(None, None, None)
-        return proc, model
+        return proc, model, "image"
     except (ImportError, AttributeError, OSError, ValueError):
         # ImportError/AttributeError: class not available in this transformers version.
         # OSError/ValueError: model_type mismatch or config incompatibility with
@@ -74,26 +74,77 @@ def _load_sam3_replica(segmenter_model: str, load_kwargs: dict, device: str):
     proc = Sam3TrackerProcessor.from_pretrained(segmenter_model)
     model = Sam3TrackerModel.from_pretrained(segmenter_model, **load_kwargs).to(device)
     suppress.__exit__(None, None, None)
-    return proc, model
+    return proc, model, "tracker"
 
 
-def _post_process_pred_masks(processor, pred_masks, original_sizes):
-    """Upscale low-res masks to original image size.
+def _target_sizes_from_inputs(inputs) -> list:
+    sizes = inputs["original_sizes"]
+    if hasattr(sizes, "tolist"):
+        return sizes.tolist()
+    return list(sizes)
 
-    Sam3TrackerProcessor exposes ``post_process_masks`` on the processor itself.
-    Sam3Processor only has it on ``processor.image_processor`` — calling
-    ``processor.post_process_masks`` raises AttributeError.
+
+def _filter_masks_from_scores(pred_masks, scores, min_score: float, min_pixels: int):
+    """Apply score + pixel-count filters; return (masks, keep_indices)."""
+    refined, keep_indices = [], []
+    for i, score in enumerate(scores):
+        if float(score) < min_score:
+            continue
+        arr = pred_masks[i]
+        if hasattr(arr, "numpy"):
+            arr = arr.numpy()
+        if arr.ndim == 3:
+            arr = arr[0]
+        if np.sum(arr) > min_pixels:
+            refined.append(arr)
+            keep_indices.append(i)
+    return refined, keep_indices
+
+
+def _forward_box_prompts(processor, model, variant: str, images, boxes_per_image: list,
+                         device: str, min_score: float):
+    """Run one SAM3 forward for box prompts; return list of (masks_tensor, scores).
+
+    Follows HuggingFace docs:
+    - Sam3Model: ``post_process_instance_segmentation`` (box + input_boxes_labels)
+    - Sam3Tracker: ``multimask_output=False`` + ``post_process_masks`` on full batch
     """
-    masks = pred_masks.cpu() if hasattr(pred_masks, "cpu") else pred_masks
-    if hasattr(processor, "post_process_masks"):
-        return processor.post_process_masks(masks, original_sizes)
-    image_processor = getattr(processor, "image_processor", None)
-    if image_processor is not None and hasattr(image_processor, "post_process_masks"):
-        return image_processor.post_process_masks(masks, original_sizes)
-    raise AttributeError(
-        f"{type(processor).__name__} has no post_process_masks "
-        "(expected Sam3TrackerProcessor or Sam3Processor with image_processor)."
-    )
+    input_boxes = [b.tolist() if hasattr(b, "tolist") else list(b) for b in boxes_per_image]
+    proc_kwargs = dict(images=images, input_boxes=input_boxes, return_tensors="pt")
+    if variant == "image":
+        proc_kwargs["input_boxes_labels"] = [[1] * len(b) for b in input_boxes]
+
+    inputs = processor(**proc_kwargs).to(device)
+    n_per_image = [len(b) for b in input_boxes]
+    target_sizes = _target_sizes_from_inputs(inputs)
+
+    with torch.no_grad():
+        if variant == "tracker":
+            outputs = model(**inputs, multimask_output=False)
+        else:
+            outputs = model(**inputs)
+
+    per_image = []
+    if variant == "tracker":
+        # Official tracker batch: one post_process_masks call on full pred_masks tensor.
+        all_masks = processor.post_process_masks(
+            outputs.pred_masks.cpu(), inputs["original_sizes"]
+        )
+        for i, n_boxes in enumerate(n_per_image):
+            scores = outputs.iou_scores[i, :n_boxes, 0].cpu().numpy()
+            per_image.append((all_masks[i], scores))
+    else:
+        # Official Sam3Model box path (transformers model_doc/sam3).
+        seg = processor.post_process_instance_segmentation(
+            outputs,
+            threshold=min_score,
+            mask_threshold=0.5,
+            target_sizes=target_sizes,
+        )
+        for item in seg:
+            per_image.append((item["masks"], item["scores"].cpu().numpy()))
+
+    return per_image
 
 
 class Sam3Refiner(BaseTask):
@@ -153,8 +204,8 @@ class Sam3Refiner(BaseTask):
         torch_dtype = getattr(torch, torch_dtype_str) if torch_dtype_str else None
 
         # ── Build replica pool ───────────────────────────────────────────────
-        # Each entry in the pool is a (processor, model, device) tuple.
-        # Workers acquire a replica with queue.get(), release with queue.put().
+        # Each entry: (processor, model, device, variant) with variant in
+        # {"image", "tracker"} — selects the official HF post-processing path.
         replicas_per_device = int(args.get("replicas_per_device", 1))
         self._replica_pool: queue.Queue = queue.Queue()
 
@@ -165,14 +216,14 @@ class Sam3Refiner(BaseTask):
         _variant_logged = False
         for dev in devices:
             for _ in range(replicas_per_device):
-                proc, model = _load_sam3_replica(segmenter_model, load_kwargs, dev)
+                proc, model, variant = _load_sam3_replica(segmenter_model, load_kwargs, dev)
                 if not _variant_logged:
                     _cls = type(model).__name__
-                    print(f"[Sam3Refiner] SAM3 loaded as {_cls} on {dev} "
+                    print(f"[Sam3Refiner] SAM3 loaded as {_cls} ({variant}) on {dev} "
                           f"(dtype={torch_dtype or 'float32'})")
                     _variant_logged = True
                 model.eval()
-                self._replica_pool.put((proc, model, dev))
+                self._replica_pool.put((proc, model, dev, variant))
 
         # ── Auto-configure multi-processing when multiple replicas exist ─────
         total_replicas = len(devices) * replicas_per_device
@@ -209,7 +260,7 @@ class Sam3Refiner(BaseTask):
         return arr[0] if arr.ndim == 3 else arr
 
     def refine_masks(self, image, masks):
-        """Re-segment each mask region using SAM3 Tracker box prompts.
+        """Re-segment each mask region using SAM3 box prompts (HF official API).
 
         Thread-safe: acquires a dedicated (processor, model) replica from the
         pool for the duration of the forward pass, then returns it.
@@ -225,43 +276,22 @@ class Sam3Refiner(BaseTask):
         """
         input_boxes_np = self._masks_to_bboxes(masks)
 
-        # Sam3TrackerProcessor expects input_boxes as [batch, num_objects, 4]
-        input_boxes_list = [input_boxes_np.tolist()]
-
-        # Acquire a free replica; blocks if all replicas are in use by other threads.
-        processor, model, dev = self._replica_pool.get()
+        processor, model, dev, variant = self._replica_pool.get()
         try:
-            inputs = processor(
-                images=image,
-                input_boxes=input_boxes_list,
-                return_tensors="pt",
-            ).to(dev)
-
-            with torch.no_grad():
-                outputs = model(**inputs, multimask_output=False)
-
-            # post_process_masks returns a list of tensors (one per image in batch).
-            # Each tensor has shape (num_objects, num_candidates, H, W).
-            # With multimask_output=False, num_candidates=1.
-            pred_masks = _post_process_pred_masks(
-                processor, outputs.pred_masks, inputs["original_sizes"]
-            )[0]  # (N, 1, H, W) tensor
-
-            # iou_scores shape: (batch=1, num_objects, num_candidates=1)
-            scores = outputs.iou_scores[0, :, 0].cpu().numpy()  # (N,)
+            pred_masks, scores = _forward_box_prompts(
+                processor, model, variant, image, [input_boxes_np], dev, self.MIN_SCORE
+            )[0]
         finally:
-            # Always return the replica so other threads are not starved.
-            self._replica_pool.put((processor, model, dev))
+            self._replica_pool.put((processor, model, dev, variant))
 
-        # Two-pass filtering: score threshold, then minimum pixel count
-        refined, keep_indices = [], []
-        for i, score in enumerate(scores):
-            if score < self.MIN_SCORE:
-                continue
-            arr = self._squeeze_mask(pred_masks[i].numpy())  # (H, W) bool/float
-            if np.sum(arr) > self.MIN_MASK_PIXELS:
-                refined.append(arr)
-                keep_indices.append(i)
+        if variant == "image":
+            refined, keep_indices = _filter_masks_from_scores(
+                pred_masks, scores, 0.0, self.MIN_MASK_PIXELS
+            )
+        else:
+            refined, keep_indices = _filter_masks_from_scores(
+                pred_masks, scores, self.MIN_SCORE, self.MIN_MASK_PIXELS
+            )
 
         if not keep_indices:
             return [], [], []
@@ -280,49 +310,36 @@ class Sam3Refiner(BaseTask):
             Entries with no surviving masks have ([], [], []).
         """
         batch_images = []
-        batch_input_boxes = []
+        boxes_per_image = []
         for image, masks in images_masks_list:
-            boxes_np = self._masks_to_bboxes(masks)
             batch_images.append(image)
-            # Multi-image batch: [image][box][x1,y1,x2,y2] (3 levels).
-            # Do NOT wrap again — [boxes_np.tolist()] adds a 4th level and breaks the processor.
-            batch_input_boxes.append(boxes_np.tolist())
+            boxes_per_image.append(self._masks_to_bboxes(masks))
 
-        processor, model, dev = self._replica_pool.get()
+        processor, model, dev, variant = self._replica_pool.get()
         try:
-            inputs = processor(
-                images=batch_images,
-                input_boxes=batch_input_boxes,
-                return_tensors="pt",
-            ).to(dev)
-
-            with torch.no_grad():
-                outputs = model(**inputs, multimask_output=False)
-
-            # post_process_masks returns list[Tensor(N_i, 1, H_i, W_i)], one per image
-            all_pred_masks = _post_process_pred_masks(
-                processor, outputs.pred_masks, inputs["original_sizes"]
-            )
-
-            # iou_scores: (B, max_N, 1) — slice to actual N per image after unpadding
-            all_scores = [
-                outputs.iou_scores[i, : all_pred_masks[i].shape[0], 0].cpu().numpy()
-                for i in range(len(batch_images))
-            ]
+            # Sam3Tracker batch requires the same box count per image (HF docs).
+            n_boxes = [len(b) for b in boxes_per_image]
+            if variant == "tracker" and len(set(n_boxes)) > 1:
+                per_image = []
+                for image, boxes_np in zip(batch_images, boxes_per_image):
+                    per_image.extend(
+                        _forward_box_prompts(
+                            processor, model, variant, image, [boxes_np], dev, self.MIN_SCORE
+                        )
+                    )
+            else:
+                per_image = _forward_box_prompts(
+                    processor, model, variant, batch_images, boxes_per_image, dev, self.MIN_SCORE
+                )
         finally:
-            self._replica_pool.put((processor, model, dev))
+            self._replica_pool.put((processor, model, dev, variant))
 
         results = []
-        for pred_masks, scores in zip(all_pred_masks, all_scores):
-            refined, keep_indices = [], []
-            for i, score in enumerate(scores):
-                if score < self.MIN_SCORE:
-                    continue
-                arr = self._squeeze_mask(pred_masks[i].numpy())
-                if np.sum(arr) > self.MIN_MASK_PIXELS:
-                    refined.append(arr)
-                    keep_indices.append(i)
-
+        min_score = 0.0 if variant == "image" else self.MIN_SCORE
+        for pred_masks, scores in per_image:
+            refined, keep_indices = _filter_masks_from_scores(
+                pred_masks, scores, min_score, self.MIN_MASK_PIXELS
+            )
             if keep_indices:
                 bboxes_2d = self._masks_to_bboxes([m.astype(bool) for m in refined]).tolist()
                 results.append((refined, bboxes_2d, keep_indices))
