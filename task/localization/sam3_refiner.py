@@ -228,31 +228,35 @@ def _match_proposals_to_boxes(
     h: int,
     w: int,
     min_coverage: float = 0.05,
-) -> tuple[list[np.ndarray], list[float]]:
+) -> tuple[list[np.ndarray], list[float], list[float]]:
     """Match SAM3 proposals to input boxes by ROI coverage (vectorised).
 
     SAM3 is a DETR-style video model with ~200 fixed query slots.  It always
     returns ~200 proposals regardless of how many box prompts were given, so
     seg_masks[k] does NOT correspond to input box k.
 
-    For each input box we find the proposal whose binary mask maximally covers
-    the box region:
-        coverage = pixels_of_proposal_inside_box / box_area
+    For each input box, the proposal with the highest *coverage* is selected:
+        coverage  = intersection / box_area   (recall  — how much of the box)
+        precision = intersection / mask_pixels (purity  — how much of the mask
+                                                is inside the box)
 
-    If the best coverage for a box is below `min_coverage` (default 5 %) the
-    box is considered unmatched and gets an empty mask.
+    If the best coverage is below `min_coverage` (default 5 %) the box is
+    considered unmatched and receives an empty mask with zero scores.
 
-    Returns (masks_out, coverages_out) — both length == len(boxes).
+    Returns (masks_out, coverages_out, precisions_out) — all length == len(boxes).
     """
     if not proposals:
         empty = np.zeros((h, w), dtype=np.float32)
-        return [empty] * len(boxes), [0.0] * len(boxes)
+        n = len(boxes)
+        return [empty] * n, [0.0] * n, [0.0] * n
 
     # Stack all proposals into a bool array (N_prop, H, W) once
     prop_bin = np.stack([(p > 0.5) for p in proposals])  # bool (N_prop, H, W)
+    prop_pixels = prop_bin.sum(axis=(1, 2)).astype(np.float32)  # (N_prop,)
 
     masks_out: list[np.ndarray] = []
     coverages_out: list[float] = []
+    precisions_out: list[float] = []
 
     for box in boxes:
         x1, y1 = max(0, int(box[0])), max(0, int(box[1]))
@@ -262,22 +266,28 @@ def _match_proposals_to_boxes(
         if x2 <= x1 or y2 <= y1:
             masks_out.append(np.zeros((h, w), dtype=np.float32))
             coverages_out.append(0.0)
+            precisions_out.append(0.0)
             continue
 
-        # coverage[k] = fraction of box area covered by proposal k
-        roi_hits = prop_bin[:, y1:y2, x1:x2].sum(axis=(1, 2))  # (N_prop,)
-        coverage = roi_hits / box_area  # (N_prop,)
+        roi_hits = prop_bin[:, y1:y2, x1:x2].sum(axis=(1, 2))  # (N_prop,) intersections
+        coverage = roi_hits / box_area                           # recall  per proposal
 
         best_k = int(coverage.argmax())
         best_cov = float(coverage[best_k])
+        best_hits = float(roi_hits[best_k])
+        best_mask_px = max(float(prop_pixels[best_k]), 1.0)
+        best_prec = best_hits / best_mask_px  # precision of the chosen proposal
 
         if best_cov < min_coverage:
             masks_out.append(np.zeros((h, w), dtype=np.float32))
+            coverages_out.append(best_cov)
+            precisions_out.append(best_prec)
         else:
             masks_out.append(proposals[best_k].astype(np.float32))
-        coverages_out.append(best_cov)
+            coverages_out.append(best_cov)
+            precisions_out.append(best_prec)
 
-    return masks_out, coverages_out
+    return masks_out, coverages_out, precisions_out
 
 
 def _infer_refiner(processor, model, device, images, boxes_per_image, texts_per_image):
@@ -347,14 +357,15 @@ def _infer_refiner(processor, model, device, images, boxes_per_image, texts_per_
 
         proposals = [_extract_mask(seg_masks_raw[k]) for k in range(n_proposals)]
 
-        masks_out, coverages_out = _match_proposals_to_boxes(
+        masks_out, coverages_out, precisions_out = _match_proposals_to_boxes(
             proposals, boxes, h_px, w_px
         )
 
-        cov_np = np.array(coverages_out, dtype=np.float32)
+        cov_np  = np.array(coverages_out,  dtype=np.float32)
+        prec_np = np.array(precisions_out, dtype=np.float32)
         _log_score_stats(cov_np, n_boxes=len(boxes))
 
-        per_image[orig_idx] = (masks_out, cov_np)
+        per_image[orig_idx] = (masks_out, cov_np, prec_np)
 
     return per_image
 
@@ -377,20 +388,34 @@ def _filter_by_pixels(pred_masks, min_pixels: int):
 
 
 def _filter_by_pixels_and_coverage(
-    pred_masks, coverages, min_pixels: int, min_coverage: float
+    pred_masks,
+    coverages,
+    precisions,
+    min_pixels: int,
+    min_coverage: float,
+    min_precision: float,
 ):
-    """Combined quality gate: mask must pass both pixel-count AND coverage thresholds.
+    """Combined quality gate using three complementary metrics.
 
-    Why two gates are necessary:
-    - min_pixels alone accepts any large mask regardless of whether it lands on
-      the right object (a 30 000-px wall segment could pass).
-    - min_coverage alone accepts any mask that overlaps the box, even if the
-      mask itself has only a handful of pixels.
-    Together they require: the mask is non-trivially large AND it genuinely
-    overlaps the input box by at least min_coverage of the box's area.
+    coverage  = intersection / box_area
+        "what fraction of the box is covered by the mask?"
+        Low  → mask too small or accidentally overlaps the wrong place.
+
+    precision = intersection / mask_pixels
+        "what fraction of the mask falls inside the box?"
+        Low  → mask has drifted far outside the box region (e.g. a wall
+        segment that barely clips the box corner can score coverage=0.09
+        but has precision=0.05 — correctly rejected here).
+
+    min_pixels
+        Absolute lower bound; prevents near-empty masks from passing
+        even with high coverage/precision ratios on tiny intersections.
+
+    All three must pass simultaneously.
     """
     refined, keep_indices = [], []
-    cov_arr = np.asarray(coverages, dtype=np.float32) if len(coverages) else np.array([])
+    cov_arr  = np.asarray(coverages,   dtype=np.float32) if len(coverages)   else np.array([])
+    prec_arr = np.asarray(precisions,  dtype=np.float32) if len(precisions)  else np.array([])
     for i, arr in enumerate(pred_masks):
         if hasattr(arr, "float"):
             arr = arr.float()
@@ -400,8 +425,11 @@ def _filter_by_pixels_and_coverage(
             arr = arr.numpy()
         if arr.ndim == 3:
             arr = arr[0]
-        cov = float(cov_arr[i]) if i < len(cov_arr) else 0.0
-        if np.sum(arr) > min_pixels and cov >= min_coverage:
+        if np.sum(arr > 0.5) <= min_pixels:
+            continue
+        cov  = float(cov_arr[i])  if i < len(cov_arr)  else 0.0
+        prec = float(prec_arr[i]) if i < len(prec_arr) else 0.0
+        if cov >= min_coverage and prec >= min_precision:
             refined.append(arr)
             keep_indices.append(i)
     return refined, keep_indices
@@ -432,7 +460,8 @@ class Sam3Refiner(BaseTask):
     #
     #   MIN_MASK_PIXELS – sanity check: a mask with < 20 px is effectively
     #                   empty regardless of coverage.
-    MIN_COVERAGE = 0.10
+    MIN_COVERAGE   = 0.10   # min fraction of box area covered by matched mask
+    MIN_PRECISION  = 0.40   # min fraction of matched mask that lies inside the box
     MIN_MASK_PIXELS = 20
 
     def __init__(self, args, device=None):
@@ -447,8 +476,9 @@ class Sam3Refiner(BaseTask):
             devices = [d.strip() for d in str(device_raw).split(",")]
         self.device = devices[0]
 
-        self.min_coverage = float(args.get("min_coverage", self.MIN_COVERAGE))
-        self.min_mask_pixels = int(args.get("min_mask_pixels", self.MIN_MASK_PIXELS))
+        self.min_coverage    = float(args.get("min_coverage",    self.MIN_COVERAGE))
+        self.min_precision   = float(args.get("min_precision",   self.MIN_PRECISION))
+        self.min_mask_pixels = int(  args.get("min_mask_pixels", self.MIN_MASK_PIXELS))
 
         replicas_per_device = int(args.get("replicas_per_device", 1))
         self._replica_pool: queue.Queue = queue.Queue()
@@ -463,6 +493,7 @@ class Sam3Refiner(BaseTask):
                     print(
                         f"[Sam3Refiner] Sam3Model on {dev} | "
                         f"min_coverage={self.min_coverage:.2f} "
+                        f"min_precision={self.min_precision:.2f} "
                         f"min_mask_pixels={self.min_mask_pixels} | "
                         f"{roi_align_info}"
                     )
@@ -505,9 +536,10 @@ class Sam3Refiner(BaseTask):
 
     def _results_from_infer(self, per_image):
         out = []
-        for pred_masks, coverages in per_image:
+        for pred_masks, coverages, precisions in per_image:
             refined, keep_indices = _filter_by_pixels_and_coverage(
-                pred_masks, coverages, self.min_mask_pixels, self.min_coverage
+                pred_masks, coverages, precisions,
+                self.min_mask_pixels, self.min_coverage, self.min_precision,
             )
             if keep_indices:
                 bboxes = self._masks_to_bboxes([m.astype(bool) for m in refined]).tolist()

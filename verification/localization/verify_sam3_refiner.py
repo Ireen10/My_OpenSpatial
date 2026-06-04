@@ -149,7 +149,8 @@ def _side_by_side(*panels: Image.Image, gap: int = 6) -> Image.Image:
 def diagnose_sample(row: dict, data_root: Path | None,
                     processor, model, device: str,
                     output_dir: Path, rank: int,
-                    min_coverage: float = 0.10) -> dict:
+                    min_coverage: float = 0.10,
+                    min_precision: float = 0.40) -> dict:
     """
     Run one sample through the full refiner chain and save a 3-panel image:
       [original + coarse masks + bboxes] | [SAM3 output masks] | [score table]
@@ -260,19 +261,20 @@ def diagnose_sample(row: dict, data_root: Path | None,
     # min_coverage=0.0 here so we always display the best match regardless of
     # threshold — the summary table shows how many would survive the real gate.
     proposals = [_extract_mask(seg_masks_raw[k]) for k in range(n_proposals)]
-    sam3_masks_np, sam3_scores = _match_proposals_to_boxes(
+    sam3_masks_np, sam3_scores, sam3_precisions = _match_proposals_to_boxes(
         proposals, boxes, h_px, w_px, min_coverage=0.0
     )
 
-    for k, (m, cov) in enumerate(zip(sam3_masks_np, sam3_scores)):
+    for k, (m, cov, prec) in enumerate(zip(sam3_masks_np, sam3_scores, sam3_precisions)):
         px = int((m > 0.5).sum())
         tag = tags[k] if k < len(tags) else "?"
         box = boxes[k]
         box_area = max(int((box[2] - box[0]) * (box[3] - box[1])), 1)
-        verdict = "KEEP" if (cov >= min_coverage and px > 20) else "DROP"
+        keeps = cov >= min_coverage and prec >= min_precision and px > 20
+        verdict = "KEEP" if keeps else "DROP"
         print(f"    [{k}] {tag:20s}  coverage={cov:.3f} "
-              f"({int(cov*box_area)}/{box_area}px covered)  "
-              f"mask_pixels={px}  [{verdict}]")
+              f"({int(cov*box_area)}/{box_area}px)  "
+              f"precision={prec:.3f}  mask_pixels={px}  [{verdict}]")
 
     # ── Panel 2: SAM3 output (coverage-matched) ──────────────────────────────
     panel_sam3 = _draw_sam3_masks(
@@ -292,7 +294,7 @@ def diagnose_sample(row: dict, data_root: Path | None,
         "n_boxes": len(boxes),
         "n_proposals": n_proposals,
         "coverages": sam3_scores,
-        "min_coverage_used": min_coverage,
+        "precisions": sam3_precisions,
     }
 
 
@@ -320,10 +322,14 @@ def parse_args():
                    help="if set, sample randomly instead of sequentially")
     p.add_argument(
         "--min_coverage", type=float, default=0.10,
-        help="ROI-coverage threshold: matched mask must cover at least this "
-             "fraction of the input box area to be kept (mirrors "
-             "Sam3Refiner.MIN_COVERAGE / YAML min_coverage). "
-             "E.g. 0.10 = 10%%. Set to 0.0 to show all matches in diagnostics.",
+        help="Recall gate: matched mask must cover ≥ this fraction of the box "
+             "area (mirrors Sam3Refiner.MIN_COVERAGE). Set 0.0 to show all.",
+    )
+    p.add_argument(
+        "--min_precision", type=float, default=0.40,
+        help="Purity gate: at least this fraction of the matched mask must lie "
+             "inside the box (mirrors Sam3Refiner.MIN_PRECISION). "
+             "Rejects masks that drift far outside the box region.",
     )
     return p.parse_args()
 
@@ -361,7 +367,8 @@ def main():
         print(f"\n[{rank+1}/{len(indices)}] row={row_idx}")
         r = diagnose_sample(row, args.data_root, processor, model, device,
                             args.output_dir, rank,
-                            min_coverage=args.min_coverage)
+                            min_coverage=args.min_coverage,
+                            min_precision=args.min_precision)
         results.append(r)
 
     # ── Summary ───────────────────────────────────────────────────────────────
@@ -376,14 +383,25 @@ def main():
         print(f"  Total boxes         : {sum(r['n_boxes'] for r in ok)}")
         print(f"  Total SAM3 proposals: {total_proposals}")
         if all_cov:
-            thr = args.min_coverage
-            kept = sum(1 for c in all_cov if c >= thr)
-            print(f"  min_coverage used   : {thr:.2f}")
-            print(f"  Coverage range      : {min(all_cov):.3f} – {max(all_cov):.3f}")
-            print(f"  Coverage mean       : {sum(all_cov)/len(all_cov):.3f}")
-            print(f"  Would keep (≥{thr:.0%}) : {kept}/{len(all_cov)}")
-            print(f"  Partial  (5%–{thr:.0%}) : {sum(1 for c in all_cov if 0.05<=c<thr)}/{len(all_cov)}")
-            print(f"  Unmatched (<5%)     : {sum(1 for c in all_cov if c < 0.05)}/{len(all_cov)}")
+            all_prec = [p for r in ok for p in r.get("precisions", [])]
+            cov_thr  = args.min_coverage
+            prec_thr = args.min_precision
+            kept = sum(
+                1 for c, p in zip(all_cov, all_prec)
+                if c >= cov_thr and p >= prec_thr
+            )
+            drop_cov  = sum(1 for c in all_cov if c < cov_thr)
+            drop_prec = sum(
+                1 for c, p in zip(all_cov, all_prec)
+                if c >= cov_thr and p < prec_thr
+            )
+            print(f"  min_coverage used   : {cov_thr:.2f}")
+            print(f"  min_precision used  : {prec_thr:.2f}")
+            print(f"  Coverage  range     : {min(all_cov):.3f} – {max(all_cov):.3f}")
+            print(f"  Precision range     : {min(all_prec):.3f} – {max(all_prec):.3f}  (if any)")
+            print(f"  Would keep (both)   : {kept}/{len(all_cov)}")
+            print(f"  Drop (cov<{cov_thr:.0%})    : {drop_cov}/{len(all_cov)}")
+            print(f"  Drop (prec<{prec_thr:.0%})  : {drop_prec}/{len(all_cov)}")
     print(f"  Outputs saved to    : {args.output_dir.resolve()}")
     print("=" * 60)
     return 0
