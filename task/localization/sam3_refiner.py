@@ -447,10 +447,8 @@ class Sam3Refiner(BaseTask):
             devices = [d.strip() for d in str(device_raw).split(",")]
         self.device = devices[0]
 
-        # Allow YAML to override the class-level default for min_coverage.
-        # Example YAML entry:
-        #   min_coverage: 0.15   # stricter: mask must cover ≥15% of box area
         self.min_coverage = float(args.get("min_coverage", self.MIN_COVERAGE))
+        self.min_mask_pixels = int(args.get("min_mask_pixels", self.MIN_MASK_PIXELS))
 
         replicas_per_device = int(args.get("replicas_per_device", 1))
         self._replica_pool: queue.Queue = queue.Queue()
@@ -464,7 +462,8 @@ class Sam3Refiner(BaseTask):
                     )
                     print(
                         f"[Sam3Refiner] Sam3Model on {dev} | "
-                        f"min_coverage={self.min_coverage:.2f} | "
+                        f"min_coverage={self.min_coverage:.2f} "
+                        f"min_mask_pixels={self.min_mask_pixels} | "
                         f"{roi_align_info}"
                     )
                     logged = True
@@ -508,7 +507,7 @@ class Sam3Refiner(BaseTask):
         out = []
         for pred_masks, coverages in per_image:
             refined, keep_indices = _filter_by_pixels_and_coverage(
-                pred_masks, coverages, self.MIN_MASK_PIXELS, self.min_coverage
+                pred_masks, coverages, self.min_mask_pixels, self.min_coverage
             )
             if keep_indices:
                 bboxes = self._masks_to_bboxes([m.astype(bool) for m in refined]).tolist()

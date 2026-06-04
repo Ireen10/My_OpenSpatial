@@ -36,6 +36,13 @@ pipeline:
 
         segmenter_model: facebook/sam3
 
+        # Quality gates (both must pass for a mask to be kept).
+        # min_coverage: ROI-coverage fraction; matched mask must cover at least
+        #   this fraction of the input box area.  Default 0.10 (10%).
+        # min_mask_pixels: absolute lower bound on mask area.  Default 20.
+        min_coverage: 0.10
+        min_mask_pixels: 20
+
         device: "npu:0,npu:1"
         replicas_per_device: 2       # 2 instances/card (float32)
         use_multi_processing: true
