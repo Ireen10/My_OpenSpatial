@@ -265,8 +265,9 @@ class Sam3Refiner(BaseTask):
         for image, masks in images_masks_list:
             boxes_np = self._masks_to_bboxes(masks)
             batch_images.append(image)
-            # Processor expects [batch_per_image, num_boxes, 4]; outer list = 1 prompt set
-            batch_input_boxes.append([boxes_np.tolist()])
+            # Multi-image batch: [image][box][x1,y1,x2,y2] (3 levels).
+            # Do NOT wrap again — [boxes_np.tolist()] adds a 4th level and breaks the processor.
+            batch_input_boxes.append(boxes_np.tolist())
 
         processor, model, dev = self._replica_pool.get()
         try:
