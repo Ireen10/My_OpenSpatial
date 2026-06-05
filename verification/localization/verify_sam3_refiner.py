@@ -27,7 +27,11 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import warnings
 from pathlib import Path
+
+# Suppress SyntaxWarnings from Ascend CANN internal libraries.
+warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"tbe\..*")
 
 import numpy as np
 import pandas as pd

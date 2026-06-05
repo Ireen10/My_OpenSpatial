@@ -1,6 +1,16 @@
 import queue
 import threading
 import warnings
+
+# Suppress SyntaxWarnings from Ascend CANN internal libraries (invalid escape
+# sequences in tbe/dsl/unify_schedule/**).  These are third-party issues that
+# do not affect correctness and would otherwise pollute every worker's log.
+warnings.filterwarnings(
+    "ignore",
+    category=SyntaxWarning,
+    module=r"tbe\..*",
+)
+
 import numpy as np
 import torch
 from PIL import Image
