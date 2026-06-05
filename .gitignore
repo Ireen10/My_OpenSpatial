@@ -16,6 +16,7 @@ tests/
 .pytest_cache/
 .ipynb_checkpoints/
 temp*/
+kernel_meta/
 fusion_result.json
 
 # Local dataset roots (large; not versioned)
