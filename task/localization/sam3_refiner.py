@@ -22,15 +22,100 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from task.base_task import BaseTask
 
 
-# torchvision.ops.roi_align is not natively supported on Ascend NPU and falls
-# back to CPU automatically (one NPU→CPU→NPU round-trip, ~2 ms / batch).
-# Attempts to replace it with torch_npu.npu_roi_align were abandoned because
-# npu_roi_align does not support batched features [B,C,H,W] — it requires
-# single-image [1,C,H,W] inputs, which forces a Python-level per-image loop
-# with negligible performance gain over the CPU fallback (~1.5% vs ~0.3%).
-# The CPU fallback is safe, correct, and zero-maintenance.
-_NPU_ROI_ALIGN_PATCHED = False
-print("[sam3_refiner] roi_align=CPU-fallback (torchvision)")
+def _try_patch_roi_align_for_npu() -> bool:
+    """Replace torchvision.ops.roi_align with a per-image torch_npu.npu_roi_align loop.
+
+    Why a loop instead of one batched call
+    ----------------------------------------
+    torch_npu.npu_roi_align only accepts features=[1,C,H,W] (single image).
+    Passing [B,C,H,W] with batch_idx > 0 causes either:
+      - vector-core exception 507035, or
+      - >1 EB OOM allocation (internal shape mis-computation / integer overflow).
+
+    Why not the torchvision CPU fallback
+    --------------------------------------
+    On Ascend NPU, torchvision::roi_align has no native kernel and goes through
+    the AICPU path (copy_between_host_and_device_opapi).  In this environment
+    that path raises aicpu exception 507018 and the batch is lost entirely.
+
+    The per-image loop calls npu_roi_align B times with [1,C,H,W] features,
+    matching the documented CANN example exactly.  Each call is tiny (~1 MB),
+    all issued to the same NPU stream, and pipeline-executed without CPU
+    round-trips.  Total overhead: < 0.5 ms per batch (vs. 0 ms if batched
+    worked; vs. total failure with CPU fallback).
+
+    Returns True if the patch was applied, False otherwise.
+    """
+    try:
+        import torchvision.ops as _tvops
+        import torch_npu  # noqa: F401
+        _npu_roi_align_fn = torch_npu.npu_roi_align
+    except (ImportError, AttributeError):
+        return False
+
+    if getattr(_tvops.roi_align, "_npu_patched", False):
+        return True  # already patched
+
+    def _roi_align_npu(
+        input, boxes, output_size,
+        spatial_scale=1.0, sampling_ratio=-1, aligned=False,
+    ):
+        if isinstance(output_size, (int, float)):
+            pooled_h = pooled_w = int(output_size)
+        else:
+            pooled_h, pooled_w = int(output_size[0]), int(output_size[1])
+
+        roi_end_mode  = 1 if aligned else 0
+        npu_sample_num = max(0, sampling_ratio)   # torchvision -1 → CANN 0
+
+        # Split boxes into per-image list.
+        if isinstance(boxes, (list, tuple)):
+            box_list = list(boxes)
+        else:
+            if boxes.shape[0] == 0:
+                return input.new_zeros((0, input.shape[1], pooled_h, pooled_w))
+            box_list = [
+                boxes[boxes[:, 0] == i, 1:] for i in range(input.shape[0])
+            ]
+
+        results = []
+        for i, b in enumerate(box_list):
+            if b.shape[0] == 0:
+                continue
+            feat_i = input[i : i + 1].contiguous()   # [1, C, H, W]
+            rois_i = torch.cat(
+                [b.new_zeros((b.shape[0], 1)), b.float()], dim=1
+            ).contiguous()                            # [K, 5] float32, batch_idx=0
+            results.append(_npu_roi_align_fn(
+                feat_i, rois_i, spatial_scale,
+                pooled_h, pooled_w,
+                npu_sample_num, roi_end_mode,
+            ))
+
+        if not results:
+            return input.new_zeros((0, input.shape[1], pooled_h, pooled_w))
+        return torch.cat(results, dim=0)
+
+    _roi_align_npu._npu_patched = True
+    _tvops.roi_align = _roi_align_npu
+
+    try:
+        import torchvision.ops.poolers as _poolers
+        if hasattr(_poolers, "roi_align"):
+            _poolers.roi_align = _roi_align_npu
+    except (ImportError, AttributeError):
+        pass
+
+    return True
+
+
+# Apply the patch at import time so it is in place before any SAM3 model is loaded.
+_NPU_ROI_ALIGN_PATCHED = _try_patch_roi_align_for_npu()
+print(
+    "[sam3_refiner] roi_align="
+    + ("NPU per-image loop (torch_npu.npu_roi_align)" if _NPU_ROI_ALIGN_PATCHED
+       else "CPU-fallback (torchvision) — WARNING: may fail on Ascend NPU")
+)
 
 
 def _validate_model_path(model_name_or_path: str) -> None:
