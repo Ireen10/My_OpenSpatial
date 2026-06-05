@@ -23,85 +23,75 @@ from task.base_task import BaseTask
 
 
 def _try_patch_roi_align_for_npu() -> bool:
-    """Monkey-patch torchvision.ops.roi_align with the NPU-native implementation.
+    """Monkey-patch torchvision.ops.roi_align with torch_npu.npu_roi_align.
 
-    Background
-    ----------
-    SAM3's mask decoder calls torchvision.ops.roi_align internally.  On Ascend
-    NPU this operator is not natively supported by torch_npu and falls back to
-    CPU, forcing an NPU→CPU→NPU round-trip on every forward pass.
+    API mapping (CANN 8.5.2)
+    -------------------------
+    torchvision.ops.roi_align(input, boxes, output_size,
+                               spatial_scale=1.0, sampling_ratio=-1, aligned=False)
+      boxes: List[Tensor[K,4]] or Tensor[K,5]  (batch_idx, x0, y0, x1, y1)
 
-    torch_npu exposes torch_npu.npu_roi_align which runs natively on NPU, but
-    its call signature differs from torchvision's:
+    torch_npu.npu_roi_align(features, rois, spatial_scale,
+                             pooled_height, pooled_width,
+                             sample_num, roi_end_mode) -> Tensor
+      rois: Tensor[K,5]  (batch_idx float, x0, y0, x1, y1)
 
-        torchvision.ops.roi_align(input, boxes, output_size,
-                                  spatial_scale, sampling_ratio, aligned)
-
-        torch_npu.npu_roi_align(features, rois,          # (K,5) tensor
-                                spatial_scale,
-                                pooled_height, pooled_width,
-                                sample_num, roi_end_mode)
-
-    This function installs a thin wrapper that bridges the two signatures.
-    It is called once at module import time and is a no-op when torch_npu is
-    absent or the patch has already been applied.
+    Key difference that caused the previous AICPU crash (error 507018):
+      torchvision's sampling_ratio=-1 means "auto"; npu_roi_align requires
+      sample_num >= 0 where 0 also means "auto".  Passing -1 triggered a
+      kernel crash that manifested as SIGABRT (uncatchable by Python).
 
     Returns True if the patch was applied, False otherwise.
     """
     try:
         import torchvision.ops as _tvops
-        import torch_npu  # noqa: F401 – presence check only
+        import torch_npu  # noqa: F401
         _npu_roi_align_fn = torch_npu.npu_roi_align
     except (ImportError, AttributeError):
         return False
 
     if getattr(_tvops.roi_align, "_npu_patched", False):
-        return True  # already patched in a previous call
+        return True  # already patched
 
     _original_roi_align = _tvops.roi_align
 
     def _roi_align_npu(
         input, boxes, output_size,
-        spatial_scale=1.0, sampling_ratio=-1, aligned=False
+        spatial_scale=1.0, sampling_ratio=-1, aligned=False,
     ):
-        # Normalise output_size to (pooled_h, pooled_w)
         if isinstance(output_size, (int, float)):
             pooled_h = pooled_w = int(output_size)
         else:
             pooled_h, pooled_w = int(output_size[0]), int(output_size[1])
 
-        # torchvision accepts boxes as List[Tensor[K,4]] or Tensor[K,5].
-        # torch_npu.npu_roi_align requires Tensor[K,5] where col-0 is batch index.
+        # Convert List[Tensor[K,4]] → Tensor[K,5] with float batch_idx column.
         if isinstance(boxes, (list, tuple)):
             parts = []
             for batch_idx, b in enumerate(boxes):
-                idx_col = b.new_full((b.shape[0], 1), batch_idx)
+                if b.shape[0] == 0:
+                    continue
+                idx_col = b.new_full((b.shape[0], 1), float(batch_idx))
                 parts.append(torch.cat([idx_col, b], dim=1))
-            rois = torch.cat(parts, dim=0)
+            rois = torch.cat(parts, dim=0) if parts else input.new_zeros((0, 5))
         else:
             rois = boxes  # already (K,5)
 
-        # aligned=True ↔ roi_end_mode=1  (half-pixel offset)
+        # aligned=True ↔ roi_end_mode=1 (half-pixel offset)
         roi_end_mode = 1 if aligned else 0
 
-        try:
-            return _npu_roi_align_fn(
-                input, rois, spatial_scale,
-                pooled_h, pooled_w,
-                sampling_ratio, roi_end_mode,
-            )
-        except Exception:
-            # Safety fallback: if the NPU version fails for any reason,
-            # use the original CPU-backed torchvision implementation.
-            return _original_roi_align(
-                input, boxes, output_size, spatial_scale, sampling_ratio, aligned
-            )
+        # torchvision uses -1 for "auto sampling"; npu_roi_align uses 0.
+        npu_sample_num = max(0, sampling_ratio)
+
+        return _npu_roi_align_fn(
+            input, rois, spatial_scale,
+            pooled_h, pooled_w,
+            npu_sample_num, roi_end_mode,
+        )
 
     _roi_align_npu._npu_patched = True
     _tvops.roi_align = _roi_align_npu
 
-    # Also patch the functional reference inside torchvision.ops.poolers if
-    # it was already imported (some versions cache a local reference).
+    # Some torchvision versions cache a local reference in poolers module.
     try:
         import torchvision.ops.poolers as _poolers
         if hasattr(_poolers, "roi_align"):
