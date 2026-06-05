@@ -64,7 +64,14 @@ def _try_patch_roi_align_for_npu() -> bool:
         else:
             pooled_h, pooled_w = int(output_size[0]), int(output_size[1])
 
-        # Convert List[Tensor[K,4]] → Tensor[K,5] with float batch_idx column.
+        # aligned=True ↔ roi_end_mode=1 (half-pixel offset)
+        roi_end_mode = 1 if aligned else 0
+
+        # torchvision uses -1 for "auto sampling"; npu_roi_align uses 0.
+        npu_sample_num = max(0, sampling_ratio)
+
+        # Build rois tensor [K, 5]: (batch_idx_float, x0, y0, x1, y1).
+        # Ensure float32 + contiguous — npu_roi_align requires both.
         if isinstance(boxes, (list, tuple)):
             parts = []
             for batch_idx, b in enumerate(boxes):
@@ -72,21 +79,41 @@ def _try_patch_roi_align_for_npu() -> bool:
                     continue
                 idx_col = b.new_full((b.shape[0], 1), float(batch_idx))
                 parts.append(torch.cat([idx_col, b], dim=1))
-            rois = torch.cat(parts, dim=0) if parts else input.new_zeros((0, 5))
+            rois = (
+                torch.cat(parts, dim=0).float().contiguous()
+                if parts else input.new_zeros((0, 5))
+            )
         else:
-            rois = boxes  # already (K,5)
+            rois = boxes.float().contiguous()
 
-        # aligned=True ↔ roi_end_mode=1 (half-pixel offset)
-        roi_end_mode = 1 if aligned else 0
-
-        # torchvision uses -1 for "auto sampling"; npu_roi_align uses 0.
-        npu_sample_num = max(0, sampling_ratio)
-
+        # npu_roi_align has been validated against single-image inputs only.
+        # If multi-image batching (batch_idx > 0) triggers a vector-core
+        # exception again, uncomment _roi_align_npu_loop below and switch to it.
         return _npu_roi_align_fn(
-            input, rois, spatial_scale,
+            input.contiguous(), rois, spatial_scale,
             pooled_h, pooled_w,
             npu_sample_num, roi_end_mode,
         )
+
+    # ---------- fallback: per-image loop (uncomment if batched call fails) -----
+    # def _roi_align_npu(input, boxes, output_size,
+    #                    spatial_scale=1.0, sampling_ratio=-1, aligned=False):
+    #     """Per-image loop — safe when npu_roi_align doesn't support batch_idx>0."""
+    #     pooled_h = pooled_w = int(output_size) if isinstance(output_size, (int, float)) \
+    #                           else (int(output_size[0]), int(output_size[1]))[0]
+    #     pooled_w = pooled_h
+    #     roi_end_mode = 1 if aligned else 0
+    #     npu_sample_num = max(0, sampling_ratio)
+    #     box_list = list(boxes) if isinstance(boxes, (list, tuple)) else [
+    #         boxes[boxes[:, 0] == i, 1:] for i in range(input.shape[0])]
+    #     results = []
+    #     for i, b in enumerate(box_list):
+    #         if b.shape[0] == 0: continue
+    #         rois_i = torch.cat([b.new_zeros((b.shape[0], 1)), b.float()], 1).contiguous()
+    #         results.append(_npu_roi_align_fn(input[i:i+1].contiguous(), rois_i,
+    #                         spatial_scale, pooled_h, pooled_w, npu_sample_num, roi_end_mode))
+    #     return torch.cat(results, 0) if results else input.new_zeros((0, input.shape[1], pooled_h, pooled_w))
+    # --------------------------------------------------------------------------
 
     _roi_align_npu._npu_patched = True
     _tvops.roi_align = _roi_align_npu
@@ -104,6 +131,7 @@ def _try_patch_roi_align_for_npu() -> bool:
 
 # Apply the patch at import time so it is in place before any SAM3 model is loaded.
 _NPU_ROI_ALIGN_PATCHED = _try_patch_roi_align_for_npu()
+print(f"[sam3_refiner] roi_align={'NPU (torch_npu.npu_roi_align)' if _NPU_ROI_ALIGN_PATCHED else 'CPU-fallback (torchvision)'}")
 
 
 def _validate_model_path(model_name_or_path: str) -> None:
@@ -532,15 +560,11 @@ class Sam3Refiner(BaseTask):
             for _ in range(replicas_per_device):
                 proc, model = _load_sam3_replica(segmenter_model, {}, dev)
                 if not logged:
-                    roi_align_info = (
-                        "roi_align=NPU" if _NPU_ROI_ALIGN_PATCHED else "roi_align=CPU-fallback"
-                    )
                     print(
                         f"[Sam3Refiner] Sam3Model on {dev} | "
                         f"min_coverage={self.min_coverage:.2f} "
                         f"min_precision={self.min_precision:.2f} "
-                        f"min_mask_pixels={self.min_mask_pixels} | "
-                        f"{roi_align_info}"
+                        f"min_mask_pixels={self.min_mask_pixels}"
                     )
                     logged = True
                 model.eval()
