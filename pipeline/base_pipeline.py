@@ -123,9 +123,9 @@ class BasePipeline:
         # Build dataset
         self.dataset = build_dataset(self.data_cfg)
 
-        # Debug: truncate dataset when --max_samples is given.
-        # Stored as self.max_samples so every subsequent override_data call can
-        # re-apply the limit (each call reloads from parquet, undoing truncation).
+        # Debug: slice dataset when --start_from / --max_samples are given.
+        # Stored so every subsequent override_data call can re-apply the limits.
+        self.start_from = getattr(cfg, "start_from", 0) or 0
         self.max_samples = getattr(cfg, "max_samples", None)
         self._truncate_dataset_if_needed()
 
@@ -140,13 +140,15 @@ class BasePipeline:
             self._truncate_dataset_if_needed()
 
     def _truncate_dataset_if_needed(self) -> None:
-        """Trim self.dataset.data to self.max_samples rows (no-op when not set)."""
-        if not self.max_samples:
-            return
+        """Apply --start_from / --max_samples slicing (no-op when not set)."""
         full_len = len(self.dataset.data)
-        self.dataset.data = self.dataset.data.iloc[: self.max_samples].reset_index(drop=True)
+        start = self.start_from
+        end = (start + self.max_samples) if self.max_samples else None
+        if not start and end is None:
+            return
+        self.dataset.data = self.dataset.data.iloc[start:end].reset_index(drop=True)
         print(
-            f">>> [debug] max_samples={self.max_samples}: "
+            f">>> [debug] dataset slice [{start}:{end}]: "
             f"using {len(self.dataset.data)}/{full_len} rows."
         )
 

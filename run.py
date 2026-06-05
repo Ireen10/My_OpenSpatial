@@ -116,6 +116,10 @@ def get_config():
         "--max_samples", type=int, default=None,
         help="Debug: truncate input dataset to at most N rows before running the pipeline.",
     )
+    parser.add_argument(
+        "--start_from", type=int, default=0,
+        help="Debug: skip the first N rows of the dataset (useful to reproduce errors at specific offsets).",
+    )
     args = parser.parse_args()
 
     config_dict = _load_yaml_config(args.config)
@@ -125,6 +129,7 @@ def get_config():
     args.output_dir = _normalize_output_dir(args.output_dir)
     config.output_dir = _build_run_output_dir(args.output_dir, config.pipeline.file_name, args.config)
     config.max_samples = args.max_samples
+    config.start_from = args.start_from
     return args, config
 
 

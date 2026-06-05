@@ -82,10 +82,15 @@ def _try_patch_roi_align_for_npu() -> bool:
         for i, b in enumerate(box_list):
             if b.shape[0] == 0:
                 continue
-            feat_i = input[i : i + 1].contiguous()   # [1, C, H, W]
+            # Do NOT call .contiguous() here — on Ascend NPU, calling
+            # .contiguous() on a tensor in NC1HWC0 internal format triggers
+            # AICPU copy_between_host_and_device_opapi, which fails with
+            # aicpu exception 507018.  npu_roi_align accepts non-contiguous
+            # NPU tensors directly.
+            feat_i = input[i : i + 1]                # [1, C, H, W], NPU
             rois_i = torch.cat(
                 [b.new_zeros((b.shape[0], 1)), b.float()], dim=1
-            ).contiguous()                            # [K, 5] float32, batch_idx=0
+            )                                        # [K, 5] float32, NPU
             results.append(_npu_roi_align_fn(
                 feat_i, rois_i, spatial_scale,
                 pooled_h, pooled_w,
@@ -692,7 +697,9 @@ class Sam3Refiner(BaseTask):
                             pbar.update(st["samples"])
                             _log()
                     except Exception as exc:
+                        import traceback as _tb
                         print(f"[WARN] SAM3 batch failed: {exc}")
+                        print(_tb.format_exc())
             pbar.close()
 
         if total_samples > 0 and total_samples % 1000 != 0:
