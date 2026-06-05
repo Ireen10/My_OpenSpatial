@@ -1,7 +1,6 @@
 import queue
 import threading
 import warnings
-from collections import defaultdict
 
 # Suppress SyntaxWarnings from Ascend CANN internal libraries (invalid escape
 # sequences in tbe/dsl/unify_schedule/**).  These are third-party issues that
@@ -26,12 +25,19 @@ from task.base_task import BaseTask
 def _try_patch_roi_align_for_npu() -> bool:
     """Replace torchvision.ops.roi_align with torch_npu.npu_roi_align.
 
-    Parameter mapping:
-      torchvision:  roi_align(input, boxes, output_size, spatial_scale, sampling_ratio, aligned)
-                    boxes: (N,5) tensor [batch_idx, x0, y0, x1, y1]
-      npu_roi_align: (features, rois, spatial_scale, pooled_h, pooled_w, sample_num, roi_end_mode)
-                    rois: (N,5) tensor [batch_idx, x0, y0, x1, y1]  — same layout
-                    sample_num: 0 means adaptive (equivalent to torchvision sampling_ratio=-1)
+    npu_roi_align API (confirmed from CANN docs + example):
+      npu_roi_align(features, rois, spatial_scale, pooled_h, pooled_w,
+                    sample_num, roi_end_mode)
+      features : [1, C, H, W]  — single image only
+      rois     : [N, 5]        — [batch_idx, x0, y0, x1, y1]
+                 batch_idx is always 0 since features is single-image
+
+    torchvision roi_align passes boxes in two formats:
+      a) tuple/list of per-image tensors, each [K_i, 4] (no batch_idx)
+      b) concatenated [N, 5] tensor with batch_idx in column 0
+
+    Both cases are handled by looping over images and calling npu_roi_align
+    once per image with features=[1,C,H,W] and rois=[K_i,5] (batch_idx=0).
     """
     try:
         import torchvision.ops as _tvops
@@ -51,10 +57,36 @@ def _try_patch_roi_align_for_npu() -> bool:
             pooled_h = pooled_w = int(output_size)
         else:
             pooled_h, pooled_w = int(output_size[0]), int(output_size[1])
-        roi_end_mode  = 1 if aligned else 0
+        roi_end_mode   = 1 if aligned else 0
         npu_sample_num = max(0, sampling_ratio)   # torchvision -1 → CANN 0
-        return _npu_fn(input, boxes, spatial_scale, pooled_h, pooled_w,
-                       npu_sample_num, roi_end_mode)
+
+        if isinstance(boxes, (list, tuple)):
+            # Format (a): per-image [K_i, 4] tensors, no batch_idx
+            per_image_boxes = boxes
+        else:
+            # Format (b): concatenated [N, 5] with batch_idx in col 0
+            if boxes.shape[0] == 0:
+                return input.new_zeros((0, input.shape[1], pooled_h, pooled_w))
+            per_image_boxes = [
+                boxes[boxes[:, 0] == i, 1:] for i in range(input.shape[0])
+            ]
+
+        results = []
+        for i, b in enumerate(per_image_boxes):
+            if b.shape[0] == 0:
+                continue
+            # npu_roi_align: features=[1,C,H,W], rois=[K,5] with batch_idx=0
+            rois_i = torch.cat(
+                [b.new_zeros((b.shape[0], 1)), b.float()], dim=1
+            )
+            results.append(_npu_fn(
+                input[i : i + 1], rois_i,
+                spatial_scale, pooled_h, pooled_w, npu_sample_num, roi_end_mode,
+            ))
+
+        if not results:
+            return input.new_zeros((0, input.shape[1], pooled_h, pooled_w))
+        return torch.cat(results, dim=0)
 
     _roi_align_npu._npu_patched = True
     _tvops.roi_align = _roi_align_npu
@@ -299,30 +331,35 @@ def _match_proposals_to_boxes(
     return masks_out, coverages_out, precisions_out
 
 
-def _image_orientation_key(img) -> tuple:
-    """Return (H, W) after the Sam3Processor's aspect-ratio resize.
+def _infer_refiner(processor, model, device, images, boxes_per_image, texts_per_image):
+    """One SAM3 forward for the whole batch; proposals matched to boxes by ROI coverage.
 
-    Sam3ImageProcessor does NOT pad — it resizes the longest side to 1008 and
-    scales the shorter side proportionally.  A batch that mixes landscape
-    (640×480 → 756×1008) and portrait (480×640 → 1008×756) images forces the
-    processor to pad every image to max(H)×max(W) = 1008×1008, inflating the
-    pixel_values tensor by ~33 %.  On a fragmented NPU after many batches this
-    extra allocation causes SUSPECT REMOTE ERROR (507057) in the first Conv2d.
+    SAM3 (sam3_video) is a DETR-style model with ~200 fixed query slots.
+    It ALWAYS returns ~200 proposals per image regardless of how many box
+    prompts are given, so seg_masks[k] does NOT correspond to input box k.
 
-    Grouping images by orientation key avoids mixed-shape batches entirely.
+    Strategy:
+      1. One SAM3 forward pass for all valid images in the batch.
+      2. All ~200 proposals retrieved per image (threshold=0.0).
+      3. For each input box, _match_proposals_to_boxes picks the proposal whose
+         binary mask maximally covers the box's ROI region (vectorised numpy).
+      4. Coverage ratio (0–1) is reported instead of SAM3's own IoU estimate.
     """
-    w, h = (img.size if hasattr(img, "size") else (img.shape[-1], img.shape[-2]))
-    long_side = 1008
-    scale = long_side / max(h, w)
-    return (round(h * scale), round(w * scale))   # (resized_H, resized_W)
+    all_boxes: list[np.ndarray] = []
+    valid_idx: list[int] = []
+    for i, boxes in enumerate(boxes_per_image):
+        b = np.asarray(boxes, dtype=np.float32)
+        if b.ndim == 1:
+            b = b.reshape(1, 4)
+        all_boxes.append(b)
+        if b.shape[0] > 0:
+            valid_idx.append(i)
 
+    per_image: list = [([], [], []) for _ in images]
 
-def _infer_one_orientation_group(
-    processor, model, device,
-    images, all_boxes, valid_idx, texts_per_image,
-    per_image_out,
-):
-    """Run one SAM3 forward for a sub-batch that shares the same pixel shape."""
+    if not valid_idx:
+        return per_image
+
     batch_images = [images[i] for i in valid_idx]
     batch_boxes  = [all_boxes[i].tolist() for i in valid_idx]
     batch_labels = [[1] * len(all_boxes[i]) for i in valid_idx]
@@ -358,52 +395,7 @@ def _infer_one_orientation_group(
         masks_out, coverages_out, precisions_out = _match_proposals_to_boxes(
             prop_np, boxes, h_px, w_px
         )
-        per_image_out[orig_idx] = (masks_out, coverages_out, precisions_out)
-
-
-def _infer_refiner(processor, model, device, images, boxes_per_image, texts_per_image):
-    """SAM3 forward for the whole batch; proposals matched to boxes by ROI coverage.
-
-    SAM3 (sam3_video) is a DETR-style model with ~200 fixed query slots.
-    It ALWAYS returns ~200 proposals per image regardless of how many box
-    prompts are given, so seg_masks[k] does NOT correspond to input box k.
-
-    Strategy:
-      1. Images are grouped by orientation (landscape vs portrait) so that
-         every sub-batch has uniform pixel_values shape on the NPU.
-      2. All ~200 proposals retrieved per image (threshold=0.0).
-      3. For each input box, _match_proposals_to_boxes picks the proposal whose
-         binary mask maximally covers the box's ROI region (vectorised numpy).
-      4. Coverage ratio (0–1) is reported instead of SAM3's own IoU estimate.
-    """
-    # Normalise boxes; track which original indices have valid boxes
-    all_boxes: list[np.ndarray] = []
-    valid_idx: list[int] = []
-    for i, boxes in enumerate(boxes_per_image):
-        b = np.asarray(boxes, dtype=np.float32)
-        if b.ndim == 1:
-            b = b.reshape(1, 4)
-        all_boxes.append(b)
-        if b.shape[0] > 0:
-            valid_idx.append(i)
-
-    per_image: list = [([], [], []) for _ in images]
-
-    if not valid_idx:
-        return per_image
-
-    # Group valid images by orientation to keep pixel_values shape uniform.
-    groups: dict = defaultdict(list)
-    for i in valid_idx:
-        key = _image_orientation_key(images[i])
-        groups[key].append(i)
-
-    for key, group_idx in groups.items():
-        _infer_one_orientation_group(
-            processor, model, device,
-            images, all_boxes, group_idx, texts_per_image,
-            per_image,
-        )
+        per_image[orig_idx] = (masks_out, coverages_out, precisions_out)
 
     return per_image
 
@@ -535,27 +527,11 @@ class Sam3Refiner(BaseTask):
                 model.eval()
                 self._replica_pool.put((proc, model, dev))
 
-        # One lock per physical device.  CANN does not support concurrent
-        # multi-threaded kernel dispatch to the same device from a single
-        # process — concurrent threads on the same NPU card corrupt its
-        # internal stream state and raise 507018 / 507057 errors.  The lock
-        # serialises all NPU work per device while still allowing parallel
-        # execution across different devices.
-        #
-        # NOTE: if replicas_per_device > 1, only one replica per device can
-        # be active at a time (the others wait on the lock).  The effective
-        # NPU parallelism equals len(devices), not len(devices)*replicas.
-        # Use replicas_per_device=1 and larger batch_size for best throughput.
-        unique_devices = list(dict.fromkeys(devices))   # preserve order
-        self._device_locks: dict[str, threading.Lock] = {
-            dev: threading.Lock() for dev in unique_devices
-        }
-
         total_replicas = len(devices) * replicas_per_device
         if total_replicas > 1:
             self.use_multi_processing = True
             if not args.get("num_workers"):
-                args["num_workers"] = len(unique_devices)  # one active worker per device
+                args["num_workers"] = total_replicas
 
         assert "update_keys" in args, "update_keys must be specified in args."
         self.output_dir = os.path.join(self.args.get("output_dir"), self.args.get("file_name"))
@@ -576,24 +552,19 @@ class Sam3Refiner(BaseTask):
         texts = [". ".join(t) if t else None for t in tags_list]
         processor, model, dev = self._replica_pool.get()
         try:
-            # Bind this thread to the correct NPU device before any CANN call.
-            # torch.npu.set_device is thread-local on Ascend; without this,
-            # context switches between replicas on different devices corrupt
-            # the per-thread device state.
+            # torch.npu.set_device is thread-local; bind the thread to the
+            # correct device before any CANN call so the device context is
+            # correct regardless of which thread in the pool picks this task.
             try:
                 dev_id = int(dev.split(":")[-1]) if ":" in dev else 0
                 torch.npu.set_device(dev_id)
             except AttributeError:
                 pass  # non-NPU environment
-
-            # Serialise all NPU work for this physical device.
-            # See __init__ comment on _device_locks for rationale.
-            with self._device_locks[dev]:
-                return _infer_refiner(
-                    processor, model, dev,
-                    images, boxes_per_image,
-                    texts if any(texts) else None,
-                )
+            return _infer_refiner(
+                processor, model, dev,
+                images, boxes_per_image,
+                texts if any(texts) else None,
+            )
         finally:
             self._replica_pool.put((processor, model, dev))
 
