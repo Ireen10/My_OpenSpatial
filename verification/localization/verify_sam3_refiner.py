@@ -66,10 +66,14 @@ _COLORS = [
     (60, 220, 220),
 ]
 
+_FONT_SIZE = 20
+_COARSE_MASK_ALPHA = 150
+_SAM3_MASK_ALPHA = 170
 
-def _font():
+
+def _font(size: int = _FONT_SIZE):
     try:
-        return ImageFont.truetype("arial.ttf", 14)
+        return ImageFont.truetype("arial.ttf", size)
     except IOError:
         return ImageFont.load_default()
 
@@ -80,8 +84,8 @@ def _draw_boxes_and_masks(image: Image.Image, masks_bool, boxes, tags, title="")
     for idx, mask in enumerate(masks_bool):
         color = _COLORS[idx % len(_COLORS)]
         overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-        fill = Image.new("RGBA", canvas.size, (*color, 80))
-        alpha = Image.fromarray((mask.astype(np.uint8) * 80), mode="L")
+        fill = Image.new("RGBA", canvas.size, (*color, _COARSE_MASK_ALPHA))
+        alpha = Image.fromarray((mask.astype(np.uint8) * _COARSE_MASK_ALPHA), mode="L")
         overlay.paste(fill, mask=alpha)
         canvas = Image.alpha_composite(canvas, overlay)
 
@@ -91,47 +95,99 @@ def _draw_boxes_and_masks(image: Image.Image, masks_bool, boxes, tags, title="")
     for idx, (box, tag) in enumerate(zip(boxes, tags)):
         color = _COLORS[idx % len(_COLORS)]
         x1, y1, x2, y2 = [int(v) for v in box]
-        draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
         label = f"{idx}:{tag}"
         try:
-            lbox = draw.textbbox((x1, max(0, y1 - 16)), label, font=font)
+            lbox = draw.textbbox((x1, max(0, y1 - 24)), label, font=font)
         except AttributeError:
-            lbox = (x1, max(0, y1 - 16), x1 + len(label) * 8, y1)
+            lbox = (x1, max(0, y1 - 24), x1 + len(label) * 10, y1)
         draw.rectangle(lbox, fill=color)
-        draw.text((x1, max(0, y1 - 16)), label, fill=(255, 255, 255), font=font)
+        draw.text((x1, max(0, y1 - 24)), label, fill=(255, 255, 255), font=font)
 
     if title:
         draw.text((4, 4), title, fill=(255, 255, 0), font=font)
     return result
 
 
-def _draw_sam3_masks(image: Image.Image, masks_float, scores, tags, title="") -> Image.Image:
+def _draw_sam3_masks(
+    image: Image.Image,
+    masks_float,
+    scores,
+    tags,
+    coarse_boxes=None,
+    refined_boxes=None,
+    title="",
+) -> Image.Image:
     """Overlay SAM3 output masks on image with per-mask score."""
     canvas = image.convert("RGBA")
     for idx, mask in enumerate(masks_float):
         color = _COLORS[idx % len(_COLORS)]
         overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-        fill = Image.new("RGBA", canvas.size, (*color, 100))
-        alpha = Image.fromarray(((mask > 0.5).astype(np.uint8) * 100), mode="L")
+        fill = Image.new("RGBA", canvas.size, (*color, _SAM3_MASK_ALPHA))
+        alpha = Image.fromarray(((mask > 0.5).astype(np.uint8) * _SAM3_MASK_ALPHA), mode="L")
         overlay.paste(fill, mask=alpha)
         canvas = Image.alpha_composite(canvas, overlay)
 
     result = canvas.convert("RGB")
     draw = ImageDraw.Draw(result)
     font = _font()
+
+    # Draw pre-refine and post-refine bboxes on the same panel for direct comparison.
+    if coarse_boxes is not None:
+        for box in coarse_boxes:
+            x1, y1, x2, y2 = [int(v) for v in box]
+            draw.rectangle([x1, y1, x2, y2], outline=(255, 255, 255), width=1)
+    if refined_boxes is not None:
+        for idx, box in enumerate(refined_boxes):
+            color = _COLORS[idx % len(_COLORS)]
+            x1, y1, x2, y2 = [int(v) for v in box]
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+
     for idx, (score, tag) in enumerate(zip(scores, tags)):
         color = _COLORS[idx % len(_COLORS)]
         label = f"{idx}:{tag} sc={score:.3f}"
-        y_off = 4 + idx * 18
+        y_off = 6 + idx * 24
         try:
             lbox = draw.textbbox((4, y_off), label, font=font)
         except AttributeError:
-            lbox = (4, y_off, 4 + len(label) * 8, y_off + 14)
+            lbox = (4, y_off, 4 + len(label) * 10, y_off + 20)
         draw.rectangle(lbox, fill=color)
         draw.text((4, y_off), label, fill=(255, 255, 255), font=font)
 
     if title:
-        draw.text((4, 4 + len(scores) * 18 + 4), title, fill=(255, 255, 0), font=font)
+        draw.text((4, 8 + len(scores) * 24 + 6), title, fill=(255, 255, 0), font=font)
+    return result
+
+
+def _draw_bbox_compare(
+    image: Image.Image, coarse_boxes, refined_boxes, tags, title=""
+) -> Image.Image:
+    """Draw coarse vs refined boxes on one panel.
+
+    coarse: white thin
+    refined: colored thick
+    """
+    result = image.convert("RGB")
+    draw = ImageDraw.Draw(result)
+    font = _font()
+
+    for idx, (cbox, rbox, tag) in enumerate(zip(coarse_boxes, refined_boxes, tags)):
+        color = _COLORS[idx % len(_COLORS)]
+        cx1, cy1, cx2, cy2 = [int(v) for v in cbox]
+        rx1, ry1, rx2, ry2 = [int(v) for v in rbox]
+        draw.rectangle([cx1, cy1, cx2, cy2], outline=(255, 255, 255), width=1)
+        draw.rectangle([rx1, ry1, rx2, ry2], outline=color, width=3)
+        label = f"{idx}:{tag} C({cx2-cx1}x{cy2-cy1}) -> R({rx2-rx1}x{ry2-ry1})"
+        y = max(0, ry1 - 24)
+        try:
+            lbox = draw.textbbox((rx1, y), label, font=font)
+        except AttributeError:
+            lbox = (rx1, y, rx1 + len(label) * 10, y + 20)
+        draw.rectangle(lbox, fill=color)
+        draw.text((rx1, y), label, fill=(255, 255, 255), font=font)
+
+    if title:
+        draw.text((4, 4), title, fill=(255, 255, 0), font=font)
     return result
 
 
@@ -268,6 +324,7 @@ def diagnose_sample(row: dict, data_root: Path | None,
     sam3_masks_np, sam3_scores, sam3_precisions = _match_proposals_to_boxes(
         prop_np, boxes, h_px, w_px, min_coverage=0.0
     )
+    refined_boxes = Sam3Refiner._masks_to_bboxes([(m > 0.5) for m in sam3_masks_np])
 
     for k, (m, cov, prec) in enumerate(zip(sam3_masks_np, sam3_scores, sam3_precisions)):
         px = int((m > 0.5).sum())
@@ -283,11 +340,17 @@ def diagnose_sample(row: dict, data_root: Path | None,
     # ── Panel 2: SAM3 output (coverage-matched) ──────────────────────────────
     panel_sam3 = _draw_sam3_masks(
         image, sam3_masks_np, sam3_scores, tags,
-        title=f"SAM3 output (coverage-matched, {n_proposals} proposals)"
+        coarse_boxes=boxes,
+        refined_boxes=refined_boxes,
+        title=f"SAM3 output + bbox compare (white=coarse, color=refined)"
+    )
+    panel_bbox = _draw_bbox_compare(
+        image, boxes, refined_boxes, tags,
+        title="2D bbox compare (coarse vs refined)"
     )
 
     # ── Save composite ───────────────────────────────────────────────────────
-    composite = _side_by_side(panel_coarse, panel_sam3)
+    composite = _side_by_side(panel_coarse, panel_sam3, panel_bbox)
     out_path = output_dir / f"{rank:03d}_{sample_id}.png"
     composite.save(out_path)
     print(f"  Saved: {out_path}")
