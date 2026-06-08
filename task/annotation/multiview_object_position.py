@@ -2,8 +2,8 @@
 Multiview object position: cross-view relative direction (OE + MCQ).
 
 Frames:
-  object_relative  â€?premise: A relative to anchor B in image 1 (cardinal)
-  viewer_at_anchor â€?premise: viewer at B, A on the [X] side (egocentric)
+  object_relative  â€” premise: A relative to anchor B in image 1 (cardinal)
+  viewer_at_anchor â€” premise: viewer at B, A on the [X] side (egocentric)
 
 Answer modes: OE sentence|free; MCQ direct|sentence|free
 """
@@ -16,6 +16,8 @@ from .core.visual_marker import MarkConfig
 from utils.box_utils import check_box_3d_vertical_overlap
 from .core.question_type import QuestionType
 from ..prompt_templates.multiview_object_position_templates import FRAME_PREMISE_POOLS
+
+from utils.image_utils import convert_pil_to_bytes
 
 
 class AnnotationGenerator(BaseMultiviewAnnotationTask):
@@ -228,11 +230,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         anchor_app1 = anchor_node.view_appearances[view1_idx]
 
         meta = {
-            "image": (
-                [graph.views[view1_idx].image, graph.views[view2_idx].image]
-                if self.emit_marked_images
-                else [graph.views[view1_idx].image_path, graph.views[view2_idx].image_path]
-            ),
+            "image": [graph.views[view1_idx].image, graph.views[view2_idx].image],
             "mask": [app1.mask, app2.mask],
             "tag": [obj1_tag, obj2_tag],
             "view_idx": [view1_idx, view2_idx],
@@ -272,18 +270,16 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
             self.marker.reset(shuffle=True)
             vi0, vi1 = meta["view_idx"][0], meta["view_idx"][1]
-            qa_image1 = graph.views[vi0].image if self.emit_marked_images else None
             processed_image1, info1 = self.plan_mark_for_qa(
-                qa_image1,
+                meta["image"][0],
                 objs=[A_obj, anchor_obj],
                 mark_type=mark_type,
                 view_idx=vi0,
             )
             from .core.mark_spec import assemble_per_view_mark_spec
             s0 = self.marker.last_mark_spec
-            qa_image2 = graph.views[vi1].image if self.emit_marked_images else None
             processed_image2, info2 = self.plan_mark_for_qa(
-                qa_image2,
+                meta["image"][1],
                 objs=[B_obj],
                 mark_type=mark_type,
                 view_idx=vi1,
@@ -309,8 +305,8 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
                 self.marker._last_mark_spec = merged
             slot_infos = [info1[0], info1[1], info2[0]]
         else:
-            processed_image1 = None
-            processed_image2 = None
+            processed_image1 = {"bytes": convert_pil_to_bytes(meta["image"][0])}
+            processed_image2 = {"bytes": convert_pil_to_bytes(meta["image"][1])}
             slot_infos = [
                 (meta["tag"][0], meta["node"][0]),
                 (meta["anchor_tag"], meta["anchor_node"]),

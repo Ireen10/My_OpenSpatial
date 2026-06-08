@@ -2,8 +2,8 @@
 Size annotation task: absolute size measurement & relative size comparison.
 
 Templates:
-    size.absolute.single_view.{cm,m} / size.height.single_view.{cm,m} â€?OE + unit instruction
-    size.big.single_view / size.small.single_view â€?Judgment, unconstrained instruction
+    size.absolute.single_view.{cm,m} / size.height.single_view.{cm,m} â€” OE + unit instruction
+    size.big.single_view / size.small.single_view â€” Judgment, unconstrained instruction
 """
 
 from task.annotation.core.thread_rng import rng
@@ -79,10 +79,10 @@ class AnnotationGenerator(BaseAnnotationTask):
         nodes = [n for n in graph.get_object_nodes() if n.box_3d_world is not None]
         if len(nodes) == 0:
             return None
+        image = graph.primary_view.image
         num = rng().randint(2, min(len(nodes), 4)) if len(nodes) > 1 else 1
         sampled = rng().sample(nodes, num)
-        qa_image = graph.primary_view.image if self.emit_marked_images else None
-        processed_image, marked = self.mark_objects_for_qa(qa_image, sampled)
+        processed_image, marked = self.mark_objects_for_qa(image, sampled)
         mark_spec = self.marker.last_mark_spec
 
         prompts = []
@@ -114,9 +114,9 @@ class AnnotationGenerator(BaseAnnotationTask):
         nodes = [n for n in graph.get_object_nodes() if n.box_3d_world is not None]
         if len(nodes) < 2:
             return None
+        image = graph.primary_view.image
         sampled = rng().sample(nodes, 2)
-        qa_image = graph.primary_view.image if self.emit_marked_images else None
-        processed_image, marked = self.mark_objects_for_qa(qa_image, sampled)
+        processed_image, marked = self.mark_objects_for_qa(image, sampled)
         prompt, tpl = self.relative_size_prompt_func(marked[0], marked[1])
         if prompt is None:
             return None

@@ -2,9 +2,9 @@
 Distance annotation task: absolute distance & relative distance comparison.
 
 Sub-tasks:
-    absolute_distance â€?measure the point-cloud minimum distance between two objects
+    absolute_distance â€” measure the point-cloud minimum distance between two objects
                         and report in metres or centimetres (requires metric depth).
-    relative_distance â€?given three objects A, B, C, ask which of A/B is farther from /
+    relative_distance â€” given three objects A, B, C, ask which of A/B is farther from /
                         closer to C, in both open-ended and MCQ form.
 
 Templates used (singleview):
@@ -13,7 +13,7 @@ Templates used (singleview):
     distance.relative_{far,close}_mcq.{direct,reasoning,free}
       (reasoning/free answers use is_metric_depth for metric vs semantic templates)
 
-Mark policy (see MARK_TASKS_MEMO.md): ambiguous tag in view â†?mark_spec required;
+Mark policy (see MARK_TASKS_MEMO.md): ambiguous tag in view â†’ mark_spec required;
 else 25% optional mark_spec. QA images stay unmarked unless emit_marked_images.
 """
 
@@ -223,9 +223,9 @@ class AnnotationGenerator(BaseAnnotationTask):
         nodes = graph.get_object_nodes()
         if len(nodes) < 2:
             return None
+        image = graph.primary_view.image
         sampled = rng().sample(nodes, 2)
-        qa_image = graph.primary_view.image if self.emit_marked_images else None
-        processed_image, marked = self.mark_objects_for_qa(qa_image, sampled)
+        processed_image, marked = self.mark_objects_for_qa(image, sampled)
         A, B = marked
         prompt, tpl = self.absolute_distance_prompt_func(A, B)
         self._record_turn(
@@ -243,9 +243,9 @@ class AnnotationGenerator(BaseAnnotationTask):
         nodes = graph.get_object_nodes()
         if len(graph.obj_tags) <= 2:
             return None
+        image = graph.primary_view.image
         sampled = rng().sample(nodes, 3)
-        qa_image = graph.primary_view.image if self.emit_marked_images else None
-        processed_image, marked = self.mark_objects_for_qa(qa_image, sampled)
+        processed_image, marked = self.mark_objects_for_qa(image, sampled)
         A, B, C = marked
         slots = self._slots_from_marked(marked, labels=["A", "B", "C"])
         mark_spec = self.marker.last_mark_spec

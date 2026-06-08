@@ -2,15 +2,15 @@
 Depth estimation annotation task: depth ordering & depth choice.
 
 Sub-tasks:
-    depth_ordering_oe  �?sort 3-5 marked objects/points by depth (near→far), open-ended.
-    depth_ordering_mcq �?same ordering task but as 4-option MCQ (exactly 4 points/objects).
-    depth_choice_oe    �?pick the closest / farthest / N-th closest object, open-ended.
-    depth_choice_mcq   �?same choice task but as 4-option MCQ.
+    depth_ordering_oe  — sort 3-5 marked objects/points by depth (near→far), open-ended.
+    depth_ordering_mcq — same ordering task but as 4-option MCQ (exactly 4 points/objects).
+    depth_choice_oe    — pick the closest / farthest / N-th closest object, open-ended.
+    depth_choice_mcq   — same choice task but as 4-option MCQ.
 
 Visual annotation modes:
-    random_sample (~10%) �?sample 4-7 random pixels with distinct depths; returns
+    random_sample (~10%) — sample 4-7 random pixels with distinct depths; returns
                            normalized [x, y] coordinate tags. No drawing on image.
-    object-based  (~90%) �?select 3-5 nodes, plan point/box mark_spec,
+    object-based  (~90%) — select 3-5 nodes, plan point/box mark_spec,
                            then compute per-object depth from the depth_map.
 
 Depth estimation:
@@ -18,14 +18,14 @@ Depth estimation:
     This approximates the front-surface depth and is robust to noisy backgrounds.
 
 Templates used:
-    depth.ordering       �?[T] type label, [A] object list, [X] sorted list
-    depth.ordering_mcq   �?[T] type label, [Y] options; [X] obj list (q) / answer (a)
-    depth.farthest       �?[T] type label, [A] object list, [X] answer
-    depth.closest        �?[T] type label, [A] object list, [X] answer
-    depth.choice         �?[T] type label, [A] object list, [B] ordinal, [X] answer
-    depth.farthest_mcq   �?[T] type label, [Y] options; [X] obj list (q) / answer (a)
-    depth.closest_mcq    �?[T] type label, [Y] options; [X] obj list (q) / answer (a)
-    depth.choice_mcq     �?[T] type label, [Y] ordinal, [Z] options; [X] obj list (q) / answer (a)
+    depth.ordering       — [T] type label, [A] object list, [X] sorted list
+    depth.ordering_mcq   — [T] type label, [Y] options; [X] obj list (q) / answer (a)
+    depth.farthest       — [T] type label, [A] object list, [X] answer
+    depth.closest        — [T] type label, [A] object list, [X] answer
+    depth.choice         — [T] type label, [A] object list, [B] ordinal, [X] answer
+    depth.farthest_mcq   — [T] type label, [Y] options; [X] obj list (q) / answer (a)
+    depth.closest_mcq    — [T] type label, [Y] options; [X] obj list (q) / answer (a)
+    depth.choice_mcq     — [T] type label, [Y] ordinal, [Z] options; [X] obj list (q) / answer (a)
 """
 
 from task.annotation.core.thread_rng import rng
@@ -35,6 +35,8 @@ from .core.mark_spec import plan_point_marks
 from .core.visual_marker import MarkConfig, VisualMarker
 from .core.question_type import QuestionType
 from .core.mark_spec import render_mark
+
+from utils.image_utils import convert_pil_to_bytes
 
 from .metric_gating import pick_instruction_mode
 
@@ -105,7 +107,7 @@ class AnnotationGenerator(BaseAnnotationTask):
 
     # ── data preparation ─────────────────────────────────────────────
 
-    def _sample_random_points(self, depth_map, *, num_points=None):
+    def _sample_random_points(self, image, depth_map, *, num_points=None):
         """Generate coordinate-based tags by sampling random pixels.
 
         Picks 4-7 pixels (or exactly ``num_points`` when set) whose depths differ
@@ -135,7 +137,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         return (
             [norm(p) for p in points],
             [norm(p) for p in sorted_pts],
-            None,
+            {"bytes": convert_pil_to_bytes(image)},
             mark_spec,
         )
 
@@ -166,7 +168,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         if self.emit_marked_images and enable:
             processed_image = render_mark(image, spec, preprocess_row=preprocess_row)
         else:
-            processed_image = None
+            processed_image = {"bytes": convert_pil_to_bytes(image)}
 
         tags_legacy, tags_sem, depths = [], [], []
         kept_slots = []
@@ -214,7 +216,7 @@ class AnnotationGenerator(BaseAnnotationTask):
 
         if rng().random() < 0.1:
             result = self._sample_random_points(
-                depth_map, num_points=mcq_n or rng().randint(4, 7),
+                image, depth_map, num_points=mcq_n or rng().randint(4, 7),
             )
             if result is not None:
                 tags, sorted_tags, image_bytes, mark_spec = result
@@ -233,14 +235,13 @@ class AnnotationGenerator(BaseAnnotationTask):
         return tags_legacy, tags_sem, sorted_sem, image_bytes, "objects:", mark_spec
 
     def _prepare(self, graph):
-        """Extract depth_map, optional RGB (render only), and mask-bearing nodes."""
+        """Extract depth_map, image, and mask-bearing nodes from the graph."""
         view = graph.primary_view
         depth_map = view.depth_map
-        image = view.image if self.emit_marked_images else None
-        if image is not None:
-            assert image.size == depth_map.shape[::-1], (
-                f"Image {image.size} vs depth_map {depth_map.shape[::-1]} dimension mismatch."
-            )
+        image = view.image
+
+        assert image.size == depth_map.shape[::-1], \
+            f"Image {image.size} vs depth_map {depth_map.shape[::-1]} dimension mismatch."
 
         nodes = [n for n in graph.get_object_nodes()
                  if n.view_appearances.get(0) and n.view_appearances[0].mask_path]
@@ -371,7 +372,7 @@ class AnnotationGenerator(BaseAnnotationTask):
     # ── handlers (dispatched by SUB_TASKS) ───────────────────────────
 
     def _dispatch(self, graph, task_kind, qtype, sub_task):
-        """Shared handler logic: prepare graph �?build prompt �?return result."""
+        """Shared handler logic: prepare graph → build prompt → return result."""
         prepared = self._prepare(graph)
         if prepared is None:
             return None

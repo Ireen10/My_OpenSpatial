@@ -1,5 +1,5 @@
 """
-Multiview distance: pair absolute (2 views) + N-ary farthest/closest (3â€? views).
+Multiview distance: pair absolute (2 views) + N-ary farthest/closest (3â€“6 views).
 
 Templates:
     multiview_distance.absolute.{direct,sentence,free}  (stems shared with singleview; + introduction)

@@ -1,9 +1,9 @@
 """
-Multiview size: pair relative judgment (2 views) + N-ary biggest/smallest (3â€? views).
+Multiview size: pair relative judgment (2 views) + N-ary biggest/smallest (3â€“6 views).
 
 Templates:
-    multiview_size.{big,small}.pair  â€?Judgment (D_diag + 1.2 ratio gate, aligned with singleview)
-    multiview_size.{biggest,smallest}.{direct,sentence}  â€?N-ary (D_diag; 1.2 gate on rank-1 vs rank-2 only)
+    multiview_size.{big,small}.pair  â€” Judgment (D_diag + 1.2 ratio gate, aligned with singleview)
+    multiview_size.{biggest,smallest}.{direct,sentence}  â€” N-ary (D_diag; 1.2 gate on rank-1 vs rank-2 only)
 """
 
 from task.annotation.core.thread_rng import rng

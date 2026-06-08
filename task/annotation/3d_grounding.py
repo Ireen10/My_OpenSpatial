@@ -2,7 +2,7 @@
 3D grounding annotation task: predict 3D bounding boxes for objects.
 
 Sub-tasks:
-    grounding_oe â€?given object names, predict their 3D bounding boxes (open-ended).
+    grounding_oe â€” given object names, predict their 3D bounding boxes (open-ended).
 
 Coordinate system:
     3D boxes are in camera coordinates, converted from world-frame boxes
@@ -12,13 +12,14 @@ Coordinate system:
     Euler angles in radians, rotation order zxy.
 
 Templates used:
-    grounding_3d.open_ended â€?introduction (camera) + stem + question_instruction (JSON)
+    grounding_3d.open_ended â€” introduction (camera) + stem + question_instruction (JSON)
 """
 
 from task.annotation.core.thread_rng import rng
 
 from .core.base_annotation_task import BaseAnnotationTask
 from .core.question_type import QuestionType
+from utils.image_utils import convert_pil_to_bytes
 from utils.box_utils import format_bbox_3d_for_grounding, format_grounding_answer_json
 
 
@@ -116,4 +117,4 @@ class ThreeDGroundingGenerator(BaseAnnotationTask):
             mark_spec=None,
             extra_slots=extra_slots,
         )
-        return prompt, None, QuestionType.OPEN_ENDED
+        return prompt, {"bytes": convert_pil_to_bytes(view.image)}, QuestionType.OPEN_ENDED

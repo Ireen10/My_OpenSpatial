@@ -6,8 +6,8 @@ marks a query point on View 1, and asks the model to identify the
 corresponding point among labeled candidates on View 2.
 
 Sub-tasks:
-    point_correspondence_oe  â??open-ended: sentence or free (full-sentence answers with [L])
-    point_correspondence_mcq â??MCQ: direct/sentence/free; direct uses [T], sentence uses [L] then [E]
+    point_correspondence_oe  â€” open-ended: sentence or free (full-sentence answers with [L])
+    point_correspondence_mcq â€” MCQ: direct/sentence/free; direct uses [T], sentence uses [L] then [E]
 
 Algorithm (vectorized Open3D):
     1. Use _find_overlapping_views to find two diverse views sharing a common object.
@@ -20,17 +20,17 @@ Algorithm (vectorized Open3D):
     6. Shuffle GT + distractors, assign labels (A/B/C/D or 1/2/3/4).
 
 Templates used:
-    multiview_correspondence.point2point[_{num}].oe.{sentence|free} â??OE; same answer pool
-    multiview_correspondence.point2point[_{num}].mcq.{direct|sentence|free} â??MCQ; options via [O]
+    multiview_correspondence.point2point[_{num}].oe.{sentence|free} â€” OE; same answer pool
+    multiview_correspondence.point2point[_{num}].mcq.{direct|sentence|free} â€” MCQ; options via [O]
 
 Configurable parameters (via YAML args):
-    overlap_dist          â??3D distance threshold (meters) for two points to be
+    overlap_dist          â€” 3D distance threshold (meters) for two points to be
                             considered overlapping (default: 0.003)
-    min_overlap_points    â??minimum number of overlapping 3D points required to
+    min_overlap_points    â€” minimum number of overlapping 3D points required to
                             accept a view pair (default: 10)
-    boundary_margin       â??pixel margin from image edge; points too close to
+    boundary_margin       â€” pixel margin from image edge; points too close to
                             the border are rejected (default: 10)
-    min_distractor_dist   â??minimum pixel distance between each distractor and
+    min_distractor_dist   â€” minimum pixel distance between each distractor and
                             the ground-truth point on View 2 (default: 20)
 """
 
@@ -40,6 +40,8 @@ import open3d as o3d
 from .core.base_multiview_task import BaseMultiviewAnnotationTask
 from .core.mark_spec import assemble_per_view_mark_spec
 from .core.question_type import QuestionType
+from utils.image_utils import convert_pil_to_bytes
+
 
 class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
@@ -58,7 +60,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         self.boundary_margin = args.get("boundary_margin", 10)
         self.min_distractor_dist = args.get("min_distractor_dist", 20)
 
-    # â??â??â?? Prompt Function â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??
+    # â”€â”€â”€ Prompt Function â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @staticmethod
     def _correspondence_option_markers(use_numeric_labels: bool):
@@ -117,19 +119,19 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
             )
         return prompt, tpl_name
 
-    # â??â??â?? Point Correspondence Finder â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??
+    # â”€â”€â”€ Point Correspondence Finder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _find_point_correspondence(self, graph):
         """Find a corresponding 3D point visible in two overlapping views.
 
         Returns:
             (meta_data, True) on success, where meta_data contains:
-                image:      [PIL.Image, PIL.Image] â??the two view images
-                view_idx:   [int, int]             â??view indices in the SceneGraph
+                image:      [PIL.Image, PIL.Image] â€” the two view images
+                view_idx:   [int, int]             â€” view indices in the SceneGraph
                 point:      [pt1_uv, pt2_uv, distractor_uvs]
                             pt1_uv:         [u, v] query point on View 1
                             pt2_uv:         [u, v] ground-truth point on View 2
-                            distractor_uvs: [[u,v], ...] Ã? 3 distractor points on View 2
+                            distractor_uvs: [[u,v], ...] Ã— 3 distractor points on View 2
             (None, False) on failure.
         """
         # Step 1: get two diverse views sharing a common object
@@ -151,7 +153,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         img_dim2 = (w2, h2)
 
         # Step 2: backproject valid depth pixels to 3D world coordinates.
-        # Each view may have its own (W, H) after per-frame sky rotation (e.g. 640Ã?480 vs 480Ã?640).
+        # Each view may have its own (W, H) after per-frame sky rotation (e.g. 640Ã—480 vs 480Ã—640).
         points_3d_1 = self.backproject_2d_to_3d(view1.pose, depth_map1, img_dim1, intrinsic1)
         points_3d_2 = self.backproject_2d_to_3d(view2.pose, depth_map2, img_dim2, intrinsic2)
 
@@ -220,12 +222,13 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
             return None, False
 
         meta_data = {
+            "image": [view1.image, view2.image],
             "view_idx": [view1_idx, view2_idx],
             "point": [pt1_uv.astype(int).tolist(), pt2_uv.astype(int).tolist(), uv_candidates],
         }
         return meta_data, True
 
-    # â??â??â?? Visual Marking â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??
+    # â”€â”€â”€ Visual Marking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _draw_candidate_points(self, image1, image2, point1_uv, point2_uv, candidates_uv, meta):
         """Draw query point on View 1 and labeled candidate points on View 2.
@@ -237,7 +240,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
             image1, image2: PIL images for the two views.
             point1_uv:      [u, v] query point on View 1.
             point2_uv:      [u, v] ground-truth corresponding point on View 2.
-            candidates_uv:  [[u, v], ...] Ã? 3 distractor points on View 2.
+            candidates_uv:  [[u, v], ...] Ã— 3 distractor points on View 2.
 
         Returns:
             (processed_image1, processed_image2,
@@ -281,12 +284,12 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
             processed_image1 = render_mark(image1, merged, view_index=0)
             processed_image2 = render_mark(image2, merged, view_index=1, labels=labels)
         else:
-            processed_image1 = None
-            processed_image2 = None
+            processed_image1 = {"bytes": convert_pil_to_bytes(image1)}
+            processed_image2 = {"bytes": convert_pil_to_bytes(image2)}
 
         return processed_image1, processed_image2, color_name1, color_name2, gt_answer
 
-    # â??â??â?? Handlers (dispatched by SUB_TASKS) â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??â??
+    # â”€â”€â”€ Handlers (dispatched by SUB_TASKS) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _build_correspondence(self, graph, question_type):
         """Shared pipeline for both OE and MCQ handlers.
@@ -302,12 +305,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
             return None
 
         point1, point2, uv_candidates = meta["point"]
-        vi0, vi1 = meta["view_idx"]
-        if self.emit_marked_images:
-            image1 = graph.views[vi0].image
-            image2 = graph.views[vi1].image
-        else:
-            image1 = image2 = None
+        image1, image2 = meta["image"]
 
         self.marker.reset(shuffle=True)
         img1, img2, color1, color2, gt_answer = self._draw_candidate_points(
