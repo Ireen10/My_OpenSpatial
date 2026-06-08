@@ -77,17 +77,32 @@ class SampleAggregator(BaseTask):
         super().__init__(args)
         self.output_root = args.get("output_root") or args.get("output_dir", ".")
         self.input_tasks = args.get("input_tasks") or []
+        self.input_tasks_prefix = (args.get("input_tasks_prefix") or "").strip()
         self.dedup_within_task = bool(args.get("dedup_within_task", True))
         self.merge_by_visual_input_group = bool(args.get("merge_by_visual_input_group", True))
         self.dedup_keep_policy = args.get("dedup_keep_policy", "semantic_first")
 
+    def _resolve_task_ref(self, task_ref: str) -> str:
+        ref = str(task_ref).strip().replace("\\", "/")
+        if (
+            self.input_tasks_prefix
+            and not os.path.isabs(ref)
+            and not ref.startswith("..")
+            and "/" not in ref
+            and not ref.endswith(".parquet")
+        ):
+            prefix = self.input_tasks_prefix.replace("\\", "/").rstrip("/")
+            ref = f"{prefix}/{ref}"
+        return ref
+
     def _resolve_task_parquet(self, task_ref: str) -> str:
-        if os.path.isfile(task_ref):
-            return task_ref
-        path = os.path.join(self.output_root, task_ref, "data.parquet")
+        ref = self._resolve_task_ref(task_ref)
+        if os.path.isfile(ref):
+            return ref
+        path = os.path.join(self.output_root, ref, "data.parquet")
         if os.path.isfile(path):
             return path
-        raise FileNotFoundError(f"Cannot resolve input task parquet: {task_ref} -> {path}")
+        raise FileNotFoundError(f"Cannot resolve input task parquet: {ref} -> {path}")
 
     def _load_all_turns(self, dataset: pd.DataFrame) -> List[TurnRecord]:
         records: List[TurnRecord] = []

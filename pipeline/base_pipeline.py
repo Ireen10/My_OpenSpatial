@@ -120,6 +120,13 @@ class BasePipeline:
                 task["task"].model = first_task_by_stage[reuse_stage]["task"].model
                 print(f">>> Reusing model from {reuse_stage} for {task['task_name']}")
 
+        # Resolve data_dir relative to this run root (same convention as input_tasks_prefix).
+        data_dir = getattr(self.data_cfg, "data_dir", None)
+        if isinstance(data_dir, str) and data_dir.startswith(".."):
+            self.data_cfg.data_dir = os.path.normpath(
+                os.path.join(self.output_root, data_dir)
+            )
+
         # Build dataset
         self.dataset = build_dataset(self.data_cfg)
 

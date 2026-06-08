@@ -133,8 +133,8 @@ pytest tests/test_prompt_template_structure.py
 python verification/dataset_pipeline/verify_milestone.py --milestone M8
 
 # aggregate / export
-python run.py --config config/aggregate/demo_aggregate_singleview_frame_rot.yaml --output_dir E:/GitRepo/OpenSpatial/output/frame_rot
-python run.py --config config/export/demo_export_frame_rot.yaml --output_dir E:/GitRepo/OpenSpatial/output/frame_rot
+python run.py --config config/aggregate/demo_aggregate_singleview.yaml --output_dir E:/GitRepo/OpenSpatial/output/frame_rot
+python run.py --config config/aggregate/demo_aggregate_multiview.yaml --output_dir E:/GitRepo/OpenSpatial/output/frame_rot
 
 # 可视化（m8l2 / 单目人工检视 review）
 python visualize_server.py --data_dir output/frame_rot/base_pipeline_demo_singleview_all_frame_rot_m8l2 --port 8888

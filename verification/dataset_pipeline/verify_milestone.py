@@ -150,7 +150,7 @@ def verify_m7(*, check_l2_bundle: bool = False) -> bool:
         "dataset/upstream_export.py",
         "dataset/jsonl_base.py",
         "task/export/dataset_exporter.py",
-        "config/export/demo_export_frame_rot.yaml",
+        "config/aggregate/demo_aggregate_singleview.yaml",
     ):
         if not (REPO_ROOT / rel).is_file():
             print(f"M7 FAIL: missing {rel}")
@@ -161,9 +161,11 @@ def verify_m7(*, check_l2_bundle: bool = False) -> bool:
     if check_l2_bundle:
         from dataset.upstream_export import verify_bundle_roundtrip
 
-        export_root = REPO_ROOT / "output" / "frame_rot" / "base_pipeline_demo_export_frame_rot"
-        for branch in ("singleview", "multiview"):
-            bundle = export_root / branch
+        for branch, run_name in (
+            ("singleview", "base_pipeline_demo_aggregate_singleview"),
+            ("multiview", "base_pipeline_demo_aggregate_multiview"),
+        ):
+            bundle = REPO_ROOT / "output" / "frame_rot" / run_name / "export"
             sharded = bundle / "jsonl" / "metadata_000000.jsonl"
             legacy = bundle / "export" / "samples.jsonl"
             if not sharded.is_file() and not legacy.is_file():

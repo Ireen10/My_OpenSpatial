@@ -1,12 +1,19 @@
-# Aggregate 5 singleview frame_rot annotation tasks (M4/M5 L2).
+# Singleview: aggregate annotation outputs → merged parquet → upstream JSONL + tar.
+#
+# Prerequisite (same --output_dir as below):
+#   python run.py --config config/annotation/demo_singleview_all.yaml --output_dir output/
 #
 # Usage:
-#   python run.py --config config/aggregate/demo_aggregate_singleview_frame_rot.yaml --output_dir E:/GitRepo/OpenSpatial/output/frame_rot
+#   python run.py --config config/aggregate/demo_aggregate_singleview.yaml --output_dir output/
+#
+# Outputs under {--output_dir}/base_pipeline_demo_aggregate_singleview/:
+#   aggregate_stage/merged_samples/data.parquet
+#   export/jsonl/, export/images/, export/metadata.json
 
 dataset:
   modality: image
   dataset_name: image_base
-  data_dir:
+  data_dir: ../base_pipeline_demo_singleview_all/annotation_stage/distance/data.parquet
 
 pipeline:
   file_name: base_pipeline
@@ -17,13 +24,24 @@ pipeline:
       -
         file_name: sample_aggregator
         method: SampleAggregator
+        input_tasks_prefix: ../base_pipeline_demo_singleview_all/annotation_stage
         input_tasks:
-          - ../base_pipeline_demo_singleview_all_frame_rot/annotation_stage/distance
-          - ../base_pipeline_demo_singleview_all_frame_rot/annotation_stage/depth_annotation
-          - ../base_pipeline_demo_singleview_all_frame_rot/annotation_stage/size
-          - ../base_pipeline_demo_singleview_all_frame_rot/annotation_stage/position
-          - ../base_pipeline_demo_singleview_all_frame_rot/annotation_stage/3d_grounding
+          - distance
+          - depth_annotation
+          - size
+          - position
+          - 3d_grounding
         dedup_within_task: true
         merge_by_visual_input_group: true
         dedup_keep_policy: semantic_first
         output_dir: aggregate_stage/merged_samples
+
+    export_stage:
+      -
+        file_name: dataset_exporter
+        method: DatasetExporter
+        depends_on: aggregate_stage/merged_samples
+        output_dir: export
+        view_scope: singleview
+        skip_parquet: true
+        schema_version: "1.1"

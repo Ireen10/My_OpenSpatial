@@ -1,15 +1,19 @@
-# Aggregate 5 multiview frame_rot annotation tasks (M4/M5 L3).
+# Multiview: aggregate annotation outputs → merged parquet → upstream JSONL + tar.
 #
-# Prerequisite:
-#   python run.py --config config/annotation/demo_multiview_all_frame_rot.yaml --output_dir E:/GitRepo/OpenSpatial/output/frame_rot
+# Prerequisite (same --output_dir as below):
+#   python run.py --config config/annotation/demo_multiview_all.yaml --output_dir output/
 #
 # Usage:
-#   python run.py --config config/aggregate/demo_aggregate_multiview_frame_rot.yaml --output_dir E:/GitRepo/OpenSpatial/output/frame_rot
+#   python run.py --config config/aggregate/demo_aggregate_multiview.yaml --output_dir output/
+#
+# Outputs under {--output_dir}/base_pipeline_demo_aggregate_multiview/:
+#   aggregate_stage/merged_samples/data.parquet
+#   export/jsonl/, export/images/, export/metadata.json
 
 dataset:
   modality: image
   dataset_name: image_base
-  data_dir:
+  data_dir: ../base_pipeline_demo_multiview_all/annotation_stage/multiview_distance/data.parquet
 
 pipeline:
   file_name: base_pipeline
@@ -20,13 +24,24 @@ pipeline:
       -
         file_name: sample_aggregator
         method: SampleAggregator
+        input_tasks_prefix: ../base_pipeline_demo_multiview_all/annotation_stage
         input_tasks:
-          - ../base_pipeline_demo_multiview_all_frame_rot/annotation_stage/multiview_distance
-          - ../base_pipeline_demo_multiview_all_frame_rot/annotation_stage/multiview_size
-          - ../base_pipeline_demo_multiview_all_frame_rot/annotation_stage/multiview_correspondence
-          - ../base_pipeline_demo_multiview_all_frame_rot/annotation_stage/multiview_distance_obj_cam
-          - ../base_pipeline_demo_multiview_all_frame_rot/annotation_stage/multiview_object_position
+          - multiview_distance
+          - multiview_size
+          - multiview_correspondence
+          - multiview_distance_obj_cam
+          - multiview_object_position
         dedup_within_task: true
         merge_by_visual_input_group: true
         dedup_keep_policy: semantic_first
         output_dir: aggregate_stage/merged_samples
+
+    export_stage:
+      -
+        file_name: dataset_exporter
+        method: DatasetExporter
+        depends_on: aggregate_stage/merged_samples
+        output_dir: export
+        view_scope: multiview
+        skip_parquet: true
+        schema_version: "1.1"

@@ -4,7 +4,7 @@ M4 L2 spot-check: merged sample with distance + 3d_grounding (chair/table) turns
 
 Usage:
   python verification/dataset_pipeline/spotcheck_merge_grounding.py \\
-    --parquet E:/GitRepo/OpenSpatial/output/frame_rot/base_pipeline_demo_aggregate_singleview_frame_rot/aggregate_stage/merged_samples/data.parquet
+    --parquet E:/GitRepo/OpenSpatial/output/frame_rot/base_pipeline_demo_aggregate_singleview/aggregate_stage/merged_samples/data.parquet
 """
 
 from __future__ import annotations
