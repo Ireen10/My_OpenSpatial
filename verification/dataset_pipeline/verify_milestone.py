@@ -165,7 +165,7 @@ def verify_m7(*, check_l2_bundle: bool = False) -> bool:
             ("singleview", "base_pipeline_demo_aggregate_singleview"),
             ("multiview", "base_pipeline_demo_aggregate_multiview"),
         ):
-            bundle = REPO_ROOT / "output" / "frame_rot" / run_name / "export"
+            bundle = REPO_ROOT / "output" / "frame_rot" / run_name / "export_stage"
             sharded = bundle / "jsonl" / "metadata_000000.jsonl"
             legacy = bundle / "export" / "samples.jsonl"
             if not sharded.is_file() and not legacy.is_file():

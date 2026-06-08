@@ -384,17 +384,17 @@ After `annotation_stage`, each task writes `annotation_stage/<task_name>/data.pa
 One config under `config/aggregate/` runs **both** merge and export:
 
 ```
-annotation_stage/*  →  aggregate_stage/merged_samples  →  export/ (JSONL + tar)
+annotation_stage/*  →  aggregate_stage/sample_aggregator  →  export_stage/
 ```
 
 Run root (auto from `--output_dir` + config name):
 
 ```
 {--output_dir}/base_pipeline_demo_aggregate_singleview/
-  aggregate_stage/merged_samples/data.parquet
-  export/jsonl/metadata_*.jsonl
-  export/images/metadata_*.tar
-  export/metadata.json
+  aggregate_stage/sample_aggregator/data.parquet
+  export_stage/jsonl/metadata_*.jsonl
+  export_stage/images/metadata_*.tar
+  export_stage/metadata.json
 ```
 
 **Commands:**
@@ -431,14 +431,13 @@ pipeline:
         dedup_within_task: true
         merge_by_visual_input_group: true
         dedup_keep_policy: semantic_first
-        output_dir: aggregate_stage/merged_samples
+        output_dir:
 
     export_stage:
       -
         file_name: dataset_exporter
         method: DatasetExporter
-        depends_on: aggregate_stage/merged_samples   # same run — no ../ cross-run path
-        output_dir: export
+        depends_on: aggregate_stage/sample_aggregator
         view_scope: singleview
         skip_parquet: true
         schema_version: "1.1"
@@ -448,13 +447,13 @@ pipeline:
 |-------|---------|
 | `input_tasks_prefix` | Sibling folder of this run root pointing at annotation outputs (same `--output_dir`) |
 | `input_tasks` | Task folder names under that prefix |
-| `depends_on: aggregate_stage/merged_samples` | Export reads merge output from the prior stage in this config |
-| `view_scope` | Label in `export/metadata.json` stats (`singleview` / `multiview`) |
+| `depends_on: aggregate_stage/sample_aggregator` | Same as other stages: `stage/task` ref within this run |
+| `view_scope` | Label in export `metadata.json` stats (`singleview` / `multiview`) |
 
 Multiview uses `demo_aggregate_multiview.yaml` with `demo_multiview_all` in `input_tasks_prefix`.
 
 Browse merged parquet with `visualize_server.py`; browse export bundle with
-`visualize_upstream_server.py --data_dir output/base_pipeline_demo_aggregate_singleview/export`.
+`visualize_upstream_server.py --data_dir output/base_pipeline_demo_aggregate_singleview/export_stage`.
 
 ---
 
@@ -469,7 +468,7 @@ python visualize_server.py --data_dir output/demo --port 8888
 **Exported upstream bundle** (sharded JSONL + tar from `export_stage`):
 
 ```bash
-python visualize_upstream_server.py --data_dir output/base_pipeline_demo_aggregate_singleview/export --port 8889
+python visualize_upstream_server.py --data_dir output/base_pipeline_demo_aggregate_singleview/export_stage --port 8889
 ```
 
 Then open `http://<host>:<port>` in a browser. Features:

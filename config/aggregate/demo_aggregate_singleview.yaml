@@ -7,8 +7,8 @@
 #   python run.py --config config/aggregate/demo_aggregate_singleview.yaml --output_dir output/
 #
 # Outputs under {--output_dir}/base_pipeline_demo_aggregate_singleview/:
-#   aggregate_stage/merged_samples/data.parquet
-#   export/jsonl/, export/images/, export/metadata.json
+#   aggregate_stage/sample_aggregator/data.parquet
+#   export_stage/jsonl/, images/, metadata.json
 
 dataset:
   modality: image
@@ -34,14 +34,13 @@ pipeline:
         dedup_within_task: true
         merge_by_visual_input_group: true
         dedup_keep_policy: semantic_first
-        output_dir: aggregate_stage/merged_samples
+        output_dir:
 
     export_stage:
       -
         file_name: dataset_exporter
         method: DatasetExporter
-        depends_on: aggregate_stage/merged_samples
-        output_dir: export
+        depends_on: aggregate_stage/sample_aggregator
         view_scope: singleview
         skip_parquet: true
         schema_version: "1.1"
