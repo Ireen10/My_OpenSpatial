@@ -416,7 +416,7 @@ python run.py --config config/aggregate/demo_aggregate_multiview.yaml --output_d
 dataset:
   modality: image
   dataset_name: image_base
-  data_dir: ../base_pipeline_demo_singleview_all/annotation_stage/distance
+  data_dir: .   # aggregate reads input_tasks only; no init load
 
 pipeline:
   file_name: base_pipeline

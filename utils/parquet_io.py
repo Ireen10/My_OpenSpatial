@@ -24,12 +24,36 @@ def list_parquet_shards(location: str) -> List[str]:
     return files
 
 
+def _is_chunked_nested_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "chunked array" in msg or "nested data conversions" in msg
+
+
+def _read_parquet(path: str) -> pd.DataFrame:
+    """Read one parquet file; fall back when PyArrow chokes on nested chunked columns."""
+    try:
+        return pd.read_parquet(path)
+    except Exception as exc:
+        if not _is_chunked_nested_error(exc):
+            raise
+
+    import pyarrow.parquet as pq
+
+    pf = pq.ParquetFile(path)
+    parts = [pf.read_row_group(i).to_pandas() for i in range(pf.num_row_groups)]
+    if not parts:
+        return pd.DataFrame()
+    if len(parts) == 1:
+        return parts[0]
+    return pd.concat(parts, ignore_index=True)
+
+
 def load_parquet_dataframe(location: str) -> pd.DataFrame:
     """Load parquet from a file or concatenate all parquets in a directory."""
     shards = list_parquet_shards(location)
     if len(shards) == 1:
-        return pd.read_parquet(shards[0])
-    return pd.concat([pd.read_parquet(p) for p in shards], ignore_index=True)
+        return _read_parquet(shards[0])
+    return pd.concat([_read_parquet(p) for p in shards], ignore_index=True)
 
 
 def resolve_task_output_dir(output_root: str, task_ref: str) -> str:

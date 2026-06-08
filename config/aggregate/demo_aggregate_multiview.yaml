@@ -13,7 +13,7 @@
 dataset:
   modality: image
   dataset_name: image_base
-  data_dir: ../base_pipeline_demo_multiview_all/annotation_stage/multiview_distance
+  data_dir: .
 
 pipeline:
   file_name: base_pipeline

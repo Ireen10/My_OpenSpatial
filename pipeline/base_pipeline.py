@@ -139,6 +139,11 @@ class BasePipeline:
                 os.path.join(self.output_root, data_dir)
             )
 
+        # Aggregate with input_tasks never reads dataset.data at init — defer heavy parquet load.
+        first_cfg = self.task_queue[0]["task_cfg"] if self.task_queue else None
+        if first_cfg and getattr(first_cfg, "input_tasks", None):
+            self.data_cfg.defer_load = True
+
         # Build dataset
         self.dataset = build_dataset(self.data_cfg)
 
@@ -160,6 +165,8 @@ class BasePipeline:
 
     def _truncate_dataset_if_needed(self) -> None:
         """Apply --start_from / --max_samples slicing (no-op when not set)."""
+        if self.dataset.data is None:
+            return
         full_len = len(self.dataset.data)
         start = self.start_from
         end = (start + self.max_samples) if self.max_samples else None
@@ -200,8 +207,11 @@ class BasePipeline:
 
         if stage_name == "annotation_stage":
             batch_size = getattr(task_cfg, "save_batch_size", 8192)
-            keep_cols = getattr(task_cfg, "keep_data_columns",
-                               ["messages", "QA_images", "question_tags", "question_types"])
+            keep_cols = [
+                k for k in getattr(task_cfg, "keep_data_columns",
+                                   ["messages", "metadata", "question_tags", "question_types"])
+                if k != "QA_images"
+            ]
             self.dataset.save_data(os.path.join(output_path, "data.parquet"), processed_data,
                                   annotation_flag=True, batch_size=batch_size, keep_data_columns=keep_cols)
         elif stage_name == "aggregate_stage":

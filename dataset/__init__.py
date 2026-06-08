@@ -52,7 +52,8 @@ def build_dataset(cfg, dataset_name=None):
     input_name = _resolve_dataset_name(cfg, "input")
     output_name = _resolve_dataset_name(cfg, "output")
 
-    input_ds = _instantiate_dataset(cfg, input_name, load_data=True)
+    defer_load = bool(getattr(cfg, "defer_load", False))
+    input_ds = _instantiate_dataset(cfg, input_name, load_data=not defer_load)
     if input_name == output_name:
         return input_ds
 

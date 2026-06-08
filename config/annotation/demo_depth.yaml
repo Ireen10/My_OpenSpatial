@@ -23,10 +23,9 @@ pipeline:
         emit_marked_images: false
         keep_data_columns:
           - messages
-          - QA_images
+          - metadata
           - question_tags
           - question_types
-          - metadata
         use_multi_processing: false
         num_workers: 8
         output_dir:

@@ -23,10 +23,9 @@ pipeline:
         emit_marked_images: false
         keep_data_columns:
           - messages
-          - QA_images
+          - metadata
           - question_tags
           - question_types
-          - metadata
         max_num_views: 400
         min_rot_angle: 15.0
         min_translation: 0.0

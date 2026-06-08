@@ -165,8 +165,11 @@ class ImageBaseDataset:
 
         if annotation_flag:
             keep_data_columns = keep_data_columns or [
-                "messages", "QA_images", "question_tags", "question_types"]
+                "messages", "metadata", "question_tags", "question_types"]
+            keep_data_columns = [k for k in keep_data_columns if k != "QA_images"]
             data = flatten_annotations(data, keep_keys=keep_data_columns)
+            if "QA_images" in data.columns:
+                data = data.drop(columns=["QA_images"])
             if len(data) > batch_size:
                 data = self._parquet_safe_frame(data)
                 self._save_batches(data_path, data, batch_size)

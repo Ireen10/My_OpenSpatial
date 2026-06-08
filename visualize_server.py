@@ -1160,7 +1160,7 @@ function renderRows(rows) {
       }).join('');
       const modeHint = row.type_label ? ` Instruction mode: <strong>${escapeHtml(row.type_label)}</strong>.` : '';
       markHtml = `<div class="mark-panel">
-        <div class="mark-hint">QA_images are stored unmarked (raw bytes).${modeHint} Overlay is client-side from mark_spec only when you check slots below:</div>
+        <div class="mark-hint">Images load from path refs in metadata / image column.${modeHint} Overlay is client-side from mark_spec only when you check slots below:</div>
         <label style="display:block;margin-bottom:6px;font-weight:600;">
           <input type="checkbox" class="mark-select-all" data-row="${row.row_index}" checked onchange="toggleAllMarks(${row.row_index}, this.checked)" /> Select all marks
         </label>

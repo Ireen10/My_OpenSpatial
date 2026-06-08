@@ -52,7 +52,7 @@ class BaseAnnotationTask(BaseTask):
         self.scaling_factor = args.get("scaling_factor", 1)
         self.filter_tags = args.get("filter_tags", None)
         self._sub_tasks_config = self._parse_sub_tasks(args.get("sub_tasks", None))
-        self.emit_metadata = bool(args.get("emit_metadata", False))
+        self.emit_metadata = bool(args.get("emit_metadata", True))
         self.emit_marked_images = bool(args.get("emit_marked_images", False))
         self.task_name = args.get("task_name") or args.get("file_name", "annotation")
 
