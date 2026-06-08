@@ -6,12 +6,11 @@
 dataset:
   modality: image
   dataset_name: image_base
-  data_dir: E:/GitRepo/OpenSpatial/output/frame_rot/base_pipeline_demo_preprocessing_embodiedscan/scene_fusion_stage/depth_back_projection/data.parquet
+  data_dir:
 
 pipeline:
   file_name: base_pipeline
   class_name: BasePipeline
-  output_dir: E:/GitRepo/OpenSpatial/output/frame_rot/base_pipeline_demo_aggregate_singleview_frame_rot
 
   stages:
     aggregate_stage:
