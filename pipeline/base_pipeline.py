@@ -180,7 +180,7 @@ class BasePipeline:
             return
 
         if stage_name == "annotation_stage":
-            batch_size = getattr(task_cfg, "save_batch_size", 1000)
+            batch_size = getattr(task_cfg, "save_batch_size", 8192)
             keep_cols = getattr(task_cfg, "keep_data_columns",
                                ["messages", "QA_images", "question_tags", "question_types"])
             self.dataset.save_data(os.path.join(output_path, "data.parquet"), processed_data,
