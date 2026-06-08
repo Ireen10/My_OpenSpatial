@@ -18,6 +18,7 @@ from .mark_spec import mark_spec_has_slots, wrap_single_view_mark_spec
 from .question_type import QuestionType
 
 from task.base_task import BaseTask
+from utils.data_utils import as_python_list, normalize_image_field
 from utils.point_cloud_utils import clean_point_cloud
 from utils.image_utils import convert_pil_to_bytes
 
@@ -100,7 +101,7 @@ class BaseAnnotationTask(BaseTask):
     def _init_example_context(self, example):
         self._thread_local.turn_records = []
         self._thread_local.viz_turns = []
-        self._thread_local.preprocess_row = example
+        self._thread_local.preprocess_row = normalize_image_field(example)
         self._thread_local.last_prompt_render = None
 
     def _record_turn(
@@ -132,10 +133,12 @@ class BaseAnnotationTask(BaseTask):
         if mark_spec and mark_spec.get("slots") and not mark_spec.get("views"):
             row = getattr(self._thread_local, "preprocess_row", None)
             ref = None
-            if row and row.get("image") and not isinstance(row.get("image"), list):
-                ref = str(row["image"])
-            elif row and isinstance(row.get("image"), list) and len(row["image"]) == 1:
-                ref = str(row["image"][0])
+            img = as_python_list(row.get("image")) if row else None
+            if isinstance(img, list):
+                if len(img) == 1:
+                    ref = str(img[0])
+            elif img is not None:
+                ref = str(img)
             mark_spec = wrap_single_view_mark_spec(mark_spec, image_ref=ref)
         render = getattr(self._thread_local, "last_prompt_render", None)
         if answer_text is None and " Answer: " in prompt:

@@ -128,6 +128,48 @@ def merge_overlapping_boxes(obj_tags, boxes, overlap_threshold=0.8):
     return boxes, obj_tags
 
 
+def as_python_list(val):
+    """Coerce parquet list cells (including numpy.ndarray) to a plain list."""
+    if val is None:
+        return None
+    if isinstance(val, np.ndarray):
+        return val.tolist()
+    if hasattr(val, "tolist") and not isinstance(val, (str, bytes, dict)):
+        try:
+            return val.tolist()
+        except Exception:
+            pass
+    return val
+
+
+def is_nonempty_sequence(val) -> bool:
+    """Truth test safe for numpy arrays (avoids ambiguous bool)."""
+    if val is None:
+        return False
+    if isinstance(val, np.ndarray):
+        return val.size > 0
+    if isinstance(val, str):
+        return bool(val.strip())
+    if isinstance(val, bytes):
+        return bool(val)
+    try:
+        return len(val) > 0
+    except TypeError:
+        return bool(val)
+
+
+def normalize_image_field(example: dict) -> dict:
+    """Return a shallow copy with ``image`` coerced from ndarray to list when needed."""
+    if not isinstance(example, dict) or "image" not in example:
+        return example
+    img = example.get("image")
+    if isinstance(img, np.ndarray):
+        out = dict(example)
+        out["image"] = img.tolist()
+        return out
+    return example
+
+
 def strip_empty_structs(obj):
     """Remove empty dicts so PyArrow can write nested metadata (e.g. mark_spec.render_hints)."""
     if isinstance(obj, dict):

@@ -16,6 +16,7 @@ from .scene_graph import SceneGraph, SceneNode
 from .mark_spec import assemble_per_view_mark_spec, merge_mark_specs
 from .message_builder import create_multiview_messages
 
+from utils.data_utils import as_python_list, is_nonempty_sequence
 from utils.projection_utils import backproject_depth_to_3d, project_points_3d_to_2d, transform_points_camera_to_world
 class BaseMultiviewAnnotationTask(BaseAnnotationTask):
     """
@@ -171,9 +172,11 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
     @staticmethod
     def _qa_image_refs(preprocess_row: Optional[dict], meta: dict) -> List[str]:
         """Pipeline image paths for each QA frame (ordered like meta['image'])."""
-        if not preprocess_row or not isinstance(preprocess_row.get("image"), list):
+        if not preprocess_row:
             return []
-        scene_paths = preprocess_row["image"]
+        scene_paths = as_python_list(preprocess_row.get("image"))
+        if not isinstance(scene_paths, list):
+            return []
         view_indices = meta.get("view_idx") or list(range(len(meta.get("image", []))))
         refs = []
         for i, vi in enumerate(view_indices):

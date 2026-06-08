@@ -352,6 +352,9 @@ def build_turn_record(
     return meta, viz
 
 
+from utils.data_utils import as_python_list
+
+
 def build_visual_anchor(
     example: dict,
     *,
@@ -366,9 +369,9 @@ def build_visual_anchor(
         or example.get("id")
         or example.get("scene_id")
     )
-    img = example.get("image")
+    img = as_python_list(example.get("image"))
     single_ref = raw_image_ref
-    if single_ref is None and not isinstance(img, list) and img:
+    if single_ref is None and not isinstance(img, list) and isinstance(img, str) and img.strip():
         single_ref = str(img)
     anchor: Dict[str, Any] = {
         "parent_preprocess_id": str(parent_id) if parent_id is not None else "unknown",
@@ -397,8 +400,8 @@ def build_visual_anchor(
 
 
 def _single_image_ref(example: dict) -> Optional[str]:
-    img = example.get("image")
-    if isinstance(img, list) and img:
+    img = as_python_list(example.get("image"))
+    if isinstance(img, list) and len(img) > 0:
         return str(img[0]).replace("\\", "/")
     if isinstance(img, str) and img.strip():
         return str(img).replace("\\", "/")
@@ -420,7 +423,7 @@ def qa_image_refs_for_turn(example: dict, turn: dict) -> List[str]:
         return refs_from_spec
 
     view_indices = turn.get("view_indices")
-    img = example.get("image")
+    img = as_python_list(example.get("image"))
     if isinstance(img, list) and view_indices is not None:
         return [str(img[vi]).replace("\\", "/") for vi in view_indices if vi < len(img)]
 

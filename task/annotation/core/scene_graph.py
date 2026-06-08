@@ -13,6 +13,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as SciRotation
 from PIL import Image
 
+from utils.data_utils import as_python_list, is_nonempty_sequence
 from utils.image_utils import load_depth_map
 from utils.box_utils import convert_box_3d_world_to_camera
 
@@ -293,7 +294,7 @@ class SceneGraph:
         bboxes_3d_world_coords (list of lists),
         and optionally: depth_map, depth_scale, intrinsic, pose, pointclouds.
         """
-        image_paths = example.get("image", [])
+        image_paths = as_python_list(example.get("image", [])) or []
         num_views = len(image_paths)
 
         # Subsample views if exceeding max
@@ -327,7 +328,11 @@ class SceneGraph:
             view_tags = all_obj_tags[vi] if vi < len(all_obj_tags) else []
             view_masks = all_masks[vi] if vi < len(all_masks) else []
             view_bboxes = all_bboxes[vi] if vi < len(all_bboxes) else []
-            view_pcds = all_pointclouds[vi] if all_pointclouds and vi < len(all_pointclouds) else []
+            view_pcds = (
+                as_python_list(all_pointclouds[vi])
+                if is_nonempty_sequence(all_pointclouds) and vi < len(all_pointclouds)
+                else []
+            )
             view_boxes_3d = all_boxes_3d[vi] if vi < len(all_boxes_3d) else []
 
             for obj_idx, tag in enumerate(view_tags):
@@ -343,7 +348,11 @@ class SceneGraph:
                 appearance = ViewAppearance(
                     mask_path=view_masks[obj_idx] if obj_idx < len(view_masks) else None,
                     bbox_2d=view_bboxes[obj_idx] if obj_idx < len(view_bboxes) else None,
-                    pointcloud_camera_path=view_pcds[obj_idx] if view_pcds and obj_idx < len(view_pcds) else None,
+                    pointcloud_camera_path=(
+                        view_pcds[obj_idx]
+                        if is_nonempty_sequence(view_pcds) and obj_idx < len(view_pcds)
+                        else None
+                    ),
                 )
 
                 # Create or update node
@@ -367,9 +376,10 @@ class SceneGraph:
 
 
 def _safe_index(lst, idx):
-    """Safely index into a list or return None."""
+    """Safely index into a list/ndarray cell or return None."""
     if lst is None:
         return None
+    lst = as_python_list(lst)
     if isinstance(lst, list) and idx < len(lst):
         return lst[idx]
     return None
