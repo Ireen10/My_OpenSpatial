@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from task.base_task import BaseTask
+from utils.parquet_io import load_parquet_dataframe, resolve_task_output_dir
 from task.aggregate.fingerprint import image_refs_from_row, pick_dedup_winner
 from task.aggregate.turn_io import (
     TurnRecord,
@@ -95,24 +96,19 @@ class SampleAggregator(BaseTask):
             ref = f"{prefix}/{ref}"
         return ref
 
-    def _resolve_task_parquet(self, task_ref: str) -> str:
+    def _resolve_task_output(self, task_ref: str) -> str:
         ref = self._resolve_task_ref(task_ref)
-        if os.path.isfile(ref):
-            return ref
-        path = os.path.join(self.output_root, ref, "data.parquet")
-        if os.path.isfile(path):
-            return path
-        raise FileNotFoundError(f"Cannot resolve input task parquet: {ref} -> {path}")
+        return resolve_task_output_dir(self.output_root, ref)
 
     def _load_all_turns(self, dataset: pd.DataFrame) -> List[TurnRecord]:
         records: List[TurnRecord] = []
         if self.input_tasks:
             for ref in self.input_tasks:
-                path = self._resolve_task_parquet(ref)
+                loc = self._resolve_task_output(ref)
                 task_name = ref.split("/")[-1].replace(".parquet", "")
                 if "/" in ref:
                     task_name = ref.strip("/").split("/")[-1]
-                df = pd.read_parquet(path)
+                df = load_parquet_dataframe(loc)
                 records.extend(load_turns_from_parquet(df, task_name))
             return records
 

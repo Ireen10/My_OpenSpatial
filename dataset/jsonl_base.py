@@ -90,8 +90,8 @@ class JsonlBaseDataset(ImageBaseDataset):
         if p.suffix.lower() == ".jsonl":
             return self._dataframe_from_upstream_records(read_upstream_jsonl(p))
         if p.suffix.lower() == ".parquet":
-            df = pd.read_parquet(p, engine="pyarrow", dtype_backend="pyarrow")
-            return self._apply_raw_data_root(df)
+            from utils.parquet_io import load_parquet_dataframe
+            return self._apply_raw_data_root(load_parquet_dataframe(str(p)))
 
         raise NotImplementedError(
             f"JsonlBaseDataset._load_from_path: unsupported input '{path}'."

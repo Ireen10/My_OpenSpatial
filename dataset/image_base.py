@@ -9,6 +9,7 @@ from datasets import Dataset, load_dataset
 from PIL import Image as PILImage
 
 from utils.data_utils import flatten_annotations, strip_empty_structs
+from utils.parquet_io import load_parquet_dataframe
 
 HF_REPO_PATTERN = re.compile(r'^[\w-]+/[\w-]+$')
 
@@ -63,7 +64,7 @@ class ImageBaseDataset:
         if HF_REPO_PATTERN.match(self.data_dir):
             data = pd.DataFrame(load_dataset(self.data_dir, split="train"))
         else:
-            data = pd.read_parquet(self.data_dir, engine="pyarrow", dtype_backend="pyarrow")
+            data = load_parquet_dataframe(self.data_dir)
         return self._apply_raw_data_root(data)
 
     def _apply_raw_data_root(self, df):
@@ -79,10 +80,9 @@ class ImageBaseDataset:
         return df
 
     def override_data(self, data_path):
-        """Replace in-memory data with another parquet file."""
+        """Replace in-memory data from a parquet file or task output directory."""
         try:
-            data = pd.read_parquet(data_path, engine="pyarrow", dtype_backend="pyarrow")
-            self.data = self._apply_raw_data_root(data)
+            self.data = self._apply_raw_data_root(load_parquet_dataframe(data_path))
         except Exception as exc:
             raise ValueError(f"Failed to load parquet: {data_path}") from exc
 

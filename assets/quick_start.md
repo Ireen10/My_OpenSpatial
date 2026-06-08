@@ -380,7 +380,8 @@ done
 
 ### 3.6 Aggregate & Export (post-annotation)
 
-After `annotation_stage`, each task writes `annotation_stage/<task_name>/data.parquet`.
+After `annotation_stage`, each task writes under `annotation_stage/<task_name>/`
+(one or more `*.parquet` files; large annotation runs may split into several parts).
 One config under `config/aggregate/` runs **both** merge and export:
 
 ```
@@ -391,7 +392,7 @@ Run root (auto from `--output_dir` + config name):
 
 ```
 {--output_dir}/base_pipeline_demo_aggregate_singleview/
-  aggregate_stage/sample_aggregator/data.parquet
+  aggregate_stage/sample_aggregator/
   export_stage/jsonl/metadata_*.jsonl
   export_stage/images/metadata_*.tar
   export_stage/metadata.json
@@ -415,7 +416,7 @@ python run.py --config config/aggregate/demo_aggregate_multiview.yaml --output_d
 dataset:
   modality: image
   dataset_name: image_base
-  data_dir: ../base_pipeline_demo_singleview_all/annotation_stage/distance/data.parquet
+  data_dir: ../base_pipeline_demo_singleview_all/annotation_stage/distance
 
 pipeline:
   file_name: base_pipeline

@@ -1,4 +1,5 @@
 from utils.common import get_task_instance
+from utils.parquet_io import list_parquet_shards, resolve_task_output_dir
 from dataset import build_dataset
 import copy
 import os
@@ -35,24 +36,30 @@ class BasePipeline:
         return f"{stage_name}/{task_name}#{occurrence}"
 
     def _resolve_dependency_path(self, depends_on, current_task_idx=None):
-        """Resolve depends_on to concrete parquet path.
+        """Resolve depends_on to a parquet file or task output directory.
 
         Priority:
-        1. Absolute/relative file path
-        2. Explicit task ref with #N
-        3. Bare stage/task (if unique before current task)
-        4. Legacy output_root/depends_on/data.parquet
+        1. Existing file path (single .parquet)
+        2. Existing directory with one or more *.parquet files
+        3. Explicit task ref with #N → that task's output directory
+        4. Bare stage/task (unique prior task) → output directory
+        5. Legacy output_root/depends_on (directory)
         """
         if os.path.isfile(depends_on):
             return depends_on
 
-        abs_path = os.path.join(self.output_root, depends_on)
+        abs_path = os.path.normpath(os.path.join(self.output_root, depends_on))
         if os.path.isfile(abs_path):
+            return abs_path
+        if os.path.isdir(abs_path):
+            list_parquet_shards(abs_path)
             return abs_path
 
         # Explicit #N reference
         if depends_on in self.task_ref_to_rel_dir:
-            return os.path.join(self.output_root, self.task_ref_to_rel_dir[depends_on], "data.parquet")
+            out_dir = os.path.join(self.output_root, self.task_ref_to_rel_dir[depends_on])
+            list_parquet_shards(out_dir)
+            return out_dir
 
         # Bare "stage/task" - resolve from tasks before current
         if depends_on in self.base_ref_to_tasks:
@@ -61,17 +68,22 @@ class BasePipeline:
                 candidates = [t for t in candidates if t["queue_idx"] < current_task_idx]
 
             if len(candidates) == 1:
-                return os.path.join(self.output_root, candidates[0]["rel_output_dir"], "data.parquet")
+                out_dir = os.path.join(self.output_root, candidates[0]["rel_output_dir"])
+                list_parquet_shards(out_dir)
+                return out_dir
 
             if len(candidates) > 1:
                 refs = [self._format_task_ref(t["stage_name"], t["task_name"], t["occurrence"])
                         for t in candidates]
                 raise ValueError(f"Ambiguous depends_on '{depends_on}'. Use one of: {refs}")
 
-        # Legacy fallback
-        legacy_path = os.path.join(self.output_root, depends_on, "data.parquet")
-        if os.path.isfile(legacy_path):
-            return legacy_path
+        # Legacy: depends_on is a relative output subdirectory
+        try:
+            out_dir = resolve_task_output_dir(self.output_root, depends_on)
+            list_parquet_shards(out_dir)
+            return out_dir
+        except FileNotFoundError:
+            pass
 
         raise ValueError(f"Cannot resolve depends_on: {depends_on}")
 

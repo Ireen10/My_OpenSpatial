@@ -7,13 +7,13 @@
 #   python run.py --config config/aggregate/demo_aggregate_multiview.yaml --output_dir output/
 #
 # Outputs under {--output_dir}/base_pipeline_demo_aggregate_multiview/:
-#   aggregate_stage/sample_aggregator/data.parquet
+#   aggregate_stage/sample_aggregator/*.parquet
 #   export_stage/jsonl/, images/, metadata.json
 
 dataset:
   modality: image
   dataset_name: image_base
-  data_dir: ../base_pipeline_demo_multiview_all/annotation_stage/multiview_distance/data.parquet
+  data_dir: ../base_pipeline_demo_multiview_all/annotation_stage/multiview_distance
 
 pipeline:
   file_name: base_pipeline
