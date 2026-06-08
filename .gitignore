@@ -17,6 +17,7 @@ tests/
 .ipynb_checkpoints/
 temp*/
 kernel_meta/
+extra-info/
 fusion_result.json
 
 # Local dataset roots (large; not versioned)
