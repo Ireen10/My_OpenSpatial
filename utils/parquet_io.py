@@ -28,12 +28,8 @@ def load_parquet_dataframe(location: str) -> pd.DataFrame:
     """Load parquet from a file or concatenate all parquets in a directory."""
     shards = list_parquet_shards(location)
     if len(shards) == 1:
-        return pd.read_parquet(shards[0], engine="pyarrow", dtype_backend="pyarrow")
-    frames = [
-        pd.read_parquet(p, engine="pyarrow", dtype_backend="pyarrow")
-        for p in shards
-    ]
-    return pd.concat(frames, ignore_index=True)
+        return pd.read_parquet(shards[0])
+    return pd.concat([pd.read_parquet(p) for p in shards], ignore_index=True)
 
 
 def resolve_task_output_dir(output_root: str, task_ref: str) -> str:
