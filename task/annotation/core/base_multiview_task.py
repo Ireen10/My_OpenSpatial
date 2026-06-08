@@ -6,12 +6,12 @@ Extends BaseAnnotationTask with multiview-specific logic:
 - backproject_2d_to_3d / project_3d_to_2d
 """
 
-import random
 from typing import List, Optional
 import numpy as np
 import open3d as o3d
 
 from .base_annotation_task import BaseAnnotationTask
+from .thread_rng import rng
 from .scene_graph import SceneGraph, SceneNode
 from .mark_spec import assemble_per_view_mark_spec, merge_mark_specs
 from .message_builder import create_multiview_messages
@@ -312,7 +312,7 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
             selected_poses = []
             chosen = []
             shuffled = list(visible)
-            random.shuffle(shuffled)
+            rng().shuffle(shuffled)
             for vi in shuffled:
                 pose = graph.views[vi].pose
                 if self._check_pose_diversity(pose, selected_poses,
@@ -325,7 +325,7 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
         else:
             if len(visible) < num_views:
                 return None, None
-            chosen = random.sample(visible, num_views)
+            chosen = rng().sample(visible, num_views)
 
         if len(chosen) < num_views:
             return None, None
@@ -363,7 +363,7 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
         selected_poses = []      # cached pose matrices for diversity check
 
         box_keys = list(box_to_views.keys())
-        anchor_box = random.choice(box_keys)
+        anchor_box = rng().choice(box_keys)
         used_boxes.add(anchor_box)
 
         while len(collected) < num_views:
@@ -382,7 +382,7 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
             if not candidates:
                 return None
 
-            view_idx = random.choice(candidates)
+            view_idx = rng().choice(candidates)
             used_views.add(view_idx)
 
             # Cache pose for future diversity checks
@@ -404,7 +404,7 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
                                for v in box_to_views.get(nid, []))]
             if not viable:
                 return None
-            anchor_box = random.choice(viable)
+            anchor_box = rng().choice(viable)
             used_boxes.add(anchor_box)
 
         return collected

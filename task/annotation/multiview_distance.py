@@ -1,12 +1,12 @@
 """
-Multiview distance: pair absolute (2 views) + N-ary farthest/closest (3â€“6 views).
+Multiview distance: pair absolute (2 views) + N-ary farthest/closest (3â€? views).
 
 Templates:
     multiview_distance.absolute.{direct,sentence,free}  (stems shared with singleview; + introduction)
     multiview_distance.{farthest,closest}.{direct,reasoning,free}
 """
 
-import random
+from task.annotation.core.thread_rng import rng
 from .core.base_multiview_task import BaseMultiviewAnnotationTask
 from .core.visual_marker import MarkConfig
 from .core.question_type import QuestionType
@@ -65,11 +65,11 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
     def multi_relative_distance_prompt_func(self, obj_infos, graph):
         """N-ary farthest/closest to a reference object across multi-view marks."""
-        distance_type = random.choice(["closest", "farthest"])
+        distance_type = rng().choice(["closest", "farthest"])
         mode = self._pick_instruction_mode(graph)
         tpl = f"multiview_distance.{distance_type}.{mode}"
 
-        ref_idx = random.randint(0, len(obj_infos) - 1)
+        ref_idx = rng().randint(0, len(obj_infos) - 1)
         ref_desc, ref_cloud = obj_infos[ref_idx]
         ref_desc = ref_desc.lower()
         ref_cloud = self._clean_cloud(ref_cloud)
@@ -84,7 +84,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         distances.sort(key=lambda x: x[0], reverse=(distance_type == "farthest"))
         target_desc = distances[0][1]
         all_descs = [d for _, d in distances]
-        random.shuffle(all_descs)
+        rng().shuffle(all_descs)
 
         prompt = self.render_structured_prompt(
             tpl,
@@ -115,7 +115,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         return prompt, processed_images, QuestionType.OPEN_ENDED
 
     def _generate_multi_relative_distance(self, graph):
-        result = self._find_chain_and_mark(graph, num_views=random.choice([3, 4, 5, 6]))
+        result = self._find_chain_and_mark(graph, num_views=rng().choice([3, 4, 5, 6]))
         if result is None:
             return None
         meta, processed_images, objs = result

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import random
 from typing import Collection, List, Optional, Sequence
+
+from task.annotation.core.thread_rng import rng
 
 FREE_INSTRUCTION_MODE = "free"
 DEFAULT_FREE_WEIGHT = 0.6
@@ -84,9 +85,9 @@ def pick_instruction_mode(
         weights = [
             free_weight if m == free_mode else per_other for m in eligible
         ]
-        return random.choices(eligible, weights=weights, k=1)[0]
+        return rng().choices(eligible, weights=weights, k=1)[0]
 
-    return random.choice(eligible)
+    return rng().choice(eligible)
 
 
 def pick_metric_gated_mode(
@@ -128,4 +129,4 @@ def pick_stem_index(
             f"no stem eligible for is_metric_depth={is_metric_depth!r} "
             f"(pool size {len(stems)})"
         )
-    return random.choice(eligible)
+    return rng().choice(eligible)

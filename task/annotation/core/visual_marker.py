@@ -9,7 +9,7 @@ are co-located here as they are only used by VisualMarker.
 """
 
 import os
-import random
+from .thread_rng import rng
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict
 import numpy as np
@@ -233,7 +233,7 @@ class VisualMarker:
         self.color_queue = list(COLOR_QUEUE_DEFAULT)
         do_shuffle = shuffle if shuffle is not None else self.config.shuffle_colors
         if do_shuffle:
-            random.shuffle(self.color_queue)
+            rng().shuffle(self.color_queue)
 
     def pop_color(self) -> Tuple[str, tuple]:
         """Pop the next color from the queue."""
@@ -253,12 +253,12 @@ class VisualMarker:
             if not types:
                 return "box"
             weights = [self.config.type_weights[t] for t in types]
-            return random.choices(types, weights=weights, k=1)[0]
+            return rng().choices(types, weights=weights, k=1)[0]
         if self.config.mark_types:
             types = self._allowed_types(self.config.mark_types)
             if types:
-                return random.choice(types)
-        return random.choice(["point", "box"])
+                return rng().choice(types)
+        return rng().choice(["point", "box"])
 
     @staticmethod
     def _extract(obj, view_idx=0):

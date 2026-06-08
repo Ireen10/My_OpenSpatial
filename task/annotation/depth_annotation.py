@@ -2,15 +2,15 @@
 Depth estimation annotation task: depth ordering & depth choice.
 
 Sub-tasks:
-    depth_ordering_oe  — sort 3-5 marked objects/points by depth (near→far), open-ended.
-    depth_ordering_mcq — same ordering task but as 4-option MCQ (exactly 4 points/objects).
-    depth_choice_oe    — pick the closest / farthest / N-th closest object, open-ended.
-    depth_choice_mcq   — same choice task but as 4-option MCQ.
+    depth_ordering_oe  �?sort 3-5 marked objects/points by depth (near→far), open-ended.
+    depth_ordering_mcq �?same ordering task but as 4-option MCQ (exactly 4 points/objects).
+    depth_choice_oe    �?pick the closest / farthest / N-th closest object, open-ended.
+    depth_choice_mcq   �?same choice task but as 4-option MCQ.
 
 Visual annotation modes:
-    random_sample (~10%) — sample 4-7 random pixels with distinct depths; returns
+    random_sample (~10%) �?sample 4-7 random pixels with distinct depths; returns
                            normalized [x, y] coordinate tags. No drawing on image.
-    object-based  (~90%) — select 3-5 nodes, plan point/box mark_spec,
+    object-based  (~90%) �?select 3-5 nodes, plan point/box mark_spec,
                            then compute per-object depth from the depth_map.
 
 Depth estimation:
@@ -18,17 +18,17 @@ Depth estimation:
     This approximates the front-surface depth and is robust to noisy backgrounds.
 
 Templates used:
-    depth.ordering       — [T] type label, [A] object list, [X] sorted list
-    depth.ordering_mcq   — [T] type label, [Y] options; [X] obj list (q) / answer (a)
-    depth.farthest       — [T] type label, [A] object list, [X] answer
-    depth.closest        — [T] type label, [A] object list, [X] answer
-    depth.choice         — [T] type label, [A] object list, [B] ordinal, [X] answer
-    depth.farthest_mcq   — [T] type label, [Y] options; [X] obj list (q) / answer (a)
-    depth.closest_mcq    — [T] type label, [Y] options; [X] obj list (q) / answer (a)
-    depth.choice_mcq     — [T] type label, [Y] ordinal, [Z] options; [X] obj list (q) / answer (a)
+    depth.ordering       �?[T] type label, [A] object list, [X] sorted list
+    depth.ordering_mcq   �?[T] type label, [Y] options; [X] obj list (q) / answer (a)
+    depth.farthest       �?[T] type label, [A] object list, [X] answer
+    depth.closest        �?[T] type label, [A] object list, [X] answer
+    depth.choice         �?[T] type label, [A] object list, [B] ordinal, [X] answer
+    depth.farthest_mcq   �?[T] type label, [Y] options; [X] obj list (q) / answer (a)
+    depth.closest_mcq    �?[T] type label, [Y] options; [X] obj list (q) / answer (a)
+    depth.choice_mcq     �?[T] type label, [Y] ordinal, [Z] options; [X] obj list (q) / answer (a)
 """
 
-import random
+from task.annotation.core.thread_rng import rng
 import numpy as np
 from .core.base_annotation_task import BaseAnnotationTask
 from .core.mark_spec import plan_point_marks
@@ -116,11 +116,11 @@ class AnnotationGenerator(BaseAnnotationTask):
         """
         h, w = depth_map.shape
         if num_points is None:
-            num_points = random.randint(4, 7)
+            num_points = rng().randint(4, 7)
         points, selected_depths = [], []
         for _ in range(num_points):
             for _ in range(100):
-                u, v = random.randint(0, w - 1), random.randint(0, h - 1)
+                u, v = rng().randint(0, w - 1), rng().randint(0, h - 1)
                 d = depth_map[v, u]
                 if d > 0 and all(abs(d - sd) > 0.05 for sd in selected_depths):
                     points.append([u, v])
@@ -146,10 +146,10 @@ class AnnotationGenerator(BaseAnnotationTask):
         or None.
         """
         if num_objects is None:
-            num = random.randint(3, min(5, len(nodes)))
+            num = rng().randint(3, min(5, len(nodes)))
         else:
             num = min(num_objects, len(nodes))
-        sampled = random.sample(nodes, num)
+        sampled = rng().sample(nodes, num)
 
         graph = getattr(self._thread_local, "scene_graph", None)
         enable = self.resolve_mark_enabled(graph, sampled, view_idx=0)
@@ -212,9 +212,9 @@ class AnnotationGenerator(BaseAnnotationTask):
         """
         mcq_n = 4 if qtype == QuestionType.MCQ else None
 
-        if random.random() < 0.1:
+        if rng().random() < 0.1:
             result = self._sample_random_points(
-                depth_map, num_points=mcq_n or random.randint(4, 7),
+                depth_map, num_points=mcq_n or rng().randint(4, 7),
             )
             if result is not None:
                 tags, sorted_tags, image_bytes, mark_spec = result
@@ -282,7 +282,7 @@ class AnnotationGenerator(BaseAnnotationTask):
             wrong_perms = []
             for _ in range(50):
                 perm = list(sorted_sem)
-                random.shuffle(perm)
+                rng().shuffle(perm)
                 if perm != sorted_sem and perm not in wrong_perms:
                     wrong_perms.append(perm)
                     if len(wrong_perms) == 3:
@@ -316,7 +316,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         qtype_str = "OE" if qtype == QuestionType.OPEN_ENDED else "MCQ"
         is_points = t_label.startswith("points")
 
-        r = random.random()
+        r = rng().random()
         question_type = "farthest" if r < 0.4 else ("closest" if r < 0.8 else "choice")
         base = f"depth.{question_type}" + ("_mcq" if qtype == QuestionType.MCQ else "")
         mode = pick_instruction_mode(_DEPTH_INSTRUCTION_MODES)
@@ -328,7 +328,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         elif question_type == "closest":
             correct_idx = 0
         else:
-            correct_idx = random.randint(0, len(sorted_sem) - 1)
+            correct_idx = rng().randint(0, len(sorted_sem) - 1)
 
         if qtype == QuestionType.OPEN_ENDED:
             shared = {"T": t_label, "A": obj_str, "X": str(sorted_sem[correct_idx])}
@@ -344,7 +344,7 @@ class AnnotationGenerator(BaseAnnotationTask):
             )
         else:
             wrong_idx = [i for i in range(len(sorted_sem)) if i != correct_idx]
-            candidates = [sorted_sem[correct_idx]] + [sorted_sem[i] for i in random.sample(wrong_idx, 3)]
+            candidates = [sorted_sem[correct_idx]] + [sorted_sem[i] for i in rng().sample(wrong_idx, 3)]
             shuffled, answer_option = self._shuffle_mcq(candidates)
             options = [f"{'ABCD'[i]}:{str(shuffled[i])}" for i in range(4)]
 
@@ -371,7 +371,7 @@ class AnnotationGenerator(BaseAnnotationTask):
     # ── handlers (dispatched by SUB_TASKS) ───────────────────────────
 
     def _dispatch(self, graph, task_kind, qtype, sub_task):
-        """Shared handler logic: prepare graph → build prompt → return result."""
+        """Shared handler logic: prepare graph �?build prompt �?return result."""
         prepared = self._prepare(graph)
         if prepared is None:
             return None

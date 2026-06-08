@@ -2,14 +2,14 @@
 Multiview object position: cross-view relative direction (OE + MCQ).
 
 Frames:
-  object_relative  â€” premise: A relative to anchor B in image 1 (cardinal)
-  viewer_at_anchor â€” premise: viewer at B, A on the [X] side (egocentric)
+  object_relative  â€?premise: A relative to anchor B in image 1 (cardinal)
+  viewer_at_anchor â€?premise: viewer at B, A on the [X] side (egocentric)
 
 Answer modes: OE sentence|free; MCQ direct|sentence|free
 """
 
 import math
-import random
+from task.annotation.core.thread_rng import rng
 from .core.base_multiview_task import BaseMultiviewAnnotationTask
 from .core.prompt_template import PromptTemplate
 from .core.visual_marker import MarkConfig
@@ -89,7 +89,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
     def relative_direction(self, p1, p2, p3, frame):
         dir_tmp = self._DIR_TEMPLATES[frame]
         dir_map = self._DIR_MAPS[frame]
-        prior_direction = dir_tmp[random.choice([0, 2, 4, 6])]
+        prior_direction = dir_tmp[rng().choice([0, 2, 4, 6])]
         dx1, dy1 = p1[0] - p2[0], p1[1] - p2[1]
         dx3, dy3 = p3[0] - p2[0], p3[1] - p2[1]
         new_dx3, new_dy3 = self.rotate(dx3, dy3, dx1, dy1, prior_direction, dir_map)
@@ -120,7 +120,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         """Build MCQ options string; answer token is always label + option text."""
         dir_tmp = self._vocab_for_direction(dir_B2anchor)
         wrong_options = [d for d in dir_tmp if d != dir_B2anchor and d not in dir_B2anchors]
-        wrong_options = random.sample(wrong_options, 3)
+        wrong_options = rng().sample(wrong_options, 3)
         candidates = [dir_B2anchor] + wrong_options
         shuffled, answer_letter = self._shuffle_mcq(candidates)
 
@@ -145,14 +145,14 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         B_desc, B_box_3d_world = B
         anchor_desc, anchor_box_3d_world = anchor
 
-        frame = random.choice(self._DIR_FRAMES)
+        frame = rng().choice(self._DIR_FRAMES)
         dir_A2anchor, dir_B2anchors = self.relative_direction(
             A_box_3d_world[:2], anchor_box_3d_world[:2], B_box_3d_world[:2], frame,
         )
         if dir_A2anchor == 'unknown' or 'unknown' in dir_B2anchors:
             return None
 
-        dir_B2anchor = dir_B2anchors[random.choice([1, 2])]
+        dir_B2anchor = dir_B2anchors[rng().choice([1, 2])]
         answer_mode = self._pick_answer_mode(question_type)
         base = (
             f"multiview_position.{frame}"
@@ -161,7 +161,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         )
         tpl = f"{base}.{answer_mode}"
         tpl_obj = self.get_structured_template(tpl)
-        stem_i = random.randrange(len(tpl_obj.stem))
+        stem_i = rng().randrange(len(tpl_obj.stem))
         premise = PromptTemplate._fill(FRAME_PREMISE_POOLS[frame][stem_i], {
             "A": A_desc, "B": anchor_desc, "C": B_desc, "X": dir_A2anchor,
         })
@@ -210,8 +210,8 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         if not only_in_v1 or not only_in_v2:
             return None, False
 
-        obj1_tag = random.choice(list(only_in_v1))
-        obj2_tag = random.choice(list(only_in_v2))
+        obj1_tag = rng().choice(list(only_in_v1))
+        obj2_tag = rng().choice(list(only_in_v2))
 
         node1 = view_data[view1_idx][obj1_tag]
         node2 = view_data[view2_idx][obj2_tag]
@@ -262,7 +262,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         B_prompt = (meta["tag"][1], meta["box_3d_world"][1])
         anchor_prompt = (meta["anchor_tag"], meta["anchor_box_3d_world"])
 
-        if random.random() < 0.5:
+        if rng().random() < 0.5:
             A_obj = (meta["tag"][0], meta["node"][0], meta["bbox_2d"][0], meta["mask"][0])
             anchor_obj = (
                 meta["anchor_tag"], meta["anchor_node"],

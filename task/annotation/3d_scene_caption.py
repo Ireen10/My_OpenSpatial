@@ -5,7 +5,7 @@ Dataset human prompts use role+task only; API prompts use all modules.
 Required config keys: api_key, base_url, model.
 """
 
-import random
+from task.annotation.core.thread_rng import rng
 import time
 import base64
 from PIL import Image
@@ -75,9 +75,9 @@ class CaptionGenerator(BaseAnnotationTask):
         for name, pool in modules.items():
             if keys_filter is not None and name not in keys_filter:
                 continue
-            if random.random() < dropout.get(name, 0.0):
+            if rng().random() < dropout.get(name, 0.0):
                 continue
-            idx = random.randrange(len(pool))
+            idx = rng().randrange(len(pool))
             parts.append(pool[idx])
             indices[name] = idx
         return parts, indices
@@ -90,8 +90,8 @@ class CaptionGenerator(BaseAnnotationTask):
             CAPTION_DATASET_MODULES, dropout, keys_filter=CAPTION_DATASET_KEYS,
         )
         if not parts:
-            role_i = random.randrange(len(CAPTION_DATASET_MODULES["role"]))
-            task_i = random.randrange(len(CAPTION_DATASET_MODULES["task"]))
+            role_i = rng().randrange(len(CAPTION_DATASET_MODULES["role"]))
+            task_i = rng().randrange(len(CAPTION_DATASET_MODULES["task"]))
             parts = [
                 CAPTION_DATASET_MODULES["role"][role_i],
                 CAPTION_DATASET_MODULES["task"][task_i],
@@ -106,8 +106,8 @@ class CaptionGenerator(BaseAnnotationTask):
         parts, _ = cls._sample_modules(CAPTION_API_MODULES, dropout)
         if not parts:
             parts = [
-                random.choice(CAPTION_API_MODULES["role"]),
-                random.choice(CAPTION_API_MODULES["task"]),
+                rng().choice(CAPTION_API_MODULES["role"]),
+                rng().choice(CAPTION_API_MODULES["task"]),
             ]
         return " ".join(parts)
 

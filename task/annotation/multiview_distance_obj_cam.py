@@ -1,4 +1,4 @@
-import random
+from task.annotation.core.thread_rng import rng
 import numpy as np
 import open3d as o3d
 from .core.base_multiview_task import BaseMultiviewAnnotationTask
@@ -50,7 +50,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         A_cloud = self._clean_cloud(A_cloud)
         B_cloud = self._clean_cloud(B_cloud)
 
-        close_far = random.choice(["closer", "farther"])
+        close_far = rng().choice(["closer", "farther"])
         dist_A = self._mean_closest_distance_to_origin(A_cloud)
         dist_B = self._mean_closest_distance_to_origin(B_cloud)
 
@@ -62,7 +62,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         else:
             answer = "B"
 
-        opt_tpl = random.choice(multiview_distance_obj_cam_option_phrases)
+        opt_tpl = rng().choice(multiview_distance_obj_cam_option_phrases)
         opt_a = PromptTemplate._fill(opt_tpl, {"A": A_desc, "Y": close_far, "X": "View 1"})
         opt_b = PromptTemplate._fill(opt_tpl, {"A": A_desc, "Y": close_far, "X": "View 2"})
         opt_c = multiview_distance_obj_cam_equal_option

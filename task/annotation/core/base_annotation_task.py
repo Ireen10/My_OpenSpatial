@@ -235,9 +235,10 @@ class BaseAnnotationTask(BaseTask):
 
     @staticmethod
     def _shuffle_mcq(candidates, correct_idx=0):
-        import random
+        from .thread_rng import rng
+
         order = list(range(len(candidates)))
-        random.shuffle(order)
+        rng().shuffle(order)
         answer = "ABCD"[order.index(correct_idx)]
         return [candidates[j] for j in order], answer
 
@@ -274,7 +275,7 @@ class BaseAnnotationTask(BaseTask):
         tag: Optional[str] = None,
     ) -> bool:
         """Require mark when tag is ambiguous in-view; else sample optional mark."""
-        import random
+        from .thread_rng import rng
 
         if graph is not None:
             nodes = self._nodes_from_mark_inputs(objs) if objs else []
@@ -285,7 +286,7 @@ class BaseAnnotationTask(BaseTask):
                 check_tag = nodes[0].tag
             if check_tag and graph.count_tag_in_view(check_tag, view_idx) > 1:
                 return True
-        return random.random() < OPTIONAL_MARK_ENABLE_PROB
+        return rng().random() < OPTIONAL_MARK_ENABLE_PROB
 
     def _qa_slot(self, image=None):
         """In-memory QA image slot; serialize pixels only when emit_marked_images."""

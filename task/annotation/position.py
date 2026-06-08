@@ -4,7 +4,7 @@ Position annotation task: height comparison & near/far (proximity).
 Templates: position.{height_higher,height_lower,near_far}.{direct|sentence|free} (MCQ)
 """
 
-import random
+from task.annotation.core.thread_rng import rng
 import numpy as np
 from itertools import combinations
 from .core.base_annotation_task import BaseAnnotationTask
@@ -54,7 +54,7 @@ class AnnotationGenerator(BaseAnnotationTask):
 
         is_above = self._get_z_max(A_node) > self._get_z_max(B_node)
 
-        if random.random() < 0.5:
+        if rng().random() < 0.5:
             base_tpl = "position.height_higher"
             target = A_desc if is_above else B_desc
         else:
@@ -93,7 +93,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         A_desc, B_desc = marked_surface_label(A), marked_surface_label(B)
 
         labels = [self._NEAR_LABEL, self._FAR_LABEL]
-        if random.random() < 0.5:
+        if rng().random() < 0.5:
             labels = labels[::-1]
 
         options = f"\nOptions: A. {labels[0]} B. {labels[1]}"
@@ -129,11 +129,11 @@ class AnnotationGenerator(BaseAnnotationTask):
         nodes = [n for n in graph.get_object_nodes() if n.box_3d_world is not None]
         if len(nodes) < 2:
             return None
-        sampled = random.sample(nodes, 2)
+        sampled = rng().sample(nodes, 2)
         qtype = QuestionType.MCQ
         qa_image = graph.primary_view.image if self.emit_marked_images else None
 
-        if random.random() < 0.8:
+        if rng().random() < 0.8:
             processed_image, marked = self.mark_objects_for_qa(qa_image, sampled)
         else:
             processed_image = None
@@ -152,7 +152,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         if len(nodes) < 2:
             return None
         if len(nodes) > 8:
-            nodes = random.sample(nodes, 8)
+            nodes = rng().sample(nodes, 8)
         qa_image = graph.primary_view.image if self.emit_marked_images else None
 
         near_candidates, far_candidates = [], []
@@ -177,8 +177,8 @@ class AnnotationGenerator(BaseAnnotationTask):
 
         results = []
         if near_candidates:
-            pair = random.choice(near_candidates)
-            if random.random() < 0.5:
+            pair = rng().choice(near_candidates)
+            if rng().random() < 0.5:
                 processed_image, marked = self.mark_objects_for_qa(qa_image, list(pair))
             else:
                 processed_image = None
@@ -191,8 +191,8 @@ class AnnotationGenerator(BaseAnnotationTask):
             )
             results.append((prompt, processed_image, QuestionType.MCQ))
         if far_candidates:
-            pair = random.choice(far_candidates)
-            if random.random() < 0.5:
+            pair = rng().choice(far_candidates)
+            if rng().random() < 0.5:
                 processed_image, marked = self.mark_objects_for_qa(qa_image, list(pair))
             else:
                 processed_image = None

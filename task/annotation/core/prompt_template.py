@@ -1,7 +1,7 @@
-import random
 import re
-import threading
 from dataclasses import dataclass, field
+
+from .thread_rng import rng
 from typing import Dict, List, Optional, Tuple
 
 PLACEHOLDER_RE = re.compile(r"\[([A-Z])\]")
@@ -41,12 +41,12 @@ class PromptTemplate:
 
     def sample_pair(self, condition: bool = None) -> Tuple[int, int, str, str]:
         """Return (question_index, answer_index, question_line, answer_line)."""
-        qi = random.randrange(len(self.questions))
+        qi = rng().randrange(len(self.questions))
         q = self.questions[qi]
         if condition is not None:
             if self.true_answers and self.false_answers:
                 pool = self.true_answers if condition else self.false_answers
-                ai = random.randrange(len(pool))
+                ai = rng().randrange(len(pool))
                 a = pool[ai]
                 answer_index = ai
             else:
@@ -55,7 +55,7 @@ class PromptTemplate:
                     "false_answers to be non-empty."
                 )
         elif self.answers:
-            ai = random.randrange(len(self.answers))
+            ai = rng().randrange(len(self.answers))
             a = self.answers[ai]
             answer_index = ai
         else:
@@ -143,12 +143,10 @@ class PromptTemplate:
 class TemplateRegistry:
     """Global template registry keyed by 'task.variant' names."""
     _store: Dict[str, PromptTemplate] = {}
-    _lock: threading.Lock = threading.Lock()
 
     @classmethod
     def register(cls, name: str, tpl: PromptTemplate):
-        with cls._lock:
-            cls._store[name] = tpl
+        cls._store[name] = tpl
 
     @classmethod
     def get(cls, name: str) -> PromptTemplate:

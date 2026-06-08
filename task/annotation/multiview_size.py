@@ -1,12 +1,12 @@
 """
-Multiview size: pair relative judgment (2 views) + N-ary biggest/smallest (3â€“6 views).
+Multiview size: pair relative judgment (2 views) + N-ary biggest/smallest (3â€? views).
 
 Templates:
-    multiview_size.{big,small}.pair  â€” Judgment (D_diag + 1.2 ratio gate, aligned with singleview)
-    multiview_size.{biggest,smallest}.{direct,sentence}  â€” N-ary (D_diag; 1.2 gate on rank-1 vs rank-2 only)
+    multiview_size.{big,small}.pair  â€?Judgment (D_diag + 1.2 ratio gate, aligned with singleview)
+    multiview_size.{biggest,smallest}.{direct,sentence}  â€?N-ary (D_diag; 1.2 gate on rank-1 vs rank-2 only)
 """
 
-import random
+from task.annotation.core.thread_rng import rng
 from .core.base_multiview_task import BaseMultiviewAnnotationTask
 from .core.visual_marker import MarkConfig
 from .core.question_type import QuestionType
@@ -57,7 +57,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         if lo <= 0 or hi / lo < RELATIVE_SIZE_DIAG_RATIO_MIN:
             return None, None
 
-        tpl_name = random.choice(["multiview_size.big.pair", "multiview_size.small.pair"])
+        tpl_name = rng().choice(["multiview_size.big.pair", "multiview_size.small.pair"])
         is_bigger = d_A > d_B
         condition = is_bigger if "big" in tpl_name else not is_bigger
 
@@ -66,7 +66,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
     def multi_relative_size_prompt_func(self, obj_infos, boxes_3d_world=None):
         """Generate a superlative size QA for N objects from different views."""
-        size_type = random.choice(["biggest", "smallest"])
+        size_type = rng().choice(["biggest", "smallest"])
         mode = pick_instruction_mode(self._SUPERLATIVE_MODES)
         tpl_name = f"multiview_size.{size_type}.{mode}"
 
@@ -86,7 +86,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
                 return None, None
         target_desc = diags[0][1]
         all_tags = [d for _, d in diags]
-        random.shuffle(all_tags)
+        rng().shuffle(all_tags)
 
         prompt = self.render_structured_prompt(
             tpl_name, shared={"T": ", ".join(all_tags), "X": target_desc},
@@ -114,7 +114,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         return prompt, processed_images, QuestionType.JUDGMENT
 
     def _generate_multi_relative_size(self, graph):
-        result = self._find_chain_and_mark(graph, num_views=random.choice([3, 4, 5, 6]))
+        result = self._find_chain_and_mark(graph, num_views=rng().choice([3, 4, 5, 6]))
         if result is None:
             return None
         meta, processed_images, objs = result

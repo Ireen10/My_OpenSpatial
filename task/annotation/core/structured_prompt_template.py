@@ -10,9 +10,9 @@ Instruction types and pools are registered by downstream tasks only.
 
 from __future__ import annotations
 
-import random
-import threading
 from dataclasses import dataclass, field
+
+from .thread_rng import rng
 from typing import Dict, List, Optional, Sequence
 
 from .prompt_template import PLACEHOLDER_RE, PromptRenderRecord, PromptTemplate
@@ -22,14 +22,14 @@ from .question_type import QuestionType
 def _pick_optional(pool: Sequence[str]) -> tuple[int, str]:
     if not pool:
         return -1, ""
-    idx = random.randrange(len(pool))
+    idx = rng().randrange(len(pool))
     return idx, pool[idx].strip()
 
 
 def _pick_required(pool: Sequence[str], *, label: str) -> tuple[int, str]:
     if not pool:
         raise ValueError(f"{label} pool must be non-empty")
-    idx = random.randrange(len(pool))
+    idx = rng().randrange(len(pool))
     return idx, pool[idx].strip()
 
 
@@ -97,7 +97,7 @@ def _pick_answer_template(
         raise ValueError(
             f"{label}: no answer template for is_metric_depth={is_metric_depth!r}"
         )
-    idx = random.randrange(len(indices))
+    idx = rng().randrange(len(indices))
     chosen = indices[idx]
     return chosen, pool[chosen].strip()
 
@@ -326,12 +326,10 @@ def from_legacy_prompt_template(
 
 class StructuredTemplateRegistry:
     _store: Dict[str, StructuredPromptTemplate] = {}
-    _lock: threading.Lock = threading.Lock()
 
     @classmethod
     def register(cls, tpl: StructuredPromptTemplate) -> None:
-        with cls._lock:
-            cls._store[tpl.template_id] = tpl
+        cls._store[tpl.template_id] = tpl
 
     @classmethod
     def register_legacy(

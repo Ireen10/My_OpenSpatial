@@ -2,9 +2,9 @@
 Distance annotation task: absolute distance & relative distance comparison.
 
 Sub-tasks:
-    absolute_distance â€” measure the point-cloud minimum distance between two objects
+    absolute_distance â€?measure the point-cloud minimum distance between two objects
                         and report in metres or centimetres (requires metric depth).
-    relative_distance â€” given three objects A, B, C, ask which of A/B is farther from /
+    relative_distance â€?given three objects A, B, C, ask which of A/B is farther from /
                         closer to C, in both open-ended and MCQ form.
 
 Templates used (singleview):
@@ -13,11 +13,11 @@ Templates used (singleview):
     distance.relative_{far,close}_mcq.{direct,reasoning,free}
       (reasoning/free answers use is_metric_depth for metric vs semantic templates)
 
-Mark policy (see MARK_TASKS_MEMO.md): ambiguous tag in view â†’ mark_spec required;
+Mark policy (see MARK_TASKS_MEMO.md): ambiguous tag in view â†?mark_spec required;
 else 25% optional mark_spec. QA images stay unmarked unless emit_marked_images.
 """
 
-import random
+from task.annotation.core.thread_rng import rng
 
 from .core.base_annotation_task import BaseAnnotationTask
 from .core.sample_metadata import marked_surface_label
@@ -135,7 +135,7 @@ class AnnotationGenerator(BaseAnnotationTask):
             dist_BC,
         ) = self._resolve_relative_distance(A, B, C)
 
-        if random.random() < 0.5:
+        if rng().random() < 0.5:
             polarity, winner, other = "far", farther, closer
         else:
             polarity, winner, other = "close", closer, farther
@@ -178,7 +178,7 @@ class AnnotationGenerator(BaseAnnotationTask):
 
         options = f"\nOptions: A. {self._title_desc(A_desc)}  B. {self._title_desc(B_desc)}."
 
-        if random.random() < 0.5:
+        if rng().random() < 0.5:
             polarity, target_tag, winner_desc = "far", farther_tag, farther
         else:
             polarity, target_tag, winner_desc = "close", closer_tag, closer
@@ -223,7 +223,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         nodes = graph.get_object_nodes()
         if len(nodes) < 2:
             return None
-        sampled = random.sample(nodes, 2)
+        sampled = rng().sample(nodes, 2)
         qa_image = graph.primary_view.image if self.emit_marked_images else None
         processed_image, marked = self.mark_objects_for_qa(qa_image, sampled)
         A, B = marked
@@ -243,7 +243,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         nodes = graph.get_object_nodes()
         if len(graph.obj_tags) <= 2:
             return None
-        sampled = random.sample(nodes, 3)
+        sampled = rng().sample(nodes, 3)
         qa_image = graph.primary_view.image if self.emit_marked_images else None
         processed_image, marked = self.mark_objects_for_qa(qa_image, sampled)
         A, B, C = marked

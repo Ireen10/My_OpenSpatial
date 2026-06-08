@@ -221,12 +221,13 @@ class SceneGraph:
         Returns:
             (box_key, view_candidates) or None if not found.
         """
-        import random
+        from .thread_rng import rng
+
         box_keys = list(self.box_to_view_proj.keys())
         if not box_keys:
             return None
         for _ in range(attempts):
-            box_key = random.choice(box_keys)
+            box_key = rng().choice(box_keys)
             view_candidates = self.box_to_view_proj[box_key]
             if len(view_candidates) >= min_views:
                 return box_key, view_candidates
