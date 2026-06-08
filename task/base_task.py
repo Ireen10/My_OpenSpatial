@@ -19,6 +19,13 @@ class BaseTask:
     def __init__(self, args):
         self.args = args
         self.use_multi_processing = args.get("use_multi_processing", False)
+        num_workers = args.get("num_workers", 8)
+        if num_workers > 1 and not self.use_multi_processing:
+            print(
+                f"  WARNING: num_workers={num_workers} ignored — "
+                f"use_multi_processing is false; running single-threaded.",
+                flush=True,
+            )
 
     def apply_transform(self, example, idx):
         raise NotImplementedError
@@ -38,23 +45,25 @@ class BaseTask:
         return pd.DataFrame(processed).reset_index(drop=True)
 
     def _run_multi_processing(self, dataset):
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         num_workers = self.args.get('num_workers', 8)
-        examples = list(enumerate(dataset.to_dict('records')))
-        print(f"  [{type(self).__name__}] {len(examples)} examples, {num_workers} workers",
+        n = len(dataset)
+        print(f"  [{type(self).__name__}] {n} examples, {num_workers} workers",
               flush=True)
+
+        def _work(idx):
+            example = dataset.iloc[idx].to_dict()
+            return self.apply_transform(example, idx)
 
         processed = []
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            results = executor.map(
-                lambda item: self.apply_transform(item[1], item[0]),
-                examples,
-            )
-            for result, flag in tqdm.tqdm(results, total=len(examples),
-                                          desc="Processing examples"):
+            futures = [executor.submit(_work, idx) for idx in range(n)]
+            for fut in tqdm.tqdm(as_completed(futures), total=n,
+                                 desc="Processing examples"):
+                result, flag = fut.result()
                 if flag:
                     processed.append(result)
 
-        print(f"  [{type(self).__name__}] {len(processed)}/{len(examples)} passed", flush=True)
+        print(f"  [{type(self).__name__}] {len(processed)}/{n} passed", flush=True)
         return pd.DataFrame(processed).reset_index(drop=True)

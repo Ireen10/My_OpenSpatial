@@ -98,7 +98,11 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
             return None, False
 
         meta = {
-            "image": [graph.views[v1].image, graph.views[v2].image],
+            "image": (
+                [graph.views[v1].image, graph.views[v2].image]
+                if self.emit_marked_images
+                else [graph.views[v1].image_path, graph.views[v2].image_path]
+            ),
             "mask": [app1.mask, app2.mask],
             "tag": [node.tag, node.tag],
             "view_idx": [v1, v2],

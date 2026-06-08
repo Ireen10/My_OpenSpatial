@@ -49,7 +49,8 @@ def create_multiview_messages(prompts, processed_images):
     """
     messages = []
     for i, prompt in enumerate(prompts):
-        num_images = len(processed_images[i]) if i < len(processed_images) else 1
+        slot = processed_images[i] if i < len(processed_images) else None
+        num_images = len(slot) if isinstance(slot, list) else 1
         if isinstance(prompt, list):
             msg = _build_multi_turn(prompt, num_images=num_images)
             if msg:

@@ -284,6 +284,30 @@ class BaseAnnotationTask(BaseTask):
                 return True
         return random.random() < OPTIONAL_MARK_ENABLE_PROB
 
+    def _qa_slot(self, image=None):
+        """In-memory QA image slot; serialize pixels only when emit_marked_images."""
+        if self.emit_marked_images and image is not None:
+            return {"bytes": convert_pil_to_bytes(image)}
+        return None
+
+    def _qa_slots(self, images):
+        if self.emit_marked_images:
+            return [{"bytes": convert_pil_to_bytes(im)} for im in images]
+        return [None] * len(images)
+
+    @staticmethod
+    def _qa_pixel_placeholders(items):
+        """Preserve per-QA image counts without encoding pixels."""
+        if not items:
+            return items
+        out = []
+        for item in items:
+            if isinstance(item, list):
+                out.append([None] * len(item))
+            else:
+                out.append(None)
+        return out
+
     def plan_mark_for_qa(
         self,
         image,
@@ -294,16 +318,18 @@ class BaseAnnotationTask(BaseTask):
         points=None,
         view_idx: int = 0,
     ):
-        """Plan mark_spec; return unmarked QA bytes unless emit_marked_images."""
+        """Plan mark_spec; pixels only when emit_marked_images."""
         graph = getattr(self._thread_local, "scene_graph", None)
         if points is None and objs is not None:
             if not self.resolve_mark_enabled(graph, objs, view_idx):
                 self.marker._last_mark_spec = None
                 marked = self._marked_info_without_plan(objs)
-                return {"bytes": convert_pil_to_bytes(image)}, marked
+                return self._qa_slot(image), marked
 
         row = getattr(self._thread_local, "preprocess_row", None)
         if self.emit_marked_images:
+            if image is None:
+                raise ValueError("image is required when emit_marked_images is true")
             from .mark_spec import render_mark
 
             if points is not None:
@@ -327,7 +353,7 @@ class BaseAnnotationTask(BaseTask):
                 objs, mark_type=mark_type, view_idx=view_idx, labels=labels,
             )
         self.marker._last_mark_spec = spec
-        return {"bytes": convert_pil_to_bytes(image)}, marked_info
+        return self._qa_slot(image), marked_info
 
     def mark_objects_for_qa(
         self,
@@ -338,6 +364,7 @@ class BaseAnnotationTask(BaseTask):
         labels=None,
         view_idx: int = 0,
     ):
+        """``image`` is only read when ``emit_marked_images`` is true (pixel render)."""
         return self.plan_mark_for_qa(
             image,
             objs=objs,
@@ -346,15 +373,10 @@ class BaseAnnotationTask(BaseTask):
             view_idx=view_idx,
         )
 
-    @staticmethod
-    def _raw_image_bytes_single(graph) -> dict:
-        return {"bytes": convert_pil_to_bytes(graph.primary_view.image)}
-
     def _resolve_qa_images(self, graph, processed_images: list) -> list:
-        if not self.emit_marked_images:
-            raw = self._raw_image_bytes_single(graph)
-            return [raw] * len(processed_images)
-        return processed_images
+        if self.emit_marked_images:
+            return processed_images
+        return self._qa_pixel_placeholders(processed_images)
 
     def check_example(self, example) -> bool:
         if "image" not in example:
@@ -507,16 +529,19 @@ class BaseAnnotationTask(BaseTask):
         from .message_placeholders import (
             build_messages_from_viz_turns,
             sync_messages_with_qa_images,
+            sync_messages_with_turns,
         )
 
         if viz_turns:
             messages = build_messages_from_viz_turns(viz_turns)
         else:
             messages = self.create_messages_from_prompts(prompts, processed_images)
-            messages = sync_messages_with_qa_images(messages, processed_images)
+            if turn_records:
+                messages = sync_messages_with_turns(messages, turn_records)
+            else:
+                messages = sync_messages_with_qa_images(messages, processed_images)
 
         example["messages"] = messages
-        example["QA_images"] = processed_images
         example["question_tags"] = question_tags
         example["question_types"] = question_types
 

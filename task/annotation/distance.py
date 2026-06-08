@@ -223,9 +223,9 @@ class AnnotationGenerator(BaseAnnotationTask):
         nodes = graph.get_object_nodes()
         if len(nodes) < 2:
             return None
-        image = graph.primary_view.image
         sampled = random.sample(nodes, 2)
-        processed_image, marked = self.mark_objects_for_qa(image, sampled)
+        qa_image = graph.primary_view.image if self.emit_marked_images else None
+        processed_image, marked = self.mark_objects_for_qa(qa_image, sampled)
         A, B = marked
         prompt, tpl = self.absolute_distance_prompt_func(A, B)
         self._record_turn(
@@ -243,9 +243,9 @@ class AnnotationGenerator(BaseAnnotationTask):
         nodes = graph.get_object_nodes()
         if len(graph.obj_tags) <= 2:
             return None
-        image = graph.primary_view.image
         sampled = random.sample(nodes, 3)
-        processed_image, marked = self.mark_objects_for_qa(image, sampled)
+        qa_image = graph.primary_view.image if self.emit_marked_images else None
+        processed_image, marked = self.mark_objects_for_qa(qa_image, sampled)
         A, B, C = marked
         slots = self._slots_from_marked(marked, labels=["A", "B", "C"])
         mark_spec = self.marker.last_mark_spec

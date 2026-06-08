@@ -40,8 +40,6 @@ import open3d as o3d
 from .core.base_multiview_task import BaseMultiviewAnnotationTask
 from .core.mark_spec import assemble_per_view_mark_spec
 from .core.question_type import QuestionType
-from utils.image_utils import convert_pil_to_bytes
-
 
 class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
@@ -222,7 +220,6 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
             return None, False
 
         meta_data = {
-            "image": [view1.image, view2.image],
             "view_idx": [view1_idx, view2_idx],
             "point": [pt1_uv.astype(int).tolist(), pt2_uv.astype(int).tolist(), uv_candidates],
         }
@@ -284,8 +281,8 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
             processed_image1 = render_mark(image1, merged, view_index=0)
             processed_image2 = render_mark(image2, merged, view_index=1, labels=labels)
         else:
-            processed_image1 = {"bytes": convert_pil_to_bytes(image1)}
-            processed_image2 = {"bytes": convert_pil_to_bytes(image2)}
+            processed_image1 = None
+            processed_image2 = None
 
         return processed_image1, processed_image2, color_name1, color_name2, gt_answer
 
@@ -305,7 +302,12 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
             return None
 
         point1, point2, uv_candidates = meta["point"]
-        image1, image2 = meta["image"]
+        vi0, vi1 = meta["view_idx"]
+        if self.emit_marked_images:
+            image1 = graph.views[vi0].image
+            image2 = graph.views[vi1].image
+        else:
+            image1 = image2 = None
 
         self.marker.reset(shuffle=True)
         img1, img2, color1, color2, gt_answer = self._draw_candidate_points(

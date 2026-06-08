@@ -17,9 +17,6 @@ from .mark_spec import assemble_per_view_mark_spec, merge_mark_specs
 from .message_builder import create_multiview_messages
 
 from utils.projection_utils import backproject_depth_to_3d, project_points_3d_to_2d, transform_points_camera_to_world
-from utils.image_utils import convert_pil_to_bytes
-
-
 class BaseMultiviewAnnotationTask(BaseAnnotationTask):
     """
     Base class for all multiview annotation tasks.
@@ -171,9 +168,6 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
                 return False
         return True
 
-    def _raw_images_for_meta(self, meta) -> list:
-        return [{"bytes": convert_pil_to_bytes(meta["image"][i])} for i in range(len(meta["image"]))]
-
     @staticmethod
     def _qa_image_refs(preprocess_row: Optional[dict], meta: dict) -> List[str]:
         """Pipeline image paths for each QA frame (ordered like meta['image'])."""
@@ -236,13 +230,13 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
                 per_view_specs.append({
                     "version": 2, "mark_kinds": [], "slots": [],
                 })
-                img = {"bytes": convert_pil_to_bytes(meta["image"][i])}
-                processed_images.append(img)
+                processed_images.append(None)
                 marked_infos.append((meta["tag"][i], passthrough))
                 continue
             if self.emit_marked_images:
+                view_image = graph.views[vi].image if graph is not None else meta["image"][i]
                 img, info = self.marker.mark_objects(
-                    meta["image"][i], [obj], mark_type=mark_type, view_idx=vi,
+                    view_image, [obj], mark_type=mark_type, view_idx=vi,
                     preprocess_row=row,
                 )
                 per_view_specs.append(self.marker.last_mark_spec)
@@ -251,7 +245,7 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
                     [obj], mark_type=mark_type, view_idx=vi,
                 )
                 per_view_specs.append(spec)
-                img = {"bytes": convert_pil_to_bytes(meta["image"][i])}
+                img = None
             processed_images.append(img)
             marked_infos.append(info[0])
         merged = merge_mark_specs(
@@ -264,45 +258,9 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
         return processed_images, marked_infos
 
     def _resolve_qa_images(self, graph, processed_images: list) -> list:
-        """Map handler outputs to QA_images (M3: unmarked bytes unless emit_marked_images)."""
         if self.emit_marked_images:
             return processed_images
-        if not processed_images:
-            return processed_images
-
-        example = getattr(self._thread_local, "preprocess_row", None)
-        scene_images = example.get("image") if example and isinstance(example.get("image"), list) else []
-        scene_n = len(scene_images)
-
-        def _to_bytes(im) -> dict:
-            if isinstance(im, dict) and im.get("bytes") is not None:
-                return im
-            return {"bytes": convert_pil_to_bytes(im)}
-
-        resolved = []
-        for item in processed_images:
-            if isinstance(item, list):
-                # Per-QA view list (e.g. correspondence: 2 views). Do not expand to full scene.
-                if scene_n and 0 < len(item) < scene_n:
-                    resolved.append([_to_bytes(im) for im in item])
-                    continue
-                # Legacy: inner list spans entire scene (len == scene_n).
-                if scene_n and len(item) == scene_n:
-                    resolved.append([_to_bytes(im) for im in item])
-                    continue
-                resolved.append([_to_bytes(im) for im in item])
-                continue
-            if isinstance(item, dict):
-                resolved.append(item)
-            else:
-                resolved.append(_to_bytes(item))
-
-        if resolved:
-            return resolved
-
-        if scene_n and len(processed_images) == scene_n:
-            return [_to_bytes(im) for im in scene_images]
-        return super()._resolve_qa_images(graph, processed_images)
+        return self._qa_pixel_placeholders(processed_images)
 
     def _find_chain_and_mark(self, graph, num_views, retries=5):
         """Retry _find_view_chain, build meta, mark per view.
@@ -471,7 +429,10 @@ class BaseMultiviewAnnotationTask(BaseAnnotationTask):
         for node, view_idx in node_views:
             app = node.view_appearances[view_idx]
             if "image" in meta:
-                meta["image"].append(graph.views[view_idx].image)
+                if self.emit_marked_images:
+                    meta["image"].append(graph.views[view_idx].image)
+                else:
+                    meta["image"].append(graph.views[view_idx].image_path)
             if "mask" in meta:
                 meta["mask"].append(app.mask)
             if "tag" in meta:

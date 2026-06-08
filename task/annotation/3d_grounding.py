@@ -19,7 +19,6 @@ import random
 
 from .core.base_annotation_task import BaseAnnotationTask
 from .core.question_type import QuestionType
-from utils.image_utils import convert_pil_to_bytes
 from utils.box_utils import format_bbox_3d_for_grounding, format_grounding_answer_json
 
 
@@ -117,4 +116,4 @@ class ThreeDGroundingGenerator(BaseAnnotationTask):
             mark_spec=None,
             extra_slots=extra_slots,
         )
-        return prompt, {"bytes": convert_pil_to_bytes(view.image)}, QuestionType.OPEN_ENDED
+        return prompt, None, QuestionType.OPEN_ENDED

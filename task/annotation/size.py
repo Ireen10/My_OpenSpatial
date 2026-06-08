@@ -79,10 +79,10 @@ class AnnotationGenerator(BaseAnnotationTask):
         nodes = [n for n in graph.get_object_nodes() if n.box_3d_world is not None]
         if len(nodes) == 0:
             return None
-        image = graph.primary_view.image
         num = random.randint(2, min(len(nodes), 4)) if len(nodes) > 1 else 1
         sampled = random.sample(nodes, num)
-        processed_image, marked = self.mark_objects_for_qa(image, sampled)
+        qa_image = graph.primary_view.image if self.emit_marked_images else None
+        processed_image, marked = self.mark_objects_for_qa(qa_image, sampled)
         mark_spec = self.marker.last_mark_spec
 
         prompts = []
@@ -114,9 +114,9 @@ class AnnotationGenerator(BaseAnnotationTask):
         nodes = [n for n in graph.get_object_nodes() if n.box_3d_world is not None]
         if len(nodes) < 2:
             return None
-        image = graph.primary_view.image
         sampled = random.sample(nodes, 2)
-        processed_image, marked = self.mark_objects_for_qa(image, sampled)
+        qa_image = graph.primary_view.image if self.emit_marked_images else None
+        processed_image, marked = self.mark_objects_for_qa(qa_image, sampled)
         prompt, tpl = self.relative_size_prompt_func(marked[0], marked[1])
         if prompt is None:
             return None

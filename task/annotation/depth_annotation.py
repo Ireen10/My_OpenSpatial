@@ -36,8 +36,6 @@ from .core.visual_marker import MarkConfig, VisualMarker
 from .core.question_type import QuestionType
 from .core.mark_spec import render_mark
 
-from utils.image_utils import convert_pil_to_bytes
-
 from .metric_gating import pick_instruction_mode
 
 _DEPTH_INSTRUCTION_MODES = ("direct", "sentence", "free")
@@ -107,7 +105,7 @@ class AnnotationGenerator(BaseAnnotationTask):
 
     # ── data preparation ─────────────────────────────────────────────
 
-    def _sample_random_points(self, image, depth_map, *, num_points=None):
+    def _sample_random_points(self, depth_map, *, num_points=None):
         """Generate coordinate-based tags by sampling random pixels.
 
         Picks 4-7 pixels (or exactly ``num_points`` when set) whose depths differ
@@ -137,7 +135,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         return (
             [norm(p) for p in points],
             [norm(p) for p in sorted_pts],
-            {"bytes": convert_pil_to_bytes(image)},
+            None,
             mark_spec,
         )
 
@@ -168,7 +166,7 @@ class AnnotationGenerator(BaseAnnotationTask):
         if self.emit_marked_images and enable:
             processed_image = render_mark(image, spec, preprocess_row=preprocess_row)
         else:
-            processed_image = {"bytes": convert_pil_to_bytes(image)}
+            processed_image = None
 
         tags_legacy, tags_sem, depths = [], [], []
         kept_slots = []
@@ -216,7 +214,7 @@ class AnnotationGenerator(BaseAnnotationTask):
 
         if random.random() < 0.1:
             result = self._sample_random_points(
-                image, depth_map, num_points=mcq_n or random.randint(4, 7),
+                depth_map, num_points=mcq_n or random.randint(4, 7),
             )
             if result is not None:
                 tags, sorted_tags, image_bytes, mark_spec = result
@@ -235,13 +233,14 @@ class AnnotationGenerator(BaseAnnotationTask):
         return tags_legacy, tags_sem, sorted_sem, image_bytes, "objects:", mark_spec
 
     def _prepare(self, graph):
-        """Extract depth_map, image, and mask-bearing nodes from the graph."""
+        """Extract depth_map, optional RGB (render only), and mask-bearing nodes."""
         view = graph.primary_view
         depth_map = view.depth_map
-        image = view.image
-
-        assert image.size == depth_map.shape[::-1], \
-            f"Image {image.size} vs depth_map {depth_map.shape[::-1]} dimension mismatch."
+        image = view.image if self.emit_marked_images else None
+        if image is not None:
+            assert image.size == depth_map.shape[::-1], (
+                f"Image {image.size} vs depth_map {depth_map.shape[::-1]} dimension mismatch."
+            )
 
         nodes = [n for n in graph.get_object_nodes()
                  if n.view_appearances.get(0) and n.view_appearances[0].mask_path]

@@ -14,8 +14,6 @@ from utils.box_utils import compute_box_3d_corners
 from .core.question_type import QuestionType
 
 from utils.point_cloud_utils import compute_point_cloud_distance
-from utils.image_utils import convert_pil_to_bytes
-
 from .metric_gating import pick_instruction_mode
 
 _POSITION_MCQ_MODES = ("direct", "sentence", "free")
@@ -131,14 +129,14 @@ class AnnotationGenerator(BaseAnnotationTask):
         nodes = [n for n in graph.get_object_nodes() if n.box_3d_world is not None]
         if len(nodes) < 2:
             return None
-        image = graph.primary_view.image
         sampled = random.sample(nodes, 2)
         qtype = QuestionType.MCQ
+        qa_image = graph.primary_view.image if self.emit_marked_images else None
 
         if random.random() < 0.8:
-            processed_image, marked = self.mark_objects_for_qa(image, sampled)
+            processed_image, marked = self.mark_objects_for_qa(qa_image, sampled)
         else:
-            processed_image = {"bytes": convert_pil_to_bytes(image)}
+            processed_image = None
             marked = [(n.tag, n) for n in sampled]
 
         prompt, tpl = self.height_comparison_prompt_func(marked[0], marked[1])
@@ -155,7 +153,7 @@ class AnnotationGenerator(BaseAnnotationTask):
             return None
         if len(nodes) > 8:
             nodes = random.sample(nodes, 8)
-        image = graph.primary_view.image
+        qa_image = graph.primary_view.image if self.emit_marked_images else None
 
         near_candidates, far_candidates = [], []
         for nodeA, nodeB in combinations(nodes, 2):
@@ -181,9 +179,9 @@ class AnnotationGenerator(BaseAnnotationTask):
         if near_candidates:
             pair = random.choice(near_candidates)
             if random.random() < 0.5:
-                processed_image, marked = self.mark_objects_for_qa(image, list(pair))
+                processed_image, marked = self.mark_objects_for_qa(qa_image, list(pair))
             else:
-                processed_image = {"bytes": convert_pil_to_bytes(image)}
+                processed_image = None
                 marked = [(n.tag, n) for n in pair]
             prompt, tpl = self.proximity_prompt_func(marked[0], marked[1], "near")
             self._record_turn(
@@ -195,9 +193,9 @@ class AnnotationGenerator(BaseAnnotationTask):
         if far_candidates:
             pair = random.choice(far_candidates)
             if random.random() < 0.5:
-                processed_image, marked = self.mark_objects_for_qa(image, list(pair))
+                processed_image, marked = self.mark_objects_for_qa(qa_image, list(pair))
             else:
-                processed_image = {"bytes": convert_pil_to_bytes(image)}
+                processed_image = None
                 marked = [(n.tag, n) for n in pair]
             prompt, tpl = self.proximity_prompt_func(marked[0], marked[1], "far")
             self._record_turn(
