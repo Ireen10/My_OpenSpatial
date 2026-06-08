@@ -143,15 +143,19 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         view1 = graph.views[view1_idx]
         view2 = graph.views[view2_idx]
 
-        intrinsic = view1.intrinsic
+        intrinsic1 = view1.intrinsic
+        intrinsic2 = view2.intrinsic
         depth_map1 = view1.depth_map
         depth_map2 = view2.depth_map
-        h, w = depth_map1.shape
-        img_dim = (w, h)
+        h1, w1 = depth_map1.shape
+        h2, w2 = depth_map2.shape
+        img_dim1 = (w1, h1)
+        img_dim2 = (w2, h2)
 
-        # Step 2: backproject valid depth pixels to 3D world coordinates
-        points_3d_1 = self.backproject_2d_to_3d(view1.pose, depth_map1, img_dim, intrinsic)
-        points_3d_2 = self.backproject_2d_to_3d(view2.pose, depth_map2, img_dim, intrinsic)
+        # Step 2: backproject valid depth pixels to 3D world coordinates.
+        # Each view may have its own (W, H) after per-frame sky rotation (e.g. 640×480 vs 480×640).
+        points_3d_1 = self.backproject_2d_to_3d(view1.pose, depth_map1, img_dim1, intrinsic1)
+        points_3d_2 = self.backproject_2d_to_3d(view2.pose, depth_map2, img_dim2, intrinsic2)
 
         valid1 = depth_map1.ravel() > 0
         valid2 = depth_map2.ravel() > 0
@@ -193,22 +197,22 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
 
         inv_pose1 = np.linalg.inv(view1.pose)
         inv_pose2 = np.linalg.inv(view2.pose)
-        pt1_uv = self.project_3d_to_2d(inv_pose1, sel_pt.reshape(1, 3), intrinsic)[0]
-        pt2_uv = self.project_3d_to_2d(inv_pose2, corr_pt.reshape(1, 3), intrinsic)[0]
+        pt1_uv = self.project_3d_to_2d(inv_pose1, sel_pt.reshape(1, 3), intrinsic1)[0]
+        pt2_uv = self.project_3d_to_2d(inv_pose2, corr_pt.reshape(1, 3), intrinsic2)[0]
 
         # Reject if either projected point is too close to the image boundary
         margin = self.boundary_margin
-        if not (margin <= pt1_uv[0] <= w - margin and margin <= pt1_uv[1] <= h - margin):
+        if not (margin <= pt1_uv[0] <= w1 - margin and margin <= pt1_uv[1] <= h1 - margin):
             return None, False
-        if not (margin <= pt2_uv[0] <= w - margin and margin <= pt2_uv[1] <= h - margin):
+        if not (margin <= pt2_uv[0] <= w2 - margin and margin <= pt2_uv[1] <= h2 - margin):
             return None, False
 
         # Step 5: generate 3 distractor points on View 2 (far enough from GT)
         min_dist_sq = self.min_distractor_dist ** 2
         uv_candidates = []
         for _ in range(100):
-            u = random.randint(margin, w - margin - 1)
-            v = random.randint(margin, h - margin - 1)
+            u = random.randint(margin, w2 - margin - 1)
+            v = random.randint(margin, h2 - margin - 1)
             if (u - pt2_uv[0]) ** 2 + (v - pt2_uv[1]) ** 2 < min_dist_sq:
                 continue
             uv_candidates.append([u, v])

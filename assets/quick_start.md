@@ -322,8 +322,17 @@ Each stage is a list of tasks (the `-` items). A stage can contain multiple task
 | Stage | Task | Description |
 |-------|------|-------------|
 | `filter_stage` | `ThreeDBoxFilter` | Validate 3D boxes via 2D projection & point cloud |
-| `localization_stage` | `Sam2Refiner` | Refine masks with SAM2 box prompts |
-| `scene_fusion` | `DepthBackProjecter` | Back-project depth to per-object point clouds |
+| `localization_stage` | `Sam2Refiner` / `Sam3Refiner` | Refine masks with SAM box prompts |
+| `scene_fusion_stage` | `DepthBackProjecter` | Back-project depth to per-object point clouds |
+| `group_stage` | `SampleGrouper` | Group per-image rows into per-scene multiview rows |
+
+**Post-annotation stages (`config/aggregate/`, `config/export/`):**
+
+| Stage | Config example | Task | Description |
+|-------|----------------|------|-------------|
+| `aggregate_stage` | `demo_aggregate_singleview_frame_rot.yaml` | `SampleAggregator` | Dedup + merge annotation parquets → `merged_samples` |
+| `placeholder_audit_stage` | `demo_placeholder_audit_frame_rot.yaml` | `PlaceholderAuditPass` | Audit/fix message placeholders (optional) |
+| `export_stage` | `demo_export_frame_rot.yaml` | `DatasetExporter` | Export merged parquet → sharded JSONL + tar |
 
 ### 3.5 Annotation Pipeline by Data Mode
 
@@ -370,18 +379,199 @@ for cfg in demo_multiview_distance demo_multiview_size demo_multiview_correspond
 done
 ```
 
+### 3.6 Aggregate & Export (post-annotation)
+
+After `annotation_stage`, each task writes its own parquet under
+`annotation_stage/<task_name>/data.parquet` (one row per QA pair after flattening).
+**Aggregate** and **export** are separate `run.py` configs under `config/aggregate/` and
+`config/export/` — they are not part of the preprocessing YAML.
+
+```
+annotation_stage/*  →  aggregate_stage  →  (optional placeholder_audit)  →  export_stage
+  per-task parquet      merged_samples        audit / fix placeholders         JSONL + tar
+```
+
+#### 3.6.1 `aggregate_stage` — merge annotation tasks
+
+**Task:** `SampleAggregator` (`task/aggregate/sample_aggregator.py`)
+
+Reads multiple annotation task parquets, then:
+
+1. **Dedup within each task** (`dedup_within_task`) — remove duplicate QA turns inside the same task
+2. **Merge by visual input group** (`merge_by_visual_input_group`) — combine turns that share the same images + mark layout into one sample
+
+**Example (singleview, frame_rot):**
+
+```bash
+python run.py \
+  --config config/aggregate/demo_aggregate_singleview_frame_rot.yaml \
+  --output_dir output/frame_rot
+```
+
+**Minimal config:**
+
+```yaml
+pipeline:
+  output_dir: output/frame_rot/base_pipeline_demo_aggregate_singleview_frame_rot
+
+  stages:
+    aggregate_stage:
+      -
+        file_name: sample_aggregator
+        method: SampleAggregator
+        input_tasks:
+          # Paths relative to pipeline.output_dir, or absolute parquet paths
+          - ../base_pipeline_demo_singleview_all_frame_rot/annotation_stage/distance
+          - ../base_pipeline_demo_singleview_all_frame_rot/annotation_stage/depth_annotation
+          - ../base_pipeline_demo_singleview_all_frame_rot/annotation_stage/size
+          - ../base_pipeline_demo_singleview_all_frame_rot/annotation_stage/position
+          - ../base_pipeline_demo_singleview_all_frame_rot/annotation_stage/3d_grounding
+        dedup_within_task: true
+        merge_by_visual_input_group: true
+        dedup_keep_policy: semantic_first   # or: first_seen
+        output_dir: aggregate_stage/merged_samples
+```
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `input_tasks` | *(required)* | List of annotation task output dirs (resolved to `.../data.parquet`) or direct parquet paths |
+| `dedup_within_task` | `true` | Dedup duplicate turns inside each `task_name` |
+| `merge_by_visual_input_group` | `true` | Merge turns with the same visual input group into one sample |
+| `dedup_keep_policy` | `semantic_first` | When deduping, prefer turns whose `question_text` has no template placeholders |
+| `output_dir` | `aggregate_stage/<task_name>` | Where to write merged parquet |
+
+**Output:** `{pipeline.output_dir}/aggregate_stage/merged_samples/data.parquet`
+
+Each row is one **sample** with nested `metadata_json` / `messages_json` (schema v1.1).
+Browse merged results with `visualize_server.py` (shows as `[Merged] all tasks`).
+
+**Multiview:** use `config/aggregate/demo_aggregate_multiview_frame_rot.yaml` — same fields,
+but `input_tasks` point at multiview annotation outputs and input parquet comes from
+`group_stage/group/data.parquet`.
+
+**Single-task aggregate:** `config/aggregate/demo_aggregate_depth.yaml` shows aggregating
+just one annotation task (useful for testing).
+
+#### 3.6.2 `export_stage` — upstream JSONL + tar bundle
+
+**Task:** `DatasetExporter` (`task/export/dataset_exporter.py`)
+
+Reads `merged_samples/data.parquet` and writes a **sharded upstream bundle** (not a training
+format — conversion scripts map this to VLM-specific rows):
+
+```
+{output_dir}/
+  jsonl/metadata_000000.jsonl
+  images/metadata_000000.tar
+  metadata.json              # dataset-level stats + shard index
+```
+
+**Example (singleview + multiview in one config):**
+
+```bash
+# Prerequisites: both aggregate configs finished
+python run.py \
+  --config config/export/demo_export_frame_rot.yaml \
+  --output_dir output/frame_rot
+```
+
+**Minimal config:**
+
+```yaml
+pipeline:
+  output_dir: output/frame_rot/base_pipeline_demo_export_frame_rot
+
+  stages:
+    export_stage:
+      -
+        file_name: dataset_exporter
+        method: DatasetExporter
+        depends_on: ../base_pipeline_demo_aggregate_singleview_frame_rot/aggregate_stage/merged_samples
+        output_dir: singleview
+        view_scope: singleview      # or multiview — used in metadata.json stats
+        skip_parquet: true          # export only JSONL+tar, no data.parquet
+        schema_version: "1.1"
+      -
+        file_name: dataset_exporter
+        method: DatasetExporter
+        depends_on: ../base_pipeline_demo_aggregate_multiview_frame_rot/aggregate_stage/merged_samples
+        output_dir: multiview
+        view_scope: multiview
+        skip_parquet: true
+        schema_version: "1.1"
+```
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `depends_on` | *(required for 2nd+ tasks)* | Path to `merged_samples` dir or `data.parquet` |
+| `output_dir` | `export_stage/<task_name>` | Root for `jsonl/`, `images/`, `metadata.json` |
+| `view_scope` | inferred from path | `singleview` or `multiview`; recorded in export stats |
+| `skip_parquet` | `false` | `true` = do not write `data.parquet` (typical for export) |
+| `schema_version` | `"1.1"` | Written into each exported JSONL record |
+| `export_dir` | same as `output_dir` | Optional sub-path under `output_dir` for bundle files |
+| `pipeline_run_id` | auto UUID | Optional run id in `metadata.json` |
+
+Browse sharded exports with `visualize_upstream_server.py`.
+
+**Composed export (alternative):** `config/export/demo_export_composed_frame_rot.yaml` uses
+`ComposedDataset` (`input_dataset_name: image_base`, `output_dataset_name: jsonl_base`) with
+`PassThroughExportTask` — same bundle layout, but export is triggered by `jsonl_base.save_data`
+when `export_bundle: true`. Use either `DatasetExporter` or the composed pattern, not both
+for the same data.
+
+#### 3.6.3 Optional: `placeholder_audit_stage`
+
+After aggregate, you can audit/fix `<image>` tags and `[A-Z]` template placeholders in
+messages before export:
+
+```bash
+python run.py \
+  --config config/aggregate/demo_placeholder_audit_frame_rot.yaml \
+  --output_dir output/frame_rot
+```
+
+| Parameter | Meaning |
+|-----------|---------|
+| `fix_placeholders` | Auto-fix mismatched `<image>` counts when possible |
+| `fail_on_error` | `true` = abort on audit errors; `false` = log and continue |
+
+Output: `placeholder_audit_stage/merged_samples_audited/data.parquet` (point `export_stage`
+`depends_on` here if you run audit).
+
+#### 3.6.4 End-to-end command sequence (frame_rot example)
+
+```bash
+# 1) Preprocess + annotate (already covered in §3.5)
+python run.py --config config/preprocessing/demo_preprocessing_embodiedscan_sam3.yaml --output_dir output/frame_rot
+python run.py --config config/annotation/demo_singleview_all_frame_rot.yaml --output_dir output/frame_rot
+python run.py --config config/annotation/demo_multiview_all_frame_rot.yaml --output_dir output/frame_rot
+
+# 2) Aggregate
+python run.py --config config/aggregate/demo_aggregate_singleview_frame_rot.yaml --output_dir output/frame_rot
+python run.py --config config/aggregate/demo_aggregate_multiview_frame_rot.yaml --output_dir output/frame_rot
+
+# 3) Export
+python run.py --config config/export/demo_export_frame_rot.yaml --output_dir output/frame_rot
+```
+
 ---
 
 ## 4. Visualization
 
-Launch the built-in visualization server to browse annotation results:
+**Annotation / aggregate parquet** (per-task or `merged_samples`):
 
 ```bash
 python visualize_server.py --data_dir output/demo --port 8888
 ```
 
-Then open `http://<host>:8888` in a browser. Features:
-- Dropdown to switch between task outputs
+**Exported upstream bundle** (sharded JSONL + tar from `export_stage`):
+
+```bash
+python visualize_upstream_server.py --data_dir output/frame_rot/base_pipeline_demo_export_frame_rot --port 8889
+```
+
+Then open `http://<host>:<port>` in a browser. Features:
+- Dropdown to switch between task outputs (annotation) or export shards (upstream)
 - QA pairs with rendered images
 - Lightbox for full-size image viewing
 - Keyboard navigation (left/right arrows)
