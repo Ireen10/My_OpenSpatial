@@ -395,6 +395,7 @@ def build_upstream_display_images(
     marks_mode: str = "off",
     overlay_3d: bool = False,
     tar_cache: Optional[dict] = None,
+    mark_spec=None,
 ) -> Tuple[List[Image.Image], bool, bool]:
     tar_cache = tar_cache if tar_cache is not None else {}
     images = load_upstream_images(parse_dict, kind=kind, bundle_root=bundle_root, tar_cache=tar_cache)
@@ -403,7 +404,8 @@ def build_upstream_display_images(
 
     apply_marks = marks_mode in ("selected", "all")
     meta = parsed.get("meta") or {}
-    mark_spec = meta.get("mark_spec")
+    if mark_spec is None:
+        mark_spec = parsed.get("mark_spec") or meta.get("mark_spec")
     n_frames = len(images)
     out: List[Image.Image] = []
 
@@ -892,6 +894,7 @@ def api_data():
         images, _, marks_applied = build_upstream_display_images(
             pd_dict, parsed, kind=kind, bundle_root=bundle_root,
             marks_mode="all", overlay_3d=can_3d, tar_cache=tar_cache,
+            mark_spec=parsed.get("mark_spec"),
         )
         refs = pd_dict.get("image") or []
         if not isinstance(refs, list):
@@ -904,6 +907,8 @@ def api_data():
             "merge_group_key": pd_dict.get("merge_group_key"),
             "source_tasks": prov.get("source_tasks") or pd_dict.get("question_tags") or [],
             "turns": parsed["turns"],
+            "active_turn_index": parsed.get("active_turn_index"),
+            "marks_differ_by_turn": parsed.get("marks_differ_by_turn", False),
             "mark_slots": parsed.get("mark_slots") or [],
             "display_images": [ann_viz.pil_to_base64(img) for img in images],
             "marks_overlay_applied": marks_applied,
@@ -940,9 +945,18 @@ def api_render():
     if pd_dict is None:
         return jsonify({"images": []})
 
+    turn_index = request.args.get("turn_index")
+    turn_ms = None
+    if turn_index is not None and turn_index != "":
+        ti = int(turn_index)
+        specs = parsed.get("turn_mark_specs") or []
+        if 0 <= ti < len(specs):
+            turn_ms = specs[ti]
+
     images, _, marks_applied = build_upstream_display_images(
         pd_dict, parsed, kind=kind, bundle_root=bundle_root,
         slot_ids=slot_ids, marks_mode=marks_mode, overlay_3d=overlay_3d,
+        mark_spec=turn_ms,
     )
     return jsonify({
         "images": [ann_viz.pil_to_base64(img) for img in images],

@@ -283,19 +283,19 @@
         params: ["核心策略：annotation tasks 并列消费 preprocess output。"]
       },
       "scene-graph": {
-        summary: "SceneGraph 的核心是把行数据组织成统一的对象-视角结构，让不同 QA 任务可以复用同一套几何访问方式。",
-        flow: ["singleview 会把每个物体包装成 SceneNode，并挂上该视角中的 mask、pointcloud、bbox 等 appearance。", "multiview 会为同一场景构建多个 view，并记录每个物体在哪些 view 中可见。", "multiview 还会检查基础字段长度一致：image、pose、intrinsic、obj_tags、masks、depth_map、bboxes_3d_world_coords 必须同长度。", "后续 task 不直接操作原始 parquet 字段，而是通过 graph.nodes 和 graph.views 做采样、投影和点云距离计算。"],
-        params: ["max_num_views：demo multiview config 中为 400。", "min_rot_angle：demo multiview config 中为 15.0 度。", "min_translation：demo multiview config 中为 0.0，即默认不启用平移距离门控。"]
+        summary: "SceneGraph 的核心是把原始行数据变成“物体节点 + 视角 appearance”的图结构，并在 multiview 中控制哪些视角可以一起用于跨视角问题。",
+        flow: ["singleview：每个物体变成一个 SceneNode；该物体在当前图像里的 mask、2D box、3D box、点云会挂在 view_appearances[0] 上。", "multiview：一行里有多张图，graph.views 保存每个 view 的 image、depth、pose、intrinsic；每个 SceneNode 记录它出现在哪些 view。", "multiview 基础校验要求 image、pose、intrinsic、obj_tags、masks、depth_map、bboxes_3d_world_coords 这些逐视角字段长度完全一致，否则该行不进入后续任务。", "跨视角任务选 view 时会检查 pose diversity：对候选相机姿态和已选姿态计算相对旋转角；如果旋转角太小，并且平移距离也没有达到阈值，就认为两个视角太像，会拒绝该 view。", "相对旋转角用 R_new^T @ R_existing 的 geodesic angle 计算；平移距离用两个 camera center 的欧氏距离。"],
+        params: ["max_num_views：demo multiview config 中为 400，即最多读取/构建 400 个视角。", "min_rot_angle：demo multiview config 中为 15.0 度；两个视角旋转差小于该值时，除非平移门控通过，否则视角太相似。", "min_translation：demo multiview config 中为 0.0；代码里 min_translation > 0 才启用平移门控，所以默认只依赖旋转差。", "pose diversity 判断：rot_ok = rot_angle >= min_rot_angle；trans_ok = min_translation > 0 且 camera_center_distance >= min_translation；两者都不满足则拒绝。"]
       },
       "task-logic": {
-        summary: "Task Logic 的核心是按具体空间问题采样对象/视角，计算几何答案，再选择 OE/MCQ/grounding 模板表达出来。",
-        flow: ["distance task 会清洗物体点云，并用点云间最近距离计算 absolute distance 或 relative distance。", "absolute distance 会把小于 1m 的答案格式化为厘米，否则格式化为米。", "relative distance 会比较 dist(A,C) 和 dist(B,C)，随机问 farther 或 closer，并可生成 OE 或 MCQ。", "metric_gating 会避免在非 metric depth 样本上使用要求真实距离估计的 reasoning/stem。", "multiview correspondence 会找两个有重叠物体且视角足够不同的 view，把有效深度像素反投影到世界坐标，用最近邻距离找重叠点，再投影回两张图生成对应点问题。", "MCQ 类任务会把正确答案和 distractors shuffle，避免答案位置偏置。"],
-        params: ["format_distance_value 阈值：1.0m，小于该值用 centimeters。", "instruction free 模式默认采样权重：0.6。", "multiview correspondence overlap_dist：0.003m。", "min_overlap_points：10。", "boundary_margin：10px。", "min_distractor_dist：20px。", "correspondence 点云过大时每侧最多采样 50000 点做最近邻。"]
+        summary: "Task Logic 的核心是为不同空间能力题定义“可回答样本”的几何条件，并用明确公式计算答案；不满足门控的候选会被跳过而不是硬生成 QA。",
+        flow: ["Distance：对物体点云做清洗后，用两个点云之间的最近表面距离作为物体间距离；absolute distance 直接报告距离，relative distance 比较 dist(A,C) 与 dist(B,C)，随机问 farther 或 closer。", "Depth：物体深度不是 mask 内所有像素均值，而是取 mask 内有效深度中最浅的 10% 求平均，近似物体前表面深度，减少背景/后表面噪声。另有约 10% 概率改用随机像素点深度题，要求采样点之间深度差 > 0.05。", "Size：尺寸比较使用 3D box 的空间对角线 D_diag = sqrt(L^2 + W^2 + H^2)。若两物体 max(D_diag) / min(D_diag) < 1.2，则差异太小，跳过该题。absolute size 取最大边长问整体尺寸，也会取 z 尺寸问高度。", "Position：高度比较用 3D box 8 个角点的最大 z 值判断谁更高；proximity 用点云最近距离除以两个物体平均 extent 的均值，ratio < 0.5 判 near，ratio > 2.0 判 far，中间灰区跳过。", "3D Grounding：先把 world-frame 3D box 通过 camera pose 转到 camera frame，再输出 [x,y,z,xl,yl,zl,roll,pitch,yaw]；中心和尺寸保留 2 位小数，欧拉角 wrap 到 (-pi, pi]。", "Multiview distance/size：先用 _find_chain_and_mark 找 N 个不同 view/object 组成链；distance 继续用点云最近距离，size 继续用 D_diag，并沿用 1.2 的显著差异门控。", "Multiview object-camera distance：比较同一物体在两个 view 的 camera-frame 点云到原点的距离；距离取最近 20% 点到相机原点的均值，若两者差 < 0.08，则答案为 equal。", "Multiview correspondence：找两个共享物体的多样视角，将有效深度像素反投影到世界坐标，用最近邻距离 < 0.003m 找重叠点；再投影回两张图，生成 GT 点和 3 个干扰点。"],
+        params: ["距离单位切换：小于 1.0m 输出 centimeters，否则输出 meters。", "Depth 前表面估计：mask 内最浅 10% 有效深度像素的平均值。", "Depth 随机点模式概率：约 10%；随机点深度差门控：> 0.05。", "Size 显著差异门控 RELATIVE_SIZE_DIAG_RATIO_MIN：1.2。", "Position near 门控：distance / avg_extent < 0.5；far 门控：distance / avg_extent > 2.0。", "Object-camera equal 阈值 dis_pot_thre：0.08。", "Object-camera 距离估计：取点云中离相机最近 20% 点的平均距离。", "Multiview correspondence overlap_dist：0.003m；min_overlap_points：10；boundary_margin：10px；min_distractor_dist：20px；每侧最多采样 50000 个点做最近邻。", "instruction free 模式默认采样权重：0.6；非 metric depth 会禁用要求真实距离推理的模板。"]
       },
       "prompt-metadata": {
-        summary: "Prompt 与元数据的核心是把一次几何计算变成可追踪、可去重、可重新渲染视觉标记的 turn record。",
-        flow: ["render_structured_prompt 会记录 template_id、question_text、answer_text、slot bindings 等结构化信息。", "VisualMarker 生成 mark_spec，描述每个 view 上哪些 slot 被 box/point/mask 标记，以及颜色、几何位置和 image_ref。", "build_turn_record 把 task、sub_task、question_type、template_id、referent_slots、answer_text、view_indices 等写入 metadata.turns。", "build_visual_anchor 把 QA 绑定回 parent_preprocess_id、raw_image_ref(s)、view_group_id，后续 aggregate 用它判断是否属于同一视觉输入。", "如果单视角 mark_spec 还没有 per-view 包装，会补成统一的 per_view 结构，便于 export 阶段重绘。"],
-        params: ["唯一 tag 的可选标记概率 OPTIONAL_MARK_ENABLE_PROB：0.25。", "distance 的 mark type 权重：point 0.25，box 0.75。"]
+        summary: "Prompt 与元数据的核心是让每个 QA 不只是文本，而是带有可追踪来源、可去重语义和可重绘视觉标记的结构化 turn。",
+        flow: ["render_structured_prompt 不只返回字符串，还会保存 template_id、question stem、answer text、slot bindings；这些字段后续用于判断两个 QA 是否语义重复。", "VisualMarker 生成 mark_spec。mark_spec 的 slot 会记录 slot_id、obj_idx、tag、mark_kind、color_name，以及具体几何：box_2d、uv 点或 mask_ref。", "singleview 的 mark_spec 会被包装成统一 per_view 结构：views[0].slots[...]；multiview 则每个 view 单独记录自己的 slots 和 image_ref。", "build_turn_record 把 sub_task、question_type、template_id、answer_text、referent_slots、view_indices、image_placeholder_count 写进 metadata.turns。", "build_visual_anchor 记录 parent_preprocess_id、raw_image_ref(s)、view_group_id；aggregate 后面靠这些信息判断 QA 是否来自同一视觉输入。", "如果对象 tag 在画面中不唯一，通常需要 mark_spec 辅助 disambiguation；如果 tag 唯一，仍有一定概率随机添加视觉标记，以增加训练形式多样性。"],
+        params: ["唯一 tag 的可选标记概率 OPTIONAL_MARK_ENABLE_PROB：0.25。", "depth 的 mark type 权重：point 0.5，box 0.5。", "distance 的 mark type 权重：point 0.25，box 0.75。", "multiview distance 的 mark type 权重：point 0.3，box 0.7。", "metadata 中 image_placeholder_count 控制问题前插入几个 <image>。"]
       },
       "annotation-output": {
         summary: "Annotation Parquet 的核心是把每个 task 的 QA turn 压成可聚合的最小记录，而不是保存完整中间计算状态。",
@@ -308,34 +308,34 @@
         params: ["dedup_keep_policy：demo config 使用 semantic_first。"]
       },
       "turn-load": {
-        summary: "Turn 加载的核心是为每个 QA turn 计算两个 hash：一个用于去重，一个用于合并。",
-        flow: ["question_core_key 先归一化问题意图：例如部分 OE/MCQ 模板会折叠成同一语义问题。", "dedup_fingerprint = task_name + visual_anchor + view_group_id + question_core_key 的 hash，因此只在同任务、同视觉输入、同问题核心下去重。", "merge_group_key = ordered image_refs + view_group_id + normalized mark_spec 的 hash，因此只有视觉输入和标记方式一致的 turns 才会合并。", "mark_spec_norm 会按 view_index、slot_id、obj_idx 排序并保留 box/uv/mask_ref 等几何信息，避免同图不同标记被误合并。"],
-        params: ["hash 使用 SHA-256 的 canonical JSON。", "visual_anchor 优先使用 parent_preprocess_id，否则回退到 id/scene_id/image。"]
+        summary: "Turn 加载的核心是把 annotation parquet 里的多轮 QA 拆成单个 TurnRecord，并为每个 turn 算出“去重用 key”和“合并用 key”。",
+        flow: ["question_core_key 表示“这个问题的语义核心”。如果 prompt_struct 里有 referent_slots，就用 sub_task、template_family、question stem、slot obj_idx、question_type 组成 key。", "有些 OE 和 MCQ 其实问同一个问题，例如 distance.relative 或 depth.ordering；这类模板会把 _mcq 后缀折叠掉，并只保留 intent + referents，避免同题不同形式重复出现。", "dedup_fingerprint = task_name + visual_anchor + view_group_id + question_core_key。也就是说，只有同一任务、同一视觉输入、同一语义问题才会被判为可去重。", "merge_group_key 不看问题语义，而看视觉输入是否一致：ordered image_refs + view_group_id + normalized mark_spec。这样同一组图和同一套视觉标记上的不同问题会被合到一个多轮样本里。", "normalized mark_spec 会排序 view 和 slot，并保留 box_2d、uv、mask_ref 等几何信息；同一张图但红框/蓝点不同，key 就不同，不会误合并。"],
+        params: ["hash 算法：对排序后的 canonical JSON 做 SHA-256。", "visual_anchor 优先使用 parent_preprocess_id；没有时依次回退到 id、scene_id、parent_preprocess_id、image。", "OE/MCQ 折叠模板族包括 counting、depth.ordering、depth.farthest、depth.closest、depth.choice、distance.relative。"]
       },
       dedup: {
-        summary: "Turn 去重的核心是删除同一任务内语义等价的 QA，同时优先保留结构化信息更完整的版本。",
-        flow: ["按 dedup_fingerprint 分组；单元素组直接保留。", "多元素组调用 pick_dedup_winner。semantic_first 策略优先选择带 prompt_struct 的 turn。", "如果多个候选都有结构化信息，则按 template_id 稳定排序选最小项。", "保留 winner 的 turn 内容，同时继承最早 source_order，保证后续排序稳定。"],
-        params: ["当前 demo 策略：semantic_first。", "OE/MCQ collapse 只对代码列出的模板族生效，例如 counting、depth、distance.relative 等。"]
+        summary: "Turn 去重的核心是删除“同一任务里、同一视觉输入上、同一语义问题”的重复项，同时尽量保留结构化元数据更完整的版本。",
+        flow: ["先在每个 task 内部分组；不会跨 task 去重，因为 distance 和 depth 可能引用相同物体但意图不同。", "每组按 dedup_fingerprint 聚合；只有一个候选时直接保留。", "多个候选时，如果策略是 semantic_first，会优先选择带 prompt_struct 的 turn，因为它有 template_id、slot bindings、answer bindings，更适合后续分析和追踪。", "如果多个候选都有 prompt_struct，则用 template_id 做稳定排序，保证同一输入重复运行时选择一致。", "保留 winner 的 turn 内容，但 source_order 取组内最早值，避免去重改变多轮排序。"],
+        params: ["当前 demo 策略 dedup_keep_policy：semantic_first。", "如果策略不是 semantic_first，代码会保留候选列表中的第一个。", "dedup 只在 task 内发生；跨 task 的组合发生在 merge 阶段。"]
       },
       merge: {
-        summary: "样本合并的核心是把同一视觉输入上的多个 QA turn 组成一个多轮样本，同时保留 provenance。",
-        flow: ["先按 merge_group_key 分组，确保 image_refs、view_group 和 mark_spec 一致。", "组内排序时 grounding turn 固定排最前，其他 turn 按原始 parquet 顺序。", "每个 turn 被转换成 human/gpt 两条 message；问题前会按 image_placeholder_count 补对应数量的 <image>。", "metadata.provenance 记录 source_tasks、turn_count、是否 merged，方便追踪样本由哪些任务贡献。", "组内第一个可用 mark_spec 会作为样本级 mark_spec，用于后续 export/render。"],
-        params: ["schema_version 当前为 1.1。", "sample_id 使用 uuid4 重新生成。"]
+        summary: "样本合并的核心是把同一组视觉输入和同一套视觉标记上的多个 QA turn 拼成一个多轮样本，同时不打乱必要的语义顺序。",
+        flow: ["先按 merge_group_key 分组；这个 key 已经保证 image_refs、view_group_id、mark_spec_norm 一致。", "排序时 grounding turn 固定排最前，因为 grounding 给出物体 3D box 信息，作为后续空间问答的先验更自然；其它 turn 按 source_order 和 turn_index 保持原始生成顺序。", "每个 TurnRecord 会拆成两条 message：human 问题和 gpt 答案。human 问题前会根据 image_placeholder_count 加 <image>，singleview 通常 1 个，multiview 是参与该 turn 的 view 数。", "如果某个 TurnRecord 的 viz_question/viz_answer 缺失，会从原始 messages 里重新解析，避免聚合后空问答。", "样本级 metadata.provenance 记录 source_tasks、turn_count、merged 标记；metadata.turns 保留每个 turn 的 task、template、question_type、referent 等结构化信息。"],
+        params: ["schema_version 当前为 1.1。", "sample_id 使用 uuid4 重新生成，不复用原 preprocess id。", "grounding 判断规则：task_name/sub_task/template_id 中包含或以 grounding 开头。"]
       },
       "merged-parquet": {
-        summary: "合并 parquet 的核心是把嵌套 Python/numpy 对象压成稳定可读写的 JSON 字符串列。",
-        flow: ["_json_safe 会递归处理 numpy scalar/array、list、dict，避免 parquet 写入复杂对象失败。", "messages 写入 messages_json，metadata 写入 metadata_json。", "image_refs 保持列表列，供上游导出时定位原图。", "这个 parquet 是 OpenSpatial 内部聚合后的标准中间格式，不是最终训练格式。"],
-        params: ["输出列包括 schema_version、sample_id、merge_group_key、image_refs、messages_json、metadata_json。"]
+        summary: "合并 parquet 的核心是把复杂嵌套结构压成稳定、可跨环境读取的列格式，而不是继续保存 Python 对象。",
+        flow: ["_json_safe 会递归处理 numpy scalar、numpy array、tuple/list/dict，把它们变成普通 Python 标量和列表。", "messages 写入 messages_json，metadata 写入 metadata_json；这样 parquet 不需要理解任意嵌套对象类型。", "image_refs 保持为列表列，因为 export 阶段需要逐个定位源图并打包。", "merge_group_key 保留下来，便于审计为什么这些 turns 被合成一个样本。"],
+        params: ["输出列：schema_version、sample_id、merge_group_key、image_refs、messages_json、metadata_json。", "这是 OpenSpatial 内部聚合格式，不是上游 bundle，也不是 Pangu ML 训练格式。"]
       },
       "upstream-export": {
-        summary: "上游导出的核心是把合并样本切成 metadata JSONL 和图片 tar，并把 image_refs 改写为 tar 内路径。",
-        flow: ["merged_row_to_upstream_record 会反序列化 messages_json/metadata_json，并收集 image_refs。", "write_sharded_upstream_bundle 按 SHARD_SIZE 缓冲样本，flush 时同时写一个 metadata_*.jsonl 和 metadata_*.tar。", "每张图片会按 images/{sample_id}/{index:02d}.{ext} 加入 tar；同一 shard 内相同源路径会复用 tar member。", "如果原图不存在，会保留原 ref 并记录 missing，而不是中断整个导出。", "metadata.json 汇总 schema、view_scope、shard 信息和统计。"],
-        params: ["SHARD_SIZE：8192。", "shard 文件名：metadata_{:06d}.jsonl / .tar。", "支持图片扩展：.jpg、.jpeg、.png、.webp；未知扩展回退 .jpg。"]
+        summary: "上游导出的核心是把合并样本拆成“轻量 metadata JSONL + 图片 tar”，并让 JSONL 中的 image_refs 指向 tar 内部路径。",
+        flow: ["merged_row_to_upstream_record 会反序列化 messages_json/metadata_json，并把 image_refs 规范成字符串列表。", "write_sharded_upstream_bundle 按 8192 条样本攒一个 shard；每个 shard 同时生成一个 metadata_*.jsonl 和一个 metadata_*.tar。", "打包图片时，每个源图会写成 images/{sample_id}/{index:02d}.{ext}；如果同一 shard 内多个样本引用同一源图，会复用已写入的 tar member，避免重复存图。", "JSONL 里原来的本地图片路径会被改写为 tar 内相对路径；这样 bundle 可以移动到别的机器。", "如果某个源图不存在，不会直接中断导出：代码保留原 ref 并记录 missing，metadata.json 中可用于审计。"],
+        params: ["SHARD_SIZE：8192。", "shard 文件名：metadata_{:06d}.jsonl / metadata_{:06d}.tar。", "tar 内图片路径：images/{sample_id}/{index:02d}.{ext}。", "支持图片扩展：.jpg、.jpeg、.png、.webp；未知扩展回退为 .jpg。", "metadata.json 汇总 schema_version、view_scope、shard summaries 和导出统计。"]
       },
       pangu: {
-        summary: "Pangu ML 转换的核心是把 OpenSpatial 上游 bundle 规整成下游训练 schema，尤其是图像 turn 组织和标记重绘。",
-        flow: ["discover_shard_pairs 按 metadata_*.jsonl 找到对应 metadata_*.tar，逐 shard 转换。", "每条 upstream record 会解析 messages、metadata、image_refs，并从 tar 中读取图像。", "如果 mark_spec 指定了 box/point/mask overlay，会调用 render_mark/view_mark_spec_slice 重新渲染对应视图。", "所有图片内容只放在第一轮 user turn；后续 user turn 只保留文本。", "文本中的 <image>、<|image|> 等 placeholder 会被清理。", "角色从 human/gpt 映射到 user/assistant，输出 data_*.jsonl 与 data_*.tar。"],
-        params: ["ROLE_MAP：human -> user，gpt -> assistant。", "Pangu shard 名：data_{:06d}.jsonl / .tar。", "sample_id 会做路径安全化，最多保留 200 字符。", "mark phrase 会随机把 legacy tag-(red box) 转成更自然的 parenthetical phrase。"]
+        summary: "Pangu ML 转换的核心是把 OpenSpatial 上游 bundle 改写成下游训练 schema，特别是图片只出现在第一轮 user content 中，并按需要重绘视觉标记。",
+        flow: ["discover_shard_pairs 会按 metadata_*.jsonl 找同名 metadata_*.tar，保持上游 shard 到下游 shard 的一一对应。", "每条 upstream record 先解析 messages、metadata、image_refs；图片优先从对应 tar 读取，而不是再依赖本地绝对路径。", "如果 metadata.mark_spec 指定 box/point/mask，转换脚本会对相应 view 调用 render_mark 重新生成带标记图片；这比直接使用 annotation 阶段大图对象更稳定。", "所有图片 content block 被集中放入第一轮 user turn，且排在文本前；后续 user turn 中的 <image>、<|image|>、<|image_pad|> 等占位符都会被清掉。", "legacy 文本形如 chair-(red box) 会被改写为自然语言 parenthetical phrase，例如 chair (in the red box)，避免训练文本里出现过强的内部标记格式。", "human/gpt 角色会映射为 user/assistant，输出 data_*.jsonl 与 data_*.tar。"],
+        params: ["ROLE_MAP：human -> user，gpt -> assistant。", "Pangu shard 名：data_{:06d}.jsonl / data_{:06d}.tar。", "sample_id 路径安全化：非 A-Za-z0-9._- 字符替换为 _，最多保留 200 字符。", "图片 tar 路径：{safe_sample_id}_{view_index:02d}.jpg 或原始可用扩展。", "box/point 标记短语会随机采样；mask 固定为 highlighted by a {color} mask。"]
       },
       final: {
         summary: "最终数据包本身没有复杂计算，它的核心约束是 JSONL 中的图片引用必须能在对应 tar 中解析，且对话结构符合 Pangu ML schema。",

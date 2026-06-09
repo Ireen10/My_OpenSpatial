@@ -92,6 +92,30 @@ def explode_row(row: dict, task_name: str, *, base_order: int) -> List[TurnRecor
     convs = _conversations_from_row(row)
 
     if isinstance(meta, list) and meta:
+        convs = _conversations_from_row(row)
+        for i, ent in enumerate(meta):
+            if not isinstance(ent, dict):
+                continue
+            ent_turns = ent.get("turns") or []
+            tr = dict(ent_turns[0]) if ent_turns and isinstance(ent_turns[0], dict) else {}
+            if ent.get("mark_spec"):
+                tr["mark_spec"] = ent["mark_spec"]
+            vq, va, vp, vn = ("", "", None, int(tr.get("image_placeholder_count") or 1))
+            if i < len(convs):
+                vq, va, vp, vn = _message_to_qa(convs[i])
+            records.append(TurnRecord(
+                task_name=task_name,
+                row=row,
+                turn=tr,
+                source_order=base_order,
+                turn_index=i,
+                viz_question=vq,
+                viz_answer=va,
+                viz_prefix=vp,
+                viz_n_images=vn,
+            ))
+        if records:
+            return records
         meta = meta[0]
     if isinstance(meta, dict) and meta.get("turns"):
         for i, turn in enumerate(meta["turns"]):

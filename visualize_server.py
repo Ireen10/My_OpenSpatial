@@ -136,11 +136,10 @@ def load_original_image(image_field):
     return None
 
 
-def _normalize_meta(meta):
+def _normalize_meta_entry(meta):
+    """Normalize a single metadata dict (not a per-row list)."""
     if meta is None or (isinstance(meta, float) and np.isnan(meta)):
         return None
-    if isinstance(meta, list) and meta:
-        meta = meta[0]
     if not isinstance(meta, dict):
         return None
     meta = dict(meta)
@@ -165,6 +164,53 @@ def _normalize_meta(meta):
                 ms["views"] = views
         meta["mark_spec"] = ms
     return meta
+
+
+def _normalize_meta(meta):
+    """Backward-compatible: first metadata entry only."""
+    entries = _metadata_entries(meta)
+    return entries[0] if entries else None
+
+
+def _metadata_entries(raw_meta) -> List[dict]:
+    """
+    Per-row metadata may be:
+      - list[dict]: one entry per turn (annotation parquet)
+      - dict: unified export / aggregate bundle
+    """
+    if raw_meta is None or (isinstance(raw_meta, float) and np.isnan(raw_meta)):
+        return []
+    if isinstance(raw_meta, list):
+        out = []
+        for item in raw_meta:
+            ent = _normalize_meta_entry(item)
+            if ent is not None:
+                out.append(ent)
+        return out
+    ent = _normalize_meta_entry(raw_meta)
+    return [ent] if ent is not None else []
+
+
+def _mark_slots_from_spec(mark_spec) -> List[dict]:
+    mark_slots = []
+    if not mark_spec:
+        return mark_slots
+    for v in mark_spec_views(mark_spec):
+        vi = v.get("view_index", 0)
+        for s in v.get("slots") or []:
+            if not isinstance(s, dict):
+                continue
+            sid = s.get("slot_id", "")
+            mark_slots.append({
+                "slot_id": sid,
+                "slot_key": encode_slot_key(vi, sid),
+                "tag": s.get("tag", ""),
+                "mark_kind": s.get("mark_kind", ""),
+                "color_name": s.get("color_name", ""),
+                "label_alias": s.get("label_alias"),
+                "view_index": vi,
+            })
+    return mark_slots
 
 
 def _to_list(val):
@@ -664,18 +710,54 @@ def _find_active_turn_index(meta_turns, msg_turns):
 
 def parse_row(row):
     """Parse a parquet row: prefer metadata.turns, fallback to messages."""
-    meta = _normalize_meta(row.get("metadata"))
+    entries = _metadata_entries(row.get("metadata"))
     messages = _to_list(row.get("messages", []))
     msg_turns = _parse_messages_turns(messages)
 
     turns = []
+    turn_mark_specs = []
+    meta_turns_raw = []
     active_turn_index = None
-    if meta and meta.get("turns"):
-        meta_turns = meta["turns"]
-        turns = _metadata_turns_to_display(meta_turns, msg_turns)
-        active_turn_index = _find_active_turn_index(meta_turns, msg_turns)
+
+    if len(entries) > 1:
+        # Annotation parquet: metadata[i] aligns with turn i (each has its own mark_spec).
+        for ent in entries:
+            ent_turns = ent.get("turns") or []
+            if ent_turns and isinstance(ent_turns[0], dict):
+                meta_turns_raw.append(ent_turns[0])
+            else:
+                meta_turns_raw.append({})
+            turn_mark_specs.append(ent.get("mark_spec"))
+        turns = _metadata_turns_to_display(meta_turns_raw, msg_turns)
+        active_turn_index = _find_active_turn_index(meta_turns_raw, msg_turns)
+    elif entries:
+        meta = entries[0]
+        if meta.get("turns"):
+            meta_turns_raw = meta["turns"]
+            turns = _metadata_turns_to_display(meta_turns_raw, msg_turns)
+            active_turn_index = _find_active_turn_index(meta_turns_raw, msg_turns)
+            shared_ms = meta.get("mark_spec")
+            turn_mark_specs = [shared_ms] * len(meta_turns_raw)
+        else:
+            turns = msg_turns
+            shared_ms = meta.get("mark_spec")
+            turn_mark_specs = [shared_ms] * len(turns) if turns else []
+    else:
+        turns = msg_turns
+        turn_mark_specs = [None] * len(turns)
+
     if not turns:
         turns = msg_turns
+    if len(turn_mark_specs) < len(turns):
+        turn_mark_specs.extend([None] * (len(turns) - len(turn_mark_specs)))
+    if active_turn_index is None and turns:
+        active_turn_index = len(turns) - 1
+
+    active_mark_spec = None
+    if active_turn_index is not None and active_turn_index < len(turn_mark_specs):
+        active_mark_spec = turn_mark_specs[active_turn_index]
+
+    meta = entries[0] if entries else None
 
     tags = row.get("question_tags", [])
     if isinstance(tags, np.ndarray):
@@ -683,26 +765,10 @@ def parse_row(row):
     qtype = row.get("question_types", "")
 
     type_label = ""
-    if meta and meta.get("turns") and isinstance(meta["turns"], list) and meta["turns"]:
-        type_label = (meta["turns"][0].get("type_label") or "").strip()
+    if meta_turns_raw and isinstance(meta_turns_raw[0], dict):
+        type_label = (meta_turns_raw[0].get("type_label") or "").strip()
 
-    mark_slots = []
-    if meta and meta.get("mark_spec"):
-        for v in mark_spec_views(meta["mark_spec"]):
-            vi = v.get("view_index", 0)
-            for s in v.get("slots") or []:
-                if not isinstance(s, dict):
-                    continue
-                sid = s.get("slot_id", "")
-                mark_slots.append({
-                    "slot_id": sid,
-                    "slot_key": encode_slot_key(vi, sid),
-                    "tag": s.get("tag", ""),
-                    "mark_kind": s.get("mark_kind", ""),
-                    "color_name": s.get("color_name", ""),
-                    "label_alias": s.get("label_alias"),
-                    "view_index": vi,
-                })
+    marks_differ = len({id(ms) for ms in turn_mark_specs if ms}) > 1
 
     return {
         "turns": turns,
@@ -710,7 +776,10 @@ def parse_row(row):
         "tags": tags,
         "question_type": qtype,
         "meta": meta,
-        "mark_slots": mark_slots,
+        "mark_spec": active_mark_spec,
+        "turn_mark_specs": turn_mark_specs,
+        "marks_differ_by_turn": marks_differ,
+        "mark_slots": _mark_slots_from_spec(active_mark_spec),
         "type_label": type_label,
     }
 
@@ -776,6 +845,7 @@ def build_display_images(
     *,
     overlay_marks: bool = False,
     marks_mode: str = "off",
+    mark_spec=None,
 ):
     """Original image(s) with optional mark overlays and 3D box overlay.
 
@@ -821,7 +891,8 @@ def build_display_images(
         images = orig
 
     meta = parsed.get("meta") or {}
-    mark_spec = meta.get("mark_spec")
+    if mark_spec is None:
+        mark_spec = parsed.get("mark_spec") or meta.get("mark_spec")
     preprocess = _row_as_preprocess_dict(row_series)
     n_frames = len(images)
     out_images = []
@@ -1159,8 +1230,11 @@ function renderRows(rows) {
         return `<label><input type="checkbox" class="mark-cb" data-row="${row.row_index}" data-slot-key="${escapeHtml(key)}" checked onchange="refreshImage(${row.row_index})" /> ${label}</label>`;
       }).join('');
       const modeHint = row.type_label ? ` Instruction mode: <strong>${escapeHtml(row.type_label)}</strong>.` : '';
+      const turnMarkHint = row.marks_differ_by_turn
+        ? ' <strong>Marks vary by turn — click a turn below to overlay its mark_spec.</strong>'
+        : '';
       markHtml = `<div class="mark-panel">
-        <div class="mark-hint">Images load from path refs in metadata / image column.${modeHint} Overlay is client-side from mark_spec only when you check slots below:</div>
+        <div class="mark-hint">Images load from path refs in metadata / image column.${modeHint}${turnMarkHint} Overlay is client-side from mark_spec only when you check slots below:</div>
         <label style="display:block;margin-bottom:6px;font-weight:600;">
           <input type="checkbox" class="mark-select-all" data-row="${row.row_index}" checked onchange="toggleAllMarks(${row.row_index}, this.checked)" /> Select all marks
         </label>
@@ -1180,7 +1254,10 @@ function renderRows(rows) {
       row.turns.forEach((turn, tIdx) => {
         const isActive = row.active_turn_index === tIdx;
         const activeCls = isActive ? ' turn-active' : '';
-        const activeBadge = isActive ? '<span class="tag tag-active">this row</span>' : '';
+        const activeBadge = isActive ? '<span class="tag tag-active">marks</span>' : '';
+        const turnClick = row.marks_differ_by_turn
+          ? ` onclick="selectTurnMarks(${row.row_index}, ${tIdx})" style="cursor:pointer;" title="Show marks for this turn"`
+          : '';
         const prefix = (turn.question_prefix || '').trim();
         const qBody = (turn.question_text || turn.question || '').replace(/<image>\s*/g, '').trim();
         const turnLabel = isMultiTurn ? `<span class="multi-turn-label">Turn ${tIdx + 1}${turn.turn_id != null ? ' (id ' + turn.turn_id + ')' : ''} ${activeBadge}</span>` : '';
@@ -1190,7 +1267,7 @@ function renderRows(rows) {
           prefixHtml = `<div class="qa-text prefix">${escapeHtml(prefix)}</div>`;
         }
         turnsHtml += `
-          <div class="qa-block${activeCls}">
+          <div class="qa-block${activeCls}" data-turn-index="${tIdx}"${turnClick}>
             ${turnLabel}
             <div class="qa-label q">Question</div>
             ${prefixHtml}
@@ -1204,7 +1281,7 @@ function renderRows(rows) {
     }
 
     html += `
-    <div class="card" data-row-index="${row.row_index}">
+    <div class="card" data-row-index="${row.row_index}" data-active-turn="${row.active_turn_index != null ? row.active_turn_index : 0}">
       <div class="card-header">
         <strong>#${globalIdx + 1}</strong>
         ${tagsHtml} ${typeHtml} ${turnBadge}
@@ -1245,6 +1322,42 @@ function toggleAllMarks(rowIndex, checked) {
   refreshImage(rowIndex);
 }
 
+function activeTurnIndex(rowIndex) {
+  const card = cardForRow(rowIndex);
+  if (!card) return 0;
+  const v = card.getAttribute('data-active-turn');
+  return v != null && v !== '' ? parseInt(v, 10) : 0;
+}
+
+function selectTurnMarks(rowIndex, turnIndex) {
+  const card = cardForRow(rowIndex);
+  if (!card) return;
+  card.setAttribute('data-active-turn', String(turnIndex));
+  card.querySelectorAll('.qa-block[data-turn-index]').forEach(el => {
+    const ti = parseInt(el.getAttribute('data-turn-index'), 10);
+    el.classList.toggle('turn-active', ti === turnIndex);
+  });
+  fetch('/api/turn_marks?path=' + encodeURIComponent(currentPath) + '&index=' + rowIndex + '&turn_index=' + turnIndex)
+    .then(r => r.json())
+    .then(data => {
+      const panel = card.querySelector('.mark-panel');
+      if (!panel || !data.mark_slots) return;
+      const checks = data.mark_slots.map(s => {
+        const key = s.slot_key || (String(s.view_index) + ':' + s.slot_id);
+        const vf = (s.view_index !== undefined && s.view_index !== null && s.view_index !== '')
+          ? `view ${s.view_index} · ` : '';
+        const label = `${vf}${s.slot_id}: ${s.tag} (${s.color_name} ${s.mark_kind})`;
+        return `<label><input type="checkbox" class="mark-cb" data-row="${rowIndex}" data-slot-key="${escapeHtml(key)}" checked onchange="refreshImage(${rowIndex})" /> ${escapeHtml(label)}</label>`;
+      }).join('');
+      const hint = panel.querySelector('.mark-hint');
+      const hintHtml = hint ? hint.outerHTML : '';
+      const master = panel.querySelector('.mark-select-all');
+      const masterHtml = master ? master.closest('label').outerHTML : '';
+      panel.innerHTML = hintHtml + masterHtml + checks;
+    })
+    .then(() => refreshImage(rowIndex));
+}
+
 function refreshImage(rowIndex) {
   const card = cardForRow(rowIndex);
   if (!card) return;
@@ -1262,6 +1375,7 @@ function refreshImage(rowIndex) {
     slots: slots.join(','),
     marks_mode: slots.length ? 'selected' : 'off',
     overlay_3d: overlay3d ? '1' : '0',
+    turn_index: String(activeTurnIndex(rowIndex)),
   });
   fetch('/api/render?' + params)
     .then(r => r.json())
@@ -1388,12 +1502,14 @@ def api_data():
         can_3d = _is_3d_grounding_task(task_name, parsed)
         images, _, marks_applied = build_display_images(
             row, parsed, task_name, overlay_3d=can_3d, marks_mode="all",
+            mark_spec=parsed.get("mark_spec"),
         )
 
         rows.append({
             "row_index": i,
             "turns": parsed["turns"],
             "active_turn_index": parsed["active_turn_index"],
+            "marks_differ_by_turn": parsed.get("marks_differ_by_turn", False),
             "display_images": [pil_to_base64(img) for img in images],
             "marks_overlay_applied": marks_applied,
             "tags": parsed["tags"] if isinstance(parsed["tags"], list) else [parsed["tags"]],
@@ -1410,6 +1526,20 @@ def api_data():
         "rows": rows,
         "is_3d_task": is_3d,
     })
+
+
+@app.route("/api/turn_marks")
+def api_turn_marks():
+    path = request.args.get("path", "")
+    index = int(request.args.get("index", 0))
+    turn_index = int(request.args.get("turn_index", 0))
+    row, _ = _load_row(path, index)
+    if row is None:
+        return jsonify({"mark_slots": []})
+    parsed = parse_row(row)
+    specs = parsed.get("turn_mark_specs") or []
+    ms = specs[turn_index] if 0 <= turn_index < len(specs) else parsed.get("mark_spec")
+    return jsonify({"mark_slots": _mark_slots_from_spec(ms)})
 
 
 @app.route("/api/render")
@@ -1431,12 +1561,19 @@ def api_render():
 
     task_name = _task_name_from_parquet_path(path)
     parsed = parse_row(row)
-    parsed["meta"] = _normalize_meta(row.get("metadata"))
+    turn_index = request.args.get("turn_index")
+    turn_ms = None
+    if turn_index is not None and turn_index != "":
+        ti = int(turn_index)
+        specs = parsed.get("turn_mark_specs") or []
+        if 0 <= ti < len(specs):
+            turn_ms = specs[ti]
     images, _, marks_applied = build_display_images(
         row, parsed, task_name,
         slot_ids=slot_ids,
         overlay_3d=overlay_3d,
         marks_mode=marks_mode,
+        mark_spec=turn_ms,
     )
     return jsonify({
         "images": [pil_to_base64(img) for img in images],

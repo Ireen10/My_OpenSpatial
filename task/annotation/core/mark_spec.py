@@ -328,7 +328,6 @@ def plan_object_marks(
 
     for i, obj in enumerate(objs):
         tag, passthrough, bbox_2d, mask_pil = marker._extract(obj, view_idx)
-        color_name, color = marker.pop_color()
         slot_id = _slot_id(i, labels)
 
         bbox = _normalize_bbox_2d(bbox_2d) or _bbox_2d_from_mask(mask_pil)
@@ -368,6 +367,7 @@ def plan_object_marks(
         if not geometry:
             continue
 
+        color_name, _color = marker.pop_color()
         slots.append({
             "slot_id": slot_id,
             "obj_idx": _obj_idx_from_node(passthrough),
@@ -399,10 +399,10 @@ def plan_point_marks(
     marker: VisualMarker,
     points: List[List[int]],
     labels: Optional[List[str]] = None,
-) -> Tuple[dict, str]:
-    color_name, color = marker.pop_color()
+) -> Tuple[dict, list]:
     slots = []
     for i, uv in enumerate(points):
+        color_name, _color = marker.pop_color()
         slots.append({
             "slot_id": _slot_id(i, labels),
             "obj_idx": -1,
@@ -417,7 +417,7 @@ def plan_point_marks(
         "mark_kinds": ["point"],
         "slots": slots,
     }
-    return spec, color_name
+    return spec, slots
 
 
 def _mask_to_bool_array(m: Any) -> Optional[np.ndarray]:
