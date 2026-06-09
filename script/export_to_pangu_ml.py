@@ -605,27 +605,19 @@ def _build_shard_jobs(
     seed: Optional[int],
 ) -> List[ShardJob]:
     jobs: List[ShardJob] = []
-    global_index = 0
 
     for jf_path, tar_path in pairs:
         shard_idx = shard_index_from_jsonl(jf_path)
-        n_lines = 0
-        with jf_path.open("r", encoding="utf-8") as jf:
-            for line in jf:
-                if line.strip():
-                    n_lines += 1
-
         jobs.append(ShardJob(
             shard_index=shard_idx,
             jsonl_path=str(jf_path),
             tar_path=str(tar_path) if tar_path else None,
             export_dir=str(export_dir),
             output_root=str(output_root),
-            global_index_start=global_index,
+            global_index_start=shard_idx * 10_000_000,
             max_converted=None,
             seed=seed,
         ))
-        global_index += n_lines
 
     return jobs
 
@@ -655,7 +647,10 @@ def convert_export(
         workers = num_workers if num_workers is not None else min(len(jobs), cpu)
         workers = max(1, min(workers, len(jobs)))
 
-    print(f">>> Converting {len(jobs)} shard(s) with {workers} worker(s) (1:1 shard id)")
+    print(
+        f">>> Converting {len(jobs)} shard(s) with {workers} worker(s) (1:1 shard id)",
+        flush=True,
+    )
 
     if workers == 1:
         remaining = max_samples
@@ -680,9 +675,17 @@ def convert_export(
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(convert_one_shard, job): job for job in jobs}
         for fut in as_completed(futures):
-            _merge_stats(stats, fut.result())
+            job = futures[fut]
+            shard_stats = fut.result()
+            _merge_stats(stats, shard_stats)
             if pbar is not None:
                 pbar.update(1)
+            else:
+                print(
+                    f">>> shard {job.shard_index}: {shard_stats.converted} converted, "
+                    f"{shard_stats.skipped} skipped",
+                    flush=True,
+                )
 
     if pbar is not None:
         pbar.close()
@@ -697,6 +700,8 @@ def main() -> None:
 
     if not export_dir.is_dir():
         raise SystemExit(f"export-dir not found: {export_dir}")
+
+    print(f">>> Pangu ML convert: {export_dir} -> {output_root}", flush=True)
 
     if args.max_samples is not None and args.num_workers not in (None, 1):
         print(">>> max_samples set; running sequentially (num_workers=1)")

@@ -44,6 +44,10 @@ _WORKERS = {
     "image": 32,
 }
 
+
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+
 # root_path -> {mtime, shards, facts, total, filter_cache}
 _ROOT_CACHE: Dict[str, dict] = {}
 _ROOT_LOCK = threading.Lock()
@@ -72,17 +76,9 @@ def _shard_id_from_stem(stem: str) -> Optional[str]:
     return stem.split("_", 1)[1]
 
 
-def _count_nonempty_lines(jf: Path) -> int:
-    n = 0
-    with jf.open("r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                n += 1
-    return n
-
-
 def discover_pangu_roots(data_dir: str) -> List[dict]:
-    """Light discovery: line counts only (no JSON parse)."""
+    """Fast discovery: count shard files only (no full jsonl scan)."""
+    _log(f"Discovering Pangu ML datasets under {data_dir} ...")
     roots: List[dict] = []
     base = Path(data_dir)
     candidates: List[Path] = [base]
@@ -106,22 +102,21 @@ def discover_pangu_roots(data_dir: str) -> List[dict]:
             for p in images_dir.glob("data_*.tar")
             if (sid := _shard_id_from_stem(p.stem)) is not None
         }
-        shard_count = 0
-        total = 0
-        for jf in sorted(jsonl_dir.glob("data_*.jsonl")):
-            sid = _shard_id_from_stem(jf.stem)
-            if sid is None or sid not in tar_ids:
-                continue
-            shard_count += 1
-            total += _count_nonempty_lines(jf)
+        shard_count = sum(
+            1
+            for jf in jsonl_dir.glob("data_*.jsonl")
+            if (_shard_id_from_stem(jf.stem) in tar_ids)
+        )
 
         if shard_count == 0:
             continue
         seen.add(key)
         roots.append({
             "path": key,
-            "label": f"{root.name} ({total} samples, {shard_count} shards)",
+            "label": f"{root.name} ({shard_count} shards, sample count on first open)",
         })
+        _log(f"  found: {root.name} ({shard_count} shards)")
+    _log(f"Discovery done: {len(roots)} dataset(s)")
     return roots
 
 
@@ -192,11 +187,21 @@ def _build_shard_index(root: Path, *, num_workers: int) -> Tuple[List[ShardInfo]
         return [], []
 
     workers = max(1, min(num_workers, len(jobs)))
+    chunks: List[_ShardIndexChunk] = []
+    _log(f"Indexing {len(jobs)} shard(s) with {workers} worker(s) ...")
     if workers == 1:
-        chunks = [_index_one_shard(j) for j in jobs]
+        for i, job in enumerate(jobs, 1):
+            chunks.append(_index_one_shard(job))
+            _log(f"  [{i}/{len(jobs)}] shard {job[0]} done")
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            chunks = list(pool.map(_index_one_shard, jobs))
+            futures = {pool.submit(_index_one_shard, job): job[0] for job in jobs}
+            done = 0
+            for fut in as_completed(futures):
+                sid = futures[fut]
+                chunks.append(fut.result())
+                done += 1
+                _log(f"  [{done}/{len(jobs)}] shard {sid} done")
 
     chunks.sort(key=lambda c: int(c.shard_id))
     shards: List[ShardInfo] = []
@@ -251,7 +256,7 @@ def _get_root_cache(root_path: str) -> dict:
         if cached and cached.get("mtime") == mtime:
             return cached
         nw = _WORKERS["index"]
-        print(f"[pangu_viz] Building index for {root_path} ({nw} workers)...")
+        _log(f"Building sample index for {root_path} ...")
         shards, facts = _build_shard_index(Path(root_path), num_workers=nw)
         cache = {
             "mtime": mtime,
@@ -261,7 +266,7 @@ def _get_root_cache(root_path: str) -> dict:
             "filter_cache": {},
         }
         _ROOT_CACHE[root_path] = cache
-        print(f"[pangu_viz] Index ready: {len(facts)} samples, {len(shards)} shards")
+        _log(f"Index ready: {len(facts)} samples, {len(shards)} shards")
         return cache
 
 
@@ -884,6 +889,13 @@ window.onload = () => { if (document.getElementById('rootSelect').value) loadRoo
 """
 
 
+@app.before_request
+def _log_request() -> None:
+    qs = request.query_string.decode("utf-8", errors="replace")
+    tail = f"?{qs}" if qs else ""
+    _log(f"[http] {request.method} {request.path}{tail}")
+
+
 @app.route("/")
 def index():
     roots = discover_pangu_roots(DATA_DIR)
@@ -968,11 +980,11 @@ def _lan_urls(port: int) -> List[str]:
 
 
 def _print_listen_info(host: str, port: int) -> None:
-    print(f"\nListening on http://{host}:{port}")
-    print(f"  This machine: http://127.0.0.1:{port}")
+    _log(f"\nListening on http://{host}:{port}")
+    _log(f"  This machine: http://127.0.0.1:{port}")
     if host in ("0.0.0.0", "::"):
         for url in _lan_urls(port):
-            print(f"  LAN: {url}")
+            _log(f"  LAN: {url}")
 
 
 if __name__ == "__main__":
@@ -998,6 +1010,11 @@ if __name__ == "__main__":
         default=None,
         help="Parallel workers for JSONL text reads per page (default: min(32, CPU)).",
     )
+    parser.add_argument(
+        "--warm-index",
+        action="store_true",
+        help="Build jsonl index at startup (shows per-shard progress; blocks until done).",
+    )
     args = parser.parse_args()
 
     _cpu = os.cpu_count() or 32
@@ -1006,13 +1023,14 @@ if __name__ == "__main__":
     _WORKERS["read"] = args.read_workers if args.read_workers is not None else min(_cpu, 32)
 
     DATA_DIR = args.data_dir
+    _log("Pangu ML visualizer starting ...")
     roots = discover_pangu_roots(DATA_DIR)
-    print(f"Found {len(roots)} Pangu ML dataset(s) in {DATA_DIR}:")
-    for r in roots:
-        print(f"  {r['label']}")
-    print(
-        f"Workers: index={_WORKERS['index']}, read={_WORKERS['read']}, "
-        f"image={_WORKERS['image']}"
-    )
+    _log(f"Workers: index={_WORKERS['index']}, read={_WORKERS['read']}, "
+         f"image={_WORKERS['image']}")
+    if args.warm_index:
+        for r in roots:
+            _log(f"Warm-index: {r['path']}")
+            _get_root_cache(r["path"])
     _print_listen_info(args.host, args.port)
+    _log("Server ready — open the URL above in a browser.")
     app.run(host=args.host, port=args.port, debug=False, threaded=True)
