@@ -1,0 +1,170 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1050" viewBox="0 0 1500 1050" role="img" aria-labelledby="title desc">
+  <title id="title">OpenSpatial Pipeline Flow</title>
+  <desc id="desc">Flowchart from raw dataset preprocessing to annotation, aggregation, upstream export, and Pangu ML conversion.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#334155"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#2563eb"/>
+    </marker>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { font: 700 34px Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 16px Arial, sans-serif; fill: #475569; }
+      .stage-title { font: 700 18px Arial, sans-serif; fill: #0f172a; }
+      .box-title { font: 700 17px Arial, sans-serif; fill: #0f172a; }
+      .box-text { font: 14px Arial, sans-serif; fill: #334155; }
+      .small { font: 12px Arial, sans-serif; fill: #64748b; }
+      .code { font: 13px Consolas, "Courier New", monospace; fill: #334155; }
+      .lane-label { font: 700 15px Arial, sans-serif; fill: #1e293b; }
+      .box { stroke-width: 1.4; rx: 16; }
+      .input { fill: #fff7ed; stroke: #fb923c; }
+      .preprocess { fill: #ecfdf5; stroke: #10b981; }
+      .annotation { fill: #eff6ff; stroke: #3b82f6; }
+      .aggregate { fill: #f5f3ff; stroke: #8b5cf6; }
+      .export { fill: #fdf2f8; stroke: #ec4899; }
+      .pangu { fill: #f0f9ff; stroke: #06b6d4; }
+      .artifact { fill: #ffffff; stroke: #cbd5e1; stroke-dasharray: 6 4; }
+      .line { fill: none; stroke: #334155; stroke-width: 2.2; marker-end: url(#arrow); }
+      .line-blue { fill: none; stroke: #2563eb; stroke-width: 2.2; marker-end: url(#arrow-blue); }
+      .line-dashed { fill: none; stroke: #64748b; stroke-width: 1.8; stroke-dasharray: 6 5; marker-end: url(#arrow); }
+      .stage-band { fill: #e2e8f0; opacity: 0.45; rx: 20; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1500" height="1050"/>
+
+  <text class="title" x="60" y="62">OpenSpatial Pipeline Flow</text>
+  <text class="subtitle" x="60" y="92">preprocess -> annotation -> aggregate -> export -> Pangu ML conversion</text>
+  <text class="small" x="60" y="118">Runner: python run.py --config &lt;config.yaml&gt; --output_dir &lt;output_root&gt;</text>
+
+  <rect class="stage-band" x="38" y="145" width="1424" height="210"/>
+  <rect class="stage-band" x="38" y="395" width="1424" height="250"/>
+  <rect class="stage-band" x="38" y="690" width="1424" height="260"/>
+
+  <text class="stage-title" x="60" y="176">1. Preprocess</text>
+  <text class="stage-title" x="60" y="426">2. Annotation</text>
+  <text class="stage-title" x="60" y="721">3. Aggregate and Export</text>
+
+  <!-- Inputs -->
+  <rect class="box input" x="70" y="205" width="235" height="105"/>
+  <text class="box-title" x="92" y="235">Raw / Source Parquet</text>
+  <text class="box-text" x="92" y="262">RGB, depth, camera pose</text>
+  <text class="box-text" x="92" y="284">intrinsics, 3D boxes, tags</text>
+  <text class="code" x="92" y="304">dataset.data_dir</text>
+
+  <!-- Preprocess stages -->
+  <rect class="box preprocess" x="360" y="185" width="225" height="145"/>
+  <text class="box-title" x="382" y="215">Flatten / Filter</text>
+  <text class="box-text" x="382" y="242">Optional flatten per view</text>
+  <text class="box-text" x="382" y="264">Project and filter 3D boxes</text>
+  <text class="code" x="382" y="292">flatten_stage/flatten</text>
+  <text class="code" x="382" y="312">filter_stage/3dbox_filter</text>
+
+  <rect class="box preprocess" x="635" y="185" width="225" height="145"/>
+  <text class="box-title" x="657" y="215">Localization</text>
+  <text class="box-text" x="657" y="242">Refine object masks / boxes</text>
+  <text class="box-text" x="657" y="264">SAM2 or SAM3 localizer</text>
+  <text class="code" x="657" y="292">localization_stage/</text>
+  <text class="code" x="657" y="312">sam2_refiner</text>
+
+  <rect class="box preprocess" x="910" y="185" width="225" height="145"/>
+  <text class="box-title" x="932" y="215">Scene Fusion</text>
+  <text class="box-text" x="932" y="242">Back-project depth to 3D</text>
+  <text class="box-text" x="932" y="264">Attach pointclouds / masks</text>
+  <text class="code" x="932" y="292">scene_fusion_stage/</text>
+  <text class="code" x="932" y="312">depth_back_projection</text>
+
+  <rect class="box preprocess" x="1185" y="185" width="225" height="145"/>
+  <text class="box-title" x="1207" y="215">Group Views</text>
+  <text class="box-text" x="1207" y="242">Optional per-scene grouping</text>
+  <text class="box-text" x="1207" y="264">Build multiview input rows</text>
+  <text class="code" x="1207" y="292">group_stage/group</text>
+  <text class="small" x="1207" y="314">singleview can use fusion output</text>
+
+  <path class="line" d="M305 257 L350 257"/>
+  <path class="line" d="M585 257 L625 257"/>
+  <path class="line" d="M860 257 L900 257"/>
+  <path class="line" d="M1135 257 L1175 257"/>
+
+  <rect class="box artifact" x="470" y="360" width="290" height="70"/>
+  <text class="box-title" x="492" y="388">Preprocessed data.parquet</text>
+  <text class="box-text" x="492" y="412">per-image rows or per-scene grouped rows</text>
+
+  <path class="line-dashed" d="M1022 330 C960 380 848 395 770 395"/>
+  <path class="line-dashed" d="M1298 330 C1190 392 920 400 770 400"/>
+
+  <!-- Annotation branches -->
+  <rect class="box annotation" x="95" y="480" width="315" height="125"/>
+  <text class="lane-label" x="118" y="505">Singleview annotation config</text>
+  <text class="code" x="118" y="531">config/annotation/demo_singleview_all.yaml</text>
+  <text class="box-text" x="118" y="558">distance, depth_annotation, size,</text>
+  <text class="box-text" x="118" y="580">position, 3d_grounding</text>
+
+  <rect class="box annotation" x="470" y="480" width="315" height="125"/>
+  <text class="lane-label" x="493" y="505">Multiview annotation config</text>
+  <text class="code" x="493" y="531">config/annotation/demo_multiview_all.yaml</text>
+  <text class="box-text" x="493" y="558">multiview distance, size,</text>
+  <text class="box-text" x="493" y="580">correspondence, object position</text>
+
+  <rect class="box annotation" x="845" y="480" width="260" height="125"/>
+  <text class="box-title" x="868" y="510">AnnotationGenerator</text>
+  <text class="box-text" x="868" y="538">Build visual prompt</text>
+  <text class="box-text" x="868" y="560">Create messages, metadata,</text>
+  <text class="box-text" x="868" y="582">mark_spec and question tags</text>
+
+  <rect class="box artifact" x="1165" y="480" width="250" height="125"/>
+  <text class="box-title" x="1188" y="510">Task Outputs</text>
+  <text class="box-text" x="1188" y="538">One parquet per task</text>
+  <text class="code" x="1188" y="565">annotation_stage/*/</text>
+  <text class="code" x="1188" y="585">data.parquet</text>
+
+  <path class="line-blue" d="M615 430 C455 450 310 452 252 480"/>
+  <path class="line-blue" d="M615 430 C615 452 625 458 628 480"/>
+  <path class="line-blue" d="M410 542 L835 542"/>
+  <path class="line-blue" d="M785 542 L835 542"/>
+  <path class="line-blue" d="M1105 542 L1155 542"/>
+
+  <!-- Aggregate and export -->
+  <rect class="box aggregate" x="80" y="765" width="310" height="135"/>
+  <text class="box-title" x="103" y="795">SampleAggregator</text>
+  <text class="code" x="103" y="820">task/aggregate/sample_aggregator.py</text>
+  <text class="box-text" x="103" y="848">Load annotation task parquets</text>
+  <text class="box-text" x="103" y="870">Dedup within each task</text>
+  <text class="box-text" x="103" y="892">Merge by visual input group</text>
+
+  <rect class="box aggregate" x="450" y="765" width="280" height="135"/>
+  <text class="box-title" x="473" y="795">Merged Samples</text>
+  <text class="code" x="473" y="820">aggregate_stage/</text>
+  <text class="code" x="473" y="840">sample_aggregator/data.parquet</text>
+  <text class="box-text" x="473" y="868">sample_id, image_refs, messages_json,</text>
+  <text class="box-text" x="473" y="890">metadata_json, merge_group_key</text>
+
+  <rect class="box export" x="790" y="765" width="285" height="135"/>
+  <text class="box-title" x="813" y="795">DatasetExporter</text>
+  <text class="code" x="813" y="820">task/export/dataset_exporter.py</text>
+  <text class="box-text" x="813" y="848">Write upstream sharded bundle</text>
+  <text class="code" x="813" y="875">export_stage/jsonl/</text>
+  <text class="code" x="813" y="895">export_stage/images/</text>
+
+  <rect class="box pangu" x="1135" y="765" width="300" height="135"/>
+  <text class="box-title" x="1158" y="795">Pangu ML Conversion</text>
+  <text class="code" x="1158" y="820">script/export_to_pangu_ml.py</text>
+  <text class="box-text" x="1158" y="848">metadata_*.jsonl + tar</text>
+  <text class="box-text" x="1158" y="870">to data_*.jsonl + tar</text>
+  <text class="box-text" x="1158" y="892">Normalize roles and image turns</text>
+
+  <path class="line" d="M1290 605 C1285 690 365 700 238 765"/>
+  <path class="line" d="M390 832 L440 832"/>
+  <path class="line" d="M730 832 L780 832"/>
+  <path class="line" d="M1075 832 L1125 832"/>
+
+  <!-- Config references -->
+  <rect class="box artifact" x="80" y="955" width="1355" height="55"/>
+  <text class="box-title" x="105" y="982">Common configs</text>
+  <text class="code" x="265" y="982">config/preprocessing/demo_preprocessing_*.yaml</text>
+  <text class="code" x="615" y="982">config/annotation/demo_*_all.yaml</text>
+  <text class="code" x="940" y="982">config/aggregate/demo_aggregate_*.yaml</text>
+  <text class="small" x="105" y="1002">BasePipeline resolves depends_on references and writes each task result under {output_root}/{pipeline_file}_{config_name}/{stage}/{task}/data.parquet.</text>
+</svg>

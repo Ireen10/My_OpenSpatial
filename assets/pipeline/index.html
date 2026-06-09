@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenSpatial Interactive Pipeline</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app">
+    <main class="main">
+      <div class="eyebrow">OpenSpatial Visualization</div>
+      <h1>Interactive Pipeline Flow</h1>
+      <p class="lead">
+        Click any step to inspect what it computes, which files implement it, and how its outputs feed the next stage.
+        The main path covers preprocess, annotation, aggregate, upstream export, and Pangu ML conversion.
+      </p>
+
+      <div class="toolbar">
+        <div class="legend" id="legend"></div>
+        <div class="hint">Tip: click a node in the diagram</div>
+      </div>
+
+      <div class="canvas-wrap">
+        <svg id="pipeline-svg" width="1460" height="930" viewBox="0 0 1460 930" role="img" aria-label="OpenSpatial interactive pipeline flow">
+          <defs>
+            <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+              <path d="M1.5,1.5 L9,5.5 L1.5,9.5 Z" fill="#64748b"></path>
+            </marker>
+          </defs>
+          <g id="stage-layer"></g>
+          <g id="edge-layer"></g>
+          <g id="node-layer"></g>
+        </svg>
+      </div>
+
+      <p class="footer-note">
+        This page is static and self-contained. It can be opened directly from <code>assets/pipeline/index.html</code>.
+      </p>
+    </main>
+
+    <aside class="detail" id="detail" aria-live="polite"></aside>
+  </div>
+
+  <script src="./pipeline-data.js"></script>
+  <script>
+    const svg = document.getElementById("pipeline-svg");
+    const stageLayer = document.getElementById("stage-layer");
+    const edgeLayer = document.getElementById("edge-layer");
+    const nodeLayer = document.getElementById("node-layer");
+    const detail = document.getElementById("detail");
+    const legend = document.getElementById("legend");
+
+    const stageBands = [
+      { id: "orchestration", x: 24, y: 20, w: 1412, h: 136 },
+      { id: "preprocess", x: 24, y: 184, w: 1412, h: 136 },
+      { id: "annotation", x: 24, y: 382, w: 1218, h: 136 },
+      { id: "aggregate", x: 24, y: 580, w: 1218, h: 136 },
+      { id: "export", x: 268, y: 778, w: 734, h: 136 }
+    ];
+
+    const stageColors = {
+      orchestration: "#f97316",
+      preprocess: "#10b981",
+      annotation: "#3b82f6",
+      aggregate: "#8b5cf6",
+      export: "#ec4899"
+    };
+
+    const byId = Object.fromEntries(PIPELINE_STEPS.map((step) => [step.id, step]));
+    let activeId = "runner";
+
+    function svgEl(name, attrs = {}) {
+      const el = document.createElementNS("http://www.w3.org/2000/svg", name);
+      Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value));
+      return el;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function wrapText(text, maxChars = 26) {
+      const words = String(text).split(" ");
+      const lines = [];
+      let current = "";
+      words.forEach((word) => {
+        const next = current ? `${current} ${word}` : word;
+        if (next.length > maxChars && current) {
+          lines.push(current);
+          current = word;
+        } else {
+          current = next;
+        }
+      });
+      if (current) lines.push(current);
+      return lines.slice(0, 3);
+    }
+
+    function nodeCenter(step) {
+      return { x: step.x + step.w / 2, y: step.y + step.h / 2 };
+    }
+
+    function edgePath(from, to) {
+      const a = nodeCenter(from);
+      const b = nodeCenter(to);
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+
+      if (Math.abs(dy) < 80) {
+        const x1 = from.x + from.w;
+        const y1 = a.y;
+        const x2 = to.x;
+        const y2 = b.y;
+        return `M ${x1} ${y1} C ${x1 + Math.max(45, dx * 0.35)} ${y1}, ${x2 - Math.max(45, dx * 0.35)} ${y2}, ${x2} ${y2}`;
+      }
+
+      const startX = a.x;
+      const startY = from.y + from.h;
+      const endX = b.x;
+      const endY = to.y;
+      const midY = startY + (endY - startY) * 0.55;
+      return `M ${startX} ${startY} C ${startX} ${midY}, ${endX} ${midY}, ${endX} ${endY}`;
+    }
+
+    function drawLegend() {
+      legend.innerHTML = Object.entries(STAGE_LABELS).map(([id, label]) => (
+        `<span class="legend-item"><span class="dot ${id}"></span>${escapeHtml(label)}</span>`
+      )).join("");
+    }
+
+    function drawStages() {
+      stageBands.forEach((band) => {
+        stageLayer.appendChild(svgEl("rect", {
+          class: "stage-band",
+          x: band.x,
+          y: band.y,
+          width: band.w,
+          height: band.h,
+          rx: 18
+        }));
+        const label = svgEl("text", {
+          class: "stage-label",
+          x: band.x + 18,
+          y: band.y + 28
+        });
+        label.textContent = STAGE_LABELS[band.id];
+        stageLayer.appendChild(label);
+      });
+    }
+
+    function drawEdges() {
+      PIPELINE_EDGES.forEach(([fromId, toId, label]) => {
+        const from = byId[fromId];
+        const to = byId[toId];
+        const path = svgEl("path", {
+          class: `edge${label ? " branch" : ""}`,
+          d: edgePath(from, to)
+        });
+        edgeLayer.appendChild(path);
+
+        if (label) {
+          const a = nodeCenter(from);
+          const b = nodeCenter(to);
+          const text = svgEl("text", {
+            class: "edge-label",
+            x: (a.x + b.x) / 2 + 12,
+            y: (from.y + from.h + to.y) / 2 - 6
+          });
+          text.textContent = label;
+          edgeLayer.appendChild(text);
+        }
+      });
+    }
+
+    function drawNodes() {
+      PIPELINE_STEPS.forEach((step) => {
+        const g = svgEl("g", {
+          class: `node${step.id === activeId ? " active" : ""}`,
+          "data-id": step.id,
+          "data-stage": step.stage,
+          tabindex: 0,
+          role: "button",
+          "aria-label": step.title
+        });
+
+        g.appendChild(svgEl("rect", {
+          x: step.x,
+          y: step.y,
+          width: step.w,
+          height: step.h,
+          rx: 16
+        }));
+
+        const bar = svgEl("rect", {
+          x: step.x,
+          y: step.y,
+          width: 8,
+          height: step.h,
+          rx: 4,
+          fill: stageColors[step.stage] || "#2563eb"
+        });
+        g.appendChild(bar);
+
+        const title = svgEl("text", {
+          class: "node-title",
+          x: step.x + 20,
+          y: step.y + 31
+        });
+        title.textContent = step.title;
+        g.appendChild(title);
+
+        wrapText(step.summary, 28).forEach((line, index) => {
+          const text = svgEl("text", {
+            class: "node-subtitle",
+            x: step.x + 20,
+            y: step.y + 55 + index * 16
+          });
+          text.textContent = line;
+          g.appendChild(text);
+        });
+
+        g.addEventListener("click", () => selectStep(step.id));
+        g.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectStep(step.id);
+          }
+        });
+
+        nodeLayer.appendChild(g);
+      });
+    }
+
+    function listItems(items, ordered = false) {
+      const tag = ordered ? "ol" : "ul";
+      return `<${tag}>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</${tag}>`;
+    }
+
+    function renderDetail(step) {
+      detail.innerHTML = `
+        <div class="detail-stage">
+          <span class="dot ${step.stage}"></span>
+          ${escapeHtml(STAGE_LABELS[step.stage] || step.stage)}
+        </div>
+        <h2>${escapeHtml(step.title)}</h2>
+        <p class="detail-summary">${escapeHtml(step.summary)}</p>
+
+        <div class="section">
+          <h3>Computation Flow</h3>
+          ${listItems(step.flow, true)}
+        </div>
+
+        <div class="section">
+          <h3>Inputs</h3>
+          ${listItems(step.inputs)}
+        </div>
+
+        <div class="section">
+          <h3>Outputs</h3>
+          ${listItems(step.outputs)}
+        </div>
+
+        <div class="section">
+          <h3>Code References</h3>
+          <div class="file-list">
+            ${step.files.map((file) => `<div class="file-chip">${escapeHtml(file)}</div>`).join("")}
+          </div>
+        </div>
+      `;
+    }
+
+    function selectStep(id) {
+      activeId = id;
+      document.querySelectorAll(".node").forEach((node) => {
+        node.classList.toggle("active", node.getAttribute("data-id") === id);
+      });
+      renderDetail(byId[id]);
+    }
+
+    drawLegend();
+    drawStages();
+    drawEdges();
+    drawNodes();
+    renderDetail(byId[activeId]);
+  </script>
+</body>
+</html>
