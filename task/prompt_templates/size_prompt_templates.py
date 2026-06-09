@@ -154,6 +154,7 @@ multiview_size_smallest_sentence_answers = [
 from .register_structured import (
     EMPTY_QUESTION_INSTRUCTION,
     MULTIVIEW_SCENE_INTRODUCTION,
+    SENTENCE_QUESTION_INSTRUCTIONS,
     register_oe_mode_family,
     register_judgment,
 )
@@ -174,6 +175,14 @@ size_absolute_sentence_instructions = [
 ]
 
 size_absolute_direct_answers = ["[X]"]
+
+multiview_size_superlative_direct_instructions = [
+    "Answer with the object name only.",
+    "Reply with only the name of the correct object.",
+    "Give the object name without extra explanation.",
+]
+
+multiview_size_superlative_sentence_instructions = SENTENCE_QUESTION_INSTRUCTIONS
 
 
 def _register_size_absolute_family(kind: str, stems: list, sentence_answers: list) -> None:
@@ -243,8 +252,8 @@ def register_structured_size_templates() -> None:
             stems,
             sentence_ans,
             direct_answers=["[X]."],
-            direct_instructions=_UNCONSTRAINED,
-            sentence_instructions=_UNCONSTRAINED,
+            direct_instructions=multiview_size_superlative_direct_instructions,
+            sentence_instructions=multiview_size_superlative_sentence_instructions,
             introduction=multiview_size_introduction,
         )
 

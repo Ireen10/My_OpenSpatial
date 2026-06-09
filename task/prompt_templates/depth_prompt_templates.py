@@ -9,8 +9,9 @@ depth_ordering_questions = [
     "Please sequence the [T] [A] from shallowest to deepest .",
 ]
 
-depth_ordering_answers = [
-    "[X].",
+depth_ordering_direct_answers = ["[X]."]
+
+depth_ordering_sentence_answers = [
     "The order is [X].",
     "From near to far: the order can be represented as [X].",
     "In order from near to far: this can be expressed as [X].",
@@ -28,13 +29,14 @@ depth_ordering_questions_mcq = [
     "Please sequence the [T] [X] from shallowest to deepest . Before making a decision, please review the following options: [Y], and select the correct one."
 ]
 
-depth_ordering_answers_mcq = [
-    "[X].",
-    "The answer is [X].",
-    "In order from near to far: the answer is given in option [X].",
-    "Arranged from near to far: the answer is denoted as option [X].",
-    "From closest to farthest: the answer is represented as option [X].",
-    "Ordered from near to far: the answer is option [X].",
+depth_ordering_mcq_direct_answers = ["[X]."]
+
+depth_ordering_mcq_sentence_answers = [
+    "The correct near-to-far ordering is option [X].",
+    "Option [X] lists the objects from nearest to farthest.",
+    "In order from near to far, the answer is option [X].",
+    "Among the options, [X] shows the correct depth order from near to far.",
+    "From closest to farthest, option [X] is correct.",
 ]
 
 
@@ -46,8 +48,9 @@ depth_choice_questions = [
     "Out of the [T] [A], which one has the [B] smallest depth?",
 ]
 
-depth_choice_answers = [
-    "[X].",
+depth_choice_direct_answers = ["[X]."]
+
+depth_choice_sentence_answers = [
     "The [T] [X] is the one [B] closest to the camera.",
     "Among the objects, the [T] [X] is the [B] closest to the camera.",
 ]
@@ -61,9 +64,12 @@ depth_choice_questions_mcq = [
     "Out of the [T] [X], which one has the [Y] smallest depth? Consider these options: [Z], and choose the correct answer.",
 ]
 
-depth_choice_answers_mcq = [
-    "[X].",
-    "The answer is [X].",
+depth_choice_mcq_direct_answers = ["[X]."]
+
+depth_choice_mcq_sentence_answers = [
+    "The [B] closest to the camera is option [X].",
+    "Among the options, [X] identifies the object that is [B] nearest to the camera.",
+    "Option [X] is correct because it names the object that is [B] closest to the camera.",
 ]
 
 
@@ -75,8 +81,9 @@ depth_farthest_questions = [
     "Out of the [T] [A], which one has the greatest depth?",
     "From the [T] [A], which is the one with the largest depth?",
 ]
-depth_farthest_answers = [
-    "[X].",
+depth_farthest_direct_answers = ["[X]."]
+
+depth_farthest_sentence_answers = [
     "The [T] [X] is the farthest from the camera.",
     "Among the objects, the [T] [X] is farther from the camera than any of them.",
     "The [T] [X] has the greatest depth.",
@@ -92,9 +99,12 @@ depth_farthest_questions_mcq = [
     "From the [T] [X], which one is the one with the largest depth? Before making a decision, please review the following options: [Y], and select the correct one."
 ]
 
-depth_farthest_answers_mcq = [
-    "[X].",
-    "The answer is [X].",
+depth_farthest_mcq_direct_answers = ["[X]."]
+
+depth_farthest_mcq_sentence_answers = [
+    "The object farthest from the camera is option [X].",
+    "Option [X] names the object with the greatest depth.",
+    "Among the options, [X] identifies the most distant object.",
 ]
 
 
@@ -107,8 +117,9 @@ depth_closest_questions = [
     "From the [T] [A], which one is the one with the least depth?",
 ]
 
-depth_closest_answers = [
-    "[X].",
+depth_closest_direct_answers = ["[X]."]
+
+depth_closest_sentence_answers = [
     "The [T] [X] is the closest to the camera.",
     "Among the objects, the [T] [X] is closer to the camera than any of them.",
     "The [T] [X] has the smallest depth.",
@@ -124,9 +135,12 @@ depth_closest_questions_mcq = [
     "From the [T] [X], which one is the one with the least depth? Before making a decision, please review the following options: [Y], and select the correct one."
 ]
 
-depth_closest_answers_mcq = [
-    "[X].",
-    "The answer is [X].",
+depth_closest_mcq_direct_answers = ["[X]."]
+
+depth_closest_mcq_sentence_answers = [
+    "The object closest to the camera is option [X].",
+    "Option [X] names the object with the smallest depth.",
+    "Among the options, [X] identifies the nearest object.",
 ]
 from .register_structured import (
     SENTENCE_QUESTION_INSTRUCTIONS,
@@ -146,12 +160,15 @@ depth_sentence_instructions = SENTENCE_QUESTION_INSTRUCTIONS
 def _register_depth_oe_family(
     base_id: str,
     stems: list,
-    all_answers: list,
+    sentence_answers: list,
+    *,
+    direct_answers: list | None = None,
 ) -> None:
     register_oe_mode_family(
         base_id,
         stems,
-        all_answers,
+        sentence_answers,
+        direct_answers=direct_answers or ["[X]."],
         direct_instructions=depth_direct_instructions,
         sentence_instructions=depth_sentence_instructions,
     )
@@ -160,33 +177,68 @@ def _register_depth_oe_family(
 def _register_depth_mcq_family(
     base_id: str,
     stems: list,
-    all_answers: list,
+    sentence_answers: list,
+    *,
+    direct_answers: list | None = None,
 ) -> None:
     register_mcq_mode_family(
         base_id,
         stems,
-        all_answers,
+        sentence_answers,
+        direct_answers=direct_answers or ["[X]."],
         direct_instructions=depth_direct_instructions,
         sentence_instructions=depth_sentence_instructions,
     )
 
 
 def register_structured_depth_templates() -> None:
-    _register_depth_oe_family("depth.ordering", depth_ordering_questions, depth_ordering_answers)
-    _register_depth_mcq_family(
-        "depth.ordering_mcq", depth_ordering_questions_mcq, depth_ordering_answers_mcq,
+    _register_depth_oe_family(
+        "depth.ordering",
+        depth_ordering_questions,
+        depth_ordering_sentence_answers,
+        direct_answers=depth_ordering_direct_answers,
     )
-    _register_depth_oe_family("depth.choice", depth_choice_questions, depth_choice_answers)
     _register_depth_mcq_family(
-        "depth.choice_mcq", depth_choice_questions_mcq, depth_choice_answers_mcq,
+        "depth.ordering_mcq",
+        depth_ordering_questions_mcq,
+        depth_ordering_mcq_sentence_answers,
+        direct_answers=depth_ordering_mcq_direct_answers,
     )
-    _register_depth_oe_family("depth.farthest", depth_farthest_questions, depth_farthest_answers)
-    _register_depth_mcq_family(
-        "depth.farthest_mcq", depth_farthest_questions_mcq, depth_farthest_answers_mcq,
+    _register_depth_oe_family(
+        "depth.choice",
+        depth_choice_questions,
+        depth_choice_sentence_answers,
+        direct_answers=depth_choice_direct_answers,
     )
-    _register_depth_oe_family("depth.closest", depth_closest_questions, depth_closest_answers)
     _register_depth_mcq_family(
-        "depth.closest_mcq", depth_closest_questions_mcq, depth_closest_answers_mcq,
+        "depth.choice_mcq",
+        depth_choice_questions_mcq,
+        depth_choice_mcq_sentence_answers,
+        direct_answers=depth_choice_mcq_direct_answers,
+    )
+    _register_depth_oe_family(
+        "depth.farthest",
+        depth_farthest_questions,
+        depth_farthest_sentence_answers,
+        direct_answers=depth_farthest_direct_answers,
+    )
+    _register_depth_mcq_family(
+        "depth.farthest_mcq",
+        depth_farthest_questions_mcq,
+        depth_farthest_mcq_sentence_answers,
+        direct_answers=depth_farthest_mcq_direct_answers,
+    )
+    _register_depth_oe_family(
+        "depth.closest",
+        depth_closest_questions,
+        depth_closest_sentence_answers,
+        direct_answers=depth_closest_direct_answers,
+    )
+    _register_depth_mcq_family(
+        "depth.closest_mcq",
+        depth_closest_questions_mcq,
+        depth_closest_mcq_sentence_answers,
+        direct_answers=depth_closest_mcq_direct_answers,
     )
 
 
