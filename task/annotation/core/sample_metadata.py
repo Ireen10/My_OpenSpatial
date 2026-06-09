@@ -352,7 +352,12 @@ def build_turn_record(
     return meta, viz
 
 
-from utils.data_utils import as_python_list
+from utils.data_utils import (
+    as_python_list,
+    first_present_str,
+    is_nonempty_sequence,
+    scalar_to_str,
+)
 
 
 def build_visual_anchor(
@@ -363,20 +368,20 @@ def build_visual_anchor(
 ) -> dict:
     from .dataset_source import infer_dataset_source
 
-    parent_id = (
-        example.get("parent_preprocess_id")
-        or example.get("preprocess_id")
-        or example.get("id")
-        or example.get("scene_id")
+    parent_id = first_present_str(
+        example.get("parent_preprocess_id"),
+        example.get("preprocess_id"),
+        example.get("id"),
+        example.get("scene_id"),
     )
     img = as_python_list(example.get("image"))
     single_ref = raw_image_ref
     if single_ref is None and not isinstance(img, list) and isinstance(img, str) and img.strip():
         single_ref = str(img)
     anchor: Dict[str, Any] = {
-        "parent_preprocess_id": str(parent_id) if parent_id is not None else "unknown",
+        "parent_preprocess_id": parent_id or "unknown",
         "dataset_source": infer_dataset_source(
-            explicit=example.get("dataset") or example.get("dataset_source"),
+            explicit=first_present_str(example.get("dataset"), example.get("dataset_source")),
             parent_preprocess_id=parent_id,
             raw_image_ref=single_ref,
             raw_image_refs=img if isinstance(img, list) else None,
@@ -384,18 +389,25 @@ def build_visual_anchor(
     }
     if isinstance(img, list):
         if view_indices is not None:
-            refs = [str(img[vi]) for vi in view_indices if vi < len(img)]
+            vi_list = as_python_list(view_indices) or []
+            refs = [str(img[vi]) for vi in vi_list if vi < len(img)]
         else:
             refs = [str(p) for p in img]
         anchor["raw_image_refs"] = refs
-        anchor["view_group_id"] = str(example.get("scene_id") or parent_id or "unknown")
+        anchor["view_group_id"] = first_present_str(
+            example.get("scene_id"), parent_id,
+        ) or "unknown"
     else:
-        ref = raw_image_ref or example.get("raw_image_ref") or str(img or "raw.jpg")
-        anchor["raw_image_ref"] = ref
-    if example.get("scene_id") is not None:
-        anchor["scene_id"] = str(example["scene_id"])
-    if example.get("frame_id") is not None:
-        anchor["frame_id"] = str(example["frame_id"])
+        ref = first_present_str(raw_image_ref, example.get("raw_image_ref"))
+        if not ref and isinstance(img, str):
+            ref = img.strip() or None
+        anchor["raw_image_ref"] = ref or "raw.jpg"
+    scene_id = scalar_to_str(example.get("scene_id"))
+    if scene_id:
+        anchor["scene_id"] = scene_id
+    frame_id = scalar_to_str(example.get("frame_id"))
+    if frame_id:
+        anchor["frame_id"] = frame_id
     return anchor
 
 
@@ -423,6 +435,8 @@ def qa_image_refs_for_turn(example: dict, turn: dict) -> List[str]:
         return refs_from_spec
 
     view_indices = turn.get("view_indices")
+    if view_indices is not None:
+        view_indices = as_python_list(view_indices)
     img = as_python_list(example.get("image"))
     if isinstance(img, list) and view_indices is not None:
         return [str(img[vi]).replace("\\", "/") for vi in view_indices if vi < len(img)]
@@ -442,44 +456,57 @@ def build_turn_metadata(example: dict, turn: dict) -> dict:
     qa_refs = qa_image_refs_for_turn(example, turn)
     n = int(turn.get("image_placeholder_count") or max(1, len(qa_refs)))
 
-    if ms and ms.get("slots") and not ms.get("views"):
+    if (
+        isinstance(ms, dict)
+        and is_nonempty_sequence(ms.get("slots"))
+        and not ms.get("views")
+    ):
         ms = wrap_single_view_mark_spec(
             ms, image_ref=qa_refs[0] if qa_refs else _single_image_ref(example),
         )
-    elif ms and ms.get("layout") == "per_view":
+    elif isinstance(ms, dict) and ms.get("layout") == "per_view":
         views = mark_spec_views(ms)
-        if len(views) == 1 and qa_refs and not views[0].get("image_ref"):
+        if (
+            len(views) == 1
+            and is_nonempty_sequence(qa_refs)
+            and not views[0].get("image_ref")
+        ):
             views = [dict(views[0], image_ref=qa_refs[0])]
             ms = {**ms, "views": views}
 
-    if ms and qa_refs:
+    if isinstance(ms, dict) and is_nonempty_sequence(qa_refs):
         ms = align_mark_spec_to_image_refs(ms, qa_refs)
 
-    parent_id = (
-        example.get("parent_preprocess_id")
-        or example.get("preprocess_id")
-        or example.get("id")
-        or example.get("scene_id")
+    parent_id = first_present_str(
+        example.get("parent_preprocess_id"),
+        example.get("preprocess_id"),
+        example.get("id"),
+        example.get("scene_id"),
     )
     anchor: Dict[str, Any] = {
-        "parent_preprocess_id": str(parent_id) if parent_id is not None else "unknown",
+        "parent_preprocess_id": parent_id or "unknown",
     }
-    if n == 1 and qa_refs:
+    if n == 1 and is_nonempty_sequence(qa_refs):
         anchor["raw_image_ref"] = qa_refs[0]
-    elif qa_refs:
+    elif is_nonempty_sequence(qa_refs):
         anchor["raw_image_refs"] = qa_refs
-        anchor["view_group_id"] = str(example.get("scene_id") or parent_id or "unknown")
+        anchor["view_group_id"] = first_present_str(
+            example.get("scene_id"), parent_id,
+        ) or "unknown"
     else:
+        vi = turn.get("view_indices")
         anchor = build_visual_anchor(
             example,
             raw_image_ref=_single_image_ref(example),
-            view_indices=turn.get("view_indices"),
+            view_indices=as_python_list(vi) if vi is not None else None,
         )
 
-    if example.get("scene_id") is not None:
-        anchor["scene_id"] = str(example["scene_id"])
-    if example.get("frame_id") is not None:
-        anchor["frame_id"] = str(example["frame_id"])
+    scene_id = scalar_to_str(example.get("scene_id"))
+    if scene_id:
+        anchor["scene_id"] = scene_id
+    frame_id = scalar_to_str(example.get("frame_id"))
+    if frame_id:
+        anchor["frame_id"] = frame_id
 
     return {"visual_anchor": anchor, "mark_spec": ms, "turns": [export_turn]}
 

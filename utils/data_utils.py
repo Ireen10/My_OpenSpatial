@@ -1,5 +1,7 @@
 """Data processing utilities: tag filtering, mask/box merging, annotation flattening."""
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 import tqdm
@@ -140,6 +142,38 @@ def as_python_list(val):
         except Exception:
             pass
     return val
+
+
+def scalar_to_str(val) -> Optional[str]:
+    """Coerce parquet/numpy scalars to str without ambiguous ndarray truth tests."""
+    if val is None:
+        return None
+    if isinstance(val, float) and pd.isna(val):
+        return None
+    if isinstance(val, np.ndarray):
+        if val.size == 0:
+            return None
+        if val.size == 1:
+            return scalar_to_str(val.item())
+        flat = val.flat[0]
+        s = str(flat).strip()
+        return s if s else None
+    if hasattr(val, "item") and not isinstance(val, (str, bytes, dict, list, tuple)):
+        try:
+            return scalar_to_str(val.item())
+        except (ValueError, TypeError):
+            pass
+    s = str(val).strip()
+    return s if s else None
+
+
+def first_present_str(*values) -> Optional[str]:
+    """First non-empty string among values (safe for numpy arrays in ``or`` chains)."""
+    for v in values:
+        s = scalar_to_str(v)
+        if s:
+            return s
+    return None
 
 
 def is_nonempty_sequence(val) -> bool:

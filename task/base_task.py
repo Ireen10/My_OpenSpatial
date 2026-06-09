@@ -1,5 +1,7 @@
 """Base class for all OpenSpatial task stages."""
 
+import time
+
 import tqdm
 import pandas as pd
 
@@ -35,35 +37,84 @@ class BaseTask:
             return self._run_multi_processing(dataset)
 
         processed = []
+        errors = 0
         for idx in tqdm.tqdm(range(len(dataset)), total=len(dataset),
                              desc="Processing examples"):
             example = dataset.iloc[idx].to_dict()
-            result, flag = self.apply_transform(example, idx)
+            try:
+                result, flag = self.apply_transform(example, idx)
+            except Exception as exc:
+                errors += 1
+                print(f"  [error] example {idx}: {exc}", flush=True)
+                continue
             if flag:
                 processed.append(result)
 
+        if errors:
+            print(f"  [{type(self).__name__}] {errors} example(s) failed", flush=True)
         return pd.DataFrame(processed).reset_index(drop=True)
 
     def _run_multi_processing(self, dataset):
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
         num_workers = self.args.get('num_workers', 8)
+        slow_log_s = float(self.args.get("slow_example_log_s", 120))
         n = len(dataset)
-        print(f"  [{type(self).__name__}] {n} examples, {num_workers} workers",
-              flush=True)
+        window = max(num_workers * 2, num_workers + 1)
+        print(
+            f"  [{type(self).__name__}] {n} examples, {num_workers} workers "
+            f"(window={window})",
+            flush=True,
+        )
 
         def _work(idx):
+            try:
+                from task.annotation.core.thread_rng import seed_thread_rng
+                seed_thread_rng(idx)
+            except ImportError:
+                pass
+            t0 = time.perf_counter()
             example = dataset.iloc[idx].to_dict()
-            return self.apply_transform(example, idx)
+            result, flag = self.apply_transform(example, idx)
+            elapsed = time.perf_counter() - t0
+            if elapsed >= slow_log_s:
+                print(
+                    f"  [slow] example {idx} took {elapsed:.1f}s",
+                    flush=True,
+                )
+            return idx, result, flag
 
-        processed = []
+        processed_by_idx = {}
+        pending = set()
+        next_idx = 0
+        errors = 0
+
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            futures = [executor.submit(_work, idx) for idx in range(n)]
-            for fut in tqdm.tqdm(as_completed(futures), total=n,
-                                 desc="Processing examples"):
-                result, flag = fut.result()
-                if flag:
-                    processed.append(result)
+            pbar = tqdm.tqdm(total=n, desc="Processing examples")
+            while next_idx < n or pending:
+                while next_idx < n and len(pending) < window:
+                    pending.add(executor.submit(_work, next_idx))
+                    next_idx += 1
+                if not pending:
+                    break
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    try:
+                        idx, result, flag = fut.result()
+                    except Exception as exc:
+                        errors += 1
+                        print(f"  [error] worker failed: {exc}", flush=True)
+                        pbar.update(1)
+                        continue
+                    if flag:
+                        processed_by_idx[idx] = result
+                    pbar.update(1)
+            pbar.close()
 
-        print(f"  [{type(self).__name__}] {len(processed)}/{n} passed", flush=True)
+        processed = [processed_by_idx[i] for i in sorted(processed_by_idx)]
+        print(
+            f"  [{type(self).__name__}] {len(processed)}/{n} passed"
+            + (f", {errors} failed" if errors else ""),
+            flush=True,
+        )
         return pd.DataFrame(processed).reset_index(drop=True)
