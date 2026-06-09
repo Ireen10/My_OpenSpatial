@@ -97,7 +97,7 @@ class CaptionGenerator(BaseAnnotationTask):
                 CAPTION_DATASET_MODULES["task"][task_i],
             ]
             indices = {"role": role_i, "task": task_i}
-        return " ".join(parts), indices
+        return " ".join(parts), parts, indices
 
     @classmethod
     def sample_api_prompt(cls, dropout=None):
@@ -111,12 +111,14 @@ class CaptionGenerator(BaseAnnotationTask):
             ]
         return " ".join(parts)
 
-    def _dataset_render_record(self, question_text: str, indices: dict) -> PromptRenderRecord:
+    def _dataset_render_record(self, question_text: str, parts: list) -> PromptRenderRecord:
+        intro = parts[0].strip() if len(parts) > 1 else ""
+        stem = parts[-1].strip() if parts else question_text.strip()
         return PromptRenderRecord(
             template_id=self.DATASET_TEMPLATE_ID,
-            question_index=indices.get("task", -1),
+            question_index=-1,
             answer_index=-1,
-            question_line="",
+            question_line=stem,
             answer_line="",
             question_text=question_text.strip(),
             answer_text="",
@@ -124,8 +126,8 @@ class CaptionGenerator(BaseAnnotationTask):
             answer_bindings={},
             question_type=QuestionType.OPEN_ENDED.value,
             instruction_type="generative",
-            introduction_index=indices.get("role", -1),
-            question_instruction_index=-1,
+            introduction_text=intro,
+            question_stem_text=stem,
         )
 
     def apply_transform(self, example):
@@ -133,14 +135,14 @@ class CaptionGenerator(BaseAnnotationTask):
             return None, False
 
         image_path = example["image"]
-        question_prompt, indices = self.sample_dataset_prompt()
+        question_prompt, prompt_parts, _indices = self.sample_dataset_prompt()
         api_prompt = self.sample_api_prompt()
         caption = self._call_api(api_prompt, image_path)
         if caption is None:
             return None, False
 
         self._thread_local.last_prompt_render = self._dataset_render_record(
-            question_prompt, indices,
+            question_prompt, prompt_parts,
         )
 
         qa_images = [{"bytes": convert_pil_to_bytes(Image.open(image_path))}]

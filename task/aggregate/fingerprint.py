@@ -210,10 +210,16 @@ def compute_question_core_key(turn: dict) -> str:
         refs = ps.get("referent_slots") or ps.get("slots")
     if isinstance(ps, dict) and refs:
         bindings = {k: v.get("obj_idx") for k, v in sorted(refs.items()) if isinstance(v, dict)}
+        stem_key = (
+            ps.get("question_stem_text")
+            or ps.get("question_text")
+            or ps.get("question_pattern")
+            or ""
+        )
         body = {
             "sub_task": turn.get("sub_task", ""),
             "template_family": ps.get("template_family") or ps.get("template_id", ""),
-            "question_index": ps.get("question_index"),
+            "question_stem_text": str(stem_key).strip(),
             "slot_bindings": bindings,
             "question_type": turn.get("question_type", ""),
         }

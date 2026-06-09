@@ -143,10 +143,17 @@ def _validate_prompt_struct(ps: Any, path: str, errors: List[str]) -> None:
         errors.append(_err(path, "question_pattern required"))
     if not d.get("answer_pattern"):
         errors.append(_err(path, "answer_pattern required"))
-    if "question_index" not in d:
-        errors.append(_err(path, "question_index required"))
-    if "answer_index" not in d:
-        errors.append(_err(path, "answer_index required"))
+    for key in (
+        "introduction_text",
+        "question_stem_text",
+        "question_instruction_text",
+        "answer_instruction_text",
+        "answer_stem_text",
+        "question_text",
+        "answer_text",
+    ):
+        if key not in d:
+            errors.append(_err(path, f"{key} required"))
     q_bind = d.get("question_bindings")
     if not isinstance(q_bind, dict):
         errors.append(_err(path, "question_bindings must be object"))
@@ -284,10 +291,15 @@ def _fixture_minimal() -> dict:
                     "prompt_struct": {
                         "template_id": "distance.absolute_m",
                         "template_family": "spatial.distance.absolute",
-                        "question_index": 0,
-                        "answer_index": 0,
                         "question_pattern": "What is the distance between {{A}} and {{B}}?",
                         "answer_pattern": "{{answer}}",
+                        "introduction_text": "",
+                        "question_stem_text": "What is the distance between chair and table?",
+                        "question_instruction_text": "",
+                        "answer_instruction_text": "",
+                        "answer_stem_text": "2.5 meters",
+                        "question_text": "What is the distance between chair and table?",
+                        "answer_text": "2.5 meters",
                         "question_bindings": {"A": "chair", "B": "table"},
                         "answer_bindings": {},
                         "referent_slots": {
@@ -295,6 +307,8 @@ def _fixture_minimal() -> dict:
                             "B": {"obj_idx": 1, "tag": "table"},
                         },
                     },
+                    "rendered_question": "What is the distance between chair and table?",
+                    "rendered_answer": "2.5 meters",
                 },
             ],
         },

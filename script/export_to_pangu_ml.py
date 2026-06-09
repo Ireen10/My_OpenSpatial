@@ -1,0 +1,588 @@
+#!/usr/bin/env python3
+"""
+Convert OpenSpatial upstream export bundles to Pangu ML training format.
+
+Input (upstream export):
+  {export_dir}/jsonl/metadata_{shard:06d}.jsonl
+  {export_dir}/images/metadata_{shard:06d}.tar
+
+Output (Pangu ML, see HW_pangu_ml/docs/pangu_ml_data_schema.md):
+  {output_root}/jsonl/data_{shard:06d}.jsonl
+  {output_root}/images/data_{shard:06d}.tar
+
+Rules (project-specific, stricter than schema 4.2):
+  - All images (with every mark overlay) appear only in the first user turn, before text.
+  - Later user turns contain text only.
+  - Image placeholder tokens (<image>, <|image|>, etc.) are stripped from all text.
+  - Q/A prose applies mark_spec labels (e.g. chair -> chair-(red box)).
+
+Sample id: export ``sample_id`` (sanitized for tar paths).
+Image tar paths: ``{safe_sample_id}_{view_index:02d}.jpg`` (or .png).
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import re
+import sys
+import tarfile
+from collections import Counter
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+# Avoid task.annotation.core.__init__ (pulls open3d via BaseAnnotationTask).
+import types  # noqa: E402
+
+_CORE_PKG = "task.annotation.core"
+_CORE_DIR = _REPO_ROOT / "task" / "annotation" / "core"
+for _pkg in ("task", "task.annotation", _CORE_PKG):
+    if _pkg not in sys.modules:
+        _mod = types.ModuleType(_pkg)
+        if _pkg == _CORE_PKG:
+            _mod.__path__ = [str(_CORE_DIR)]
+        sys.modules[_pkg] = _mod
+
+from dataset.upstream_export import (  # noqa: E402
+    discover_shard_pairs,
+    normalize_messages,
+    resolve_shard_image,
+)
+from task.annotation.core.mark_spec import (  # noqa: E402
+    all_slots_flat,
+    merge_mark_specs,
+    render_mark,
+    view_mark_spec_slice,
+)
+
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover
+    tqdm = None  # type: ignore[misc, assignment]
+
+ROLE_MAP = {"human": "user", "gpt": "assistant"}
+MIME_PNG = "image/png"
+MIME_JPEG = "image/jpeg"
+_JPEG_SOI = b"\xff\xd8"
+_PNG_SIG = b"\x89PNG\r\n\x1a\n"
+_PNG_PASSTHROUGH_MODES = frozenset({"RGB", "RGBA", "L", "1"})
+IMAGE_TOKEN_RE = re.compile(
+    r"\s*(?:<\|image(?:_pad)?\|>|<image(?:_pad)?(?:\s[^>]*)?>"
+    r")\s*",
+    flags=re.IGNORECASE,
+)
+WHITESPACE_RE = re.compile(r"\s+")
+PATH_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+PANGU_SHARD_BASENAME_FMT = "data_{:06d}"
+
+
+def display_label_from_mark_slot(slot: dict) -> str:
+    tag = str(slot.get("tag", "")).strip()
+    kind = slot.get("mark_kind")
+    color = slot.get("color_name")
+    if tag and kind and color:
+        return f"{tag}-({color} {kind})"
+    return tag
+
+
+def apply_mark_spec_labels_to_text(text: str, mark_spec: Optional[dict]) -> str:
+    """Upgrade bare object tags to marked surface forms (e.g. chair-(red box))."""
+    if not text or not mark_spec:
+        return text or ""
+    out = text
+    for slot in all_slots_flat(mark_spec):
+        tag = str(slot.get("tag", "")).strip()
+        if not tag:
+            continue
+        label = display_label_from_mark_slot(slot)
+        if label == tag or label.lower() in out.lower():
+            continue
+        out = re.sub(
+            rf"\b{re.escape(tag)}\b(?!\s*-\()",
+            label,
+            out,
+            flags=re.IGNORECASE,
+        )
+    return re.sub(r"  +", " ", out).strip()
+
+
+@dataclass
+class ConvertStats:
+    total_seen: int = 0
+    converted: int = 0
+    skipped: int = 0
+    skip_reasons: Counter = field(default_factory=Counter)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Convert OpenSpatial upstream export to Pangu ML format."
+    )
+    parser.add_argument(
+        "--export-dir",
+        type=Path,
+        required=True,
+        help="Upstream export root (jsonl/metadata_*.jsonl + images/metadata_*.tar).",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        required=True,
+        help="Output root; creates jsonl/ and images/ subdirectories.",
+    )
+    parser.add_argument(
+        "--shard-size",
+        type=int,
+        default=8192,
+        help="Samples per output shard (should be a multiple of 16).",
+    )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Optional cap for quick validation runs.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable tqdm progress bar.",
+    )
+    return parser.parse_args()
+
+
+def strip_image_placeholder_tokens(text: str) -> str:
+    cleaned = IMAGE_TOKEN_RE.sub(" ", text or "")
+    cleaned = WHITESPACE_RE.sub(" ", cleaned)
+    return cleaned.strip()
+
+
+def sanitize_sample_id(sample_id: str, fallback_index: int) -> str:
+    raw = (sample_id or "").strip() or f"sample_{fallback_index}"
+    safe = PATH_SAFE_RE.sub("_", raw).strip("._-")
+    return safe[:200] or f"sample_{fallback_index}"
+
+
+def to_text_content(text: str) -> Dict[str, Any]:
+    return {
+        "type": "text",
+        "text": {"type": "string", "format": "utf-8", "string": text},
+    }
+
+
+def to_image_content(
+    relative_path: str,
+    width: int,
+    height: int,
+    mime: str,
+) -> Dict[str, Any]:
+    return {
+        "type": "image",
+        "image": {
+            "type": "relative_path",
+            "format": mime,
+            "relative_path": relative_path,
+            "width": int(width),
+            "height": int(height),
+        },
+    }
+
+
+def _prepare_for_png_save(img: Any) -> Any:
+    if img.mode in _PNG_PASSTHROUGH_MODES:
+        return img
+    return img.convert("RGB")
+
+
+def encode_image_for_pangu_tar(image_bytes: bytes) -> Tuple[bytes, int, int, str]:
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            width, height = img.width, img.height
+            fmt = (img.format or "").upper()
+
+            if fmt == "JPEG" and image_bytes.startswith(_JPEG_SOI):
+                return image_bytes, width, height, MIME_JPEG
+
+            if (
+                fmt == "PNG"
+                and image_bytes.startswith(_PNG_SIG)
+                and img.mode in _PNG_PASSTHROUGH_MODES
+            ):
+                return image_bytes, width, height, MIME_PNG
+
+            if fmt == "PNG":
+                im_out = _prepare_for_png_save(img)
+                buf = io.BytesIO()
+                im_out.save(buf, format="PNG", optimize=False)
+                return buf.getvalue(), width, height, MIME_PNG
+
+            im_j = img
+            if im_j.mode in ("RGBA", "LA", "P"):
+                im_j = im_j.convert("RGB")
+            elif im_j.mode != "RGB":
+                im_j = im_j.convert("RGB")
+            buf = io.BytesIO()
+            im_j.save(buf, format="JPEG", quality=95)
+            return buf.getvalue(), width, height, MIME_JPEG
+    except Exception:
+        mime = MIME_PNG if image_bytes.startswith(_PNG_SIG) else MIME_JPEG
+        return image_bytes, -1, -1, mime
+
+
+def build_tar_relative_path(sample_id: str, img_idx: int, mime: str) -> str:
+    ext = ".png" if mime == MIME_PNG else ".jpg"
+    return f"{sample_id}_{img_idx:02d}{ext}"
+
+
+def parse_qa_pairs(messages: List[dict]) -> Optional[List[Tuple[str, str]]]:
+    if not messages:
+        return None
+    pairs: List[Tuple[str, str]] = []
+    for i in range(0, len(messages), 2):
+        if i + 1 >= len(messages):
+            return None
+        human = messages[i]
+        gpt = messages[i + 1]
+        if not isinstance(human, dict) or not isinstance(gpt, dict):
+            return None
+        if str(human.get("from", "")).strip().lower() != "human":
+            return None
+        if str(gpt.get("from", "")).strip().lower() != "gpt":
+            return None
+        q = "" if human.get("value") is None else str(human.get("value"))
+        a = "" if gpt.get("value") is None else str(gpt.get("value"))
+        pairs.append((q, a))
+    return pairs if pairs else None
+
+
+def turn_mark_specs(metadata: dict) -> List[Optional[dict]]:
+    turns = metadata.get("turns") or []
+    specs: List[Optional[dict]] = []
+    for turn in turns:
+        if not isinstance(turn, dict):
+            specs.append(None)
+            continue
+        ms = turn.get("mark_spec")
+        specs.append(ms if isinstance(ms, dict) else None)
+    return specs
+
+
+def mark_spec_for_turn(
+    turn_specs: List[Optional[dict]],
+    turn_index: int,
+    sample_mark_spec: Optional[dict],
+) -> Optional[dict]:
+    if turn_index < len(turn_specs) and turn_specs[turn_index]:
+        return turn_specs[turn_index]
+    return sample_mark_spec
+
+
+def combined_mark_spec_for_view(
+    turn_specs: List[Optional[dict]],
+    sample_mark_spec: Optional[dict],
+    view_index: int,
+) -> Optional[dict]:
+    """Union all mark slots on one view across turns (all marks on image)."""
+    slices: List[dict] = []
+    view_indices: List[int] = []
+    seen: set = set()
+
+    sources: List[dict] = []
+    for ms in turn_specs:
+        if ms:
+            sources.append(ms)
+    if sample_mark_spec:
+        sources.append(sample_mark_spec)
+
+    for ms in sources:
+        sl = view_mark_spec_slice(ms, view_index)
+        if not sl.get("slots"):
+            continue
+        deduped_slots = []
+        for slot in sl["slots"]:
+            key = (slot.get("slot_id"), slot.get("tag"), slot.get("mark_kind"))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped_slots.append(slot)
+        if deduped_slots:
+            slices.append({**sl, "slots": deduped_slots})
+            view_indices.append(view_index)
+
+    if not slices:
+        return None
+    if len(slices) == 1:
+        return slices[0]
+    return merge_mark_specs(slices, view_indices=view_indices)
+
+
+def apply_marked_text(text: str, mark_spec: Optional[dict]) -> str:
+    stripped = strip_image_placeholder_tokens(text)
+    if not stripped:
+        return ""
+    return apply_mark_spec_labels_to_text(stripped, mark_spec)
+
+
+def render_marked_image_bytes(
+    raw_bytes: bytes,
+    mark_spec: Optional[dict],
+    *,
+    view_index: int,
+) -> bytes:
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(raw_bytes))
+    if mark_spec and mark_spec.get("slots"):
+        out = render_mark(img, mark_spec, view_index=view_index)
+        return out["bytes"]
+    return encode_image_for_pangu_tar(raw_bytes)[0]
+
+
+def load_and_encode_marked_images(
+    record: dict,
+    safe_id: str,
+    turn_specs: List[Optional[dict]],
+    sample_mark_spec: Optional[dict],
+    tar_cache: dict,
+) -> Tuple[List[Tuple[str, bytes, int, int, str]], List[str]]:
+    """
+    Returns (image_rows, errors).
+    image_rows: (tar_relative_path, encoded_bytes, width, height, mime)
+    """
+    refs = list(record.get("image_refs") or [])
+    bundle_root = record.get("_bundle_root")
+    shard_tar = record.get("_shard_tar")
+    errors: List[str] = []
+    rows: List[Tuple[str, bytes, int, int, str]] = []
+
+    for vi, ref in enumerate(refs):
+        raw = resolve_shard_image(
+            str(ref),
+            bundle_root=bundle_root,
+            shard_tar=shard_tar,
+            tar_cache=tar_cache,
+        )
+        if not raw:
+            errors.append(f"missing image: {ref}")
+            continue
+
+        view_ms = combined_mark_spec_for_view(turn_specs, sample_mark_spec, vi)
+        try:
+            marked_bytes = render_marked_image_bytes(
+                raw, view_ms, view_index=vi,
+            )
+            encoded, width, height, mime = encode_image_for_pangu_tar(marked_bytes)
+            rel = build_tar_relative_path(safe_id, vi, mime)
+            rows.append((rel, encoded, width, height, mime))
+        except Exception as exc:
+            errors.append(f"render failed {ref}: {exc}")
+
+    return rows, errors
+
+
+def build_pangu_sample(
+    record: dict,
+    row_index: int,
+    tar_cache: dict,
+) -> Tuple[Optional[Dict[str, Any]], List[Tuple[str, bytes]], Optional[str]]:
+    messages = normalize_messages(record.get("messages"))
+    pairs = parse_qa_pairs(messages)
+    if not pairs:
+        return None, [], "invalid_messages"
+
+    metadata = record.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    sample_mark_spec = metadata.get("mark_spec")
+    if sample_mark_spec is not None and not isinstance(sample_mark_spec, dict):
+        sample_mark_spec = None
+
+    turn_specs = turn_mark_specs(metadata)
+    sample_id = sanitize_sample_id(str(record.get("sample_id") or ""), row_index)
+
+    image_rows, img_errors = load_and_encode_marked_images(
+        record, sample_id, turn_specs, sample_mark_spec, tar_cache,
+    )
+    if img_errors and not image_rows:
+        return None, [], "missing_images"
+
+    data: List[Dict[str, Any]] = []
+
+    first_q, first_a = pairs[0]
+    ms0 = mark_spec_for_turn(turn_specs, 0, sample_mark_spec)
+    first_user_content: List[Dict[str, Any]] = []
+    for rel, _b, w, h, mime in image_rows:
+        first_user_content.append(to_image_content(rel, w, h, mime))
+    q0 = apply_marked_text(first_q, ms0)
+    if q0:
+        first_user_content.append(to_text_content(q0))
+    if not first_user_content:
+        return None, [], "empty_first_user"
+
+    data.append({"role": "user", "content": first_user_content})
+
+    a0 = apply_marked_text(first_a, ms0)
+    if not a0:
+        return None, [], "empty_first_answer"
+    data.append({"role": "assistant", "content": [to_text_content(a0)]})
+
+    for ti in range(1, len(pairs)):
+        q_raw, a_raw = pairs[ti]
+        ms = mark_spec_for_turn(turn_specs, ti, sample_mark_spec)
+        q = apply_marked_text(q_raw, ms)
+        a = apply_marked_text(a_raw, ms)
+        if not q:
+            return None, [], f"empty_question_turn_{ti}"
+        if not a:
+            return None, [], f"empty_answer_turn_{ti}"
+        data.append({"role": "user", "content": [to_text_content(q)]})
+        data.append({"role": "assistant", "content": [to_text_content(a)]})
+
+    sample = {
+        "meta_prompt": [""],
+        "data": data,
+        "id": str(record.get("sample_id") or sample_id),
+    }
+    tar_members = [(rel, blob) for rel, blob, _w, _h, _m in image_rows]
+    skip_reason = None
+    if img_errors:
+        skip_reason = "partial_images"
+    return sample, tar_members, skip_reason
+
+
+def write_shard(
+    shard_index: int,
+    samples: List[Dict[str, Any]],
+    tar_members_by_sample: List[List[Tuple[str, bytes]]],
+    output_root: Path,
+) -> None:
+    jsonl_dir = output_root / "jsonl"
+    images_dir = output_root / "images"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    base = PANGU_SHARD_BASENAME_FMT.format(shard_index)
+    jsonl_path = jsonl_dir / f"{base}.jsonl"
+    tar_path = images_dir / f"{base}.tar"
+
+    with open(jsonl_path, "w", encoding="utf-8") as jf, tarfile.open(tar_path, "w") as tar:
+        for sample, members in zip(samples, tar_members_by_sample):
+            jf.write(json.dumps(sample, ensure_ascii=False) + "\n")
+            for rel_path, blob in members:
+                info = tarfile.TarInfo(name=rel_path)
+                info.size = len(blob)
+                tar.addfile(tarinfo=info, fileobj=io.BytesIO(blob))
+
+
+def convert_export(
+    export_dir: Path,
+    output_root: Path,
+    *,
+    shard_size: int = 8192,
+    max_samples: Optional[int] = None,
+    show_progress: bool = True,
+) -> ConvertStats:
+    stats = ConvertStats()
+    pairs = discover_shard_pairs(export_dir)
+    if not pairs:
+        raise FileNotFoundError(f"No upstream shards under {export_dir / 'jsonl'}")
+
+    buffer_samples: List[Dict[str, Any]] = []
+    buffer_members: List[List[Tuple[str, bytes]]] = []
+    out_shard_idx = 0
+    tar_cache: dict = {}
+    global_index = 0
+
+    def flush_buffer() -> None:
+        nonlocal out_shard_idx
+        if not buffer_samples:
+            return
+        write_shard(out_shard_idx, buffer_samples, buffer_members, output_root)
+        out_shard_idx += 1
+        buffer_samples.clear()
+        buffer_members.clear()
+
+    iterator = pairs
+    if tqdm is not None and show_progress:
+        iterator = tqdm(pairs, desc="input shards", unit="shard")
+
+    for jf_path, tar_path in iterator:
+        bundle_root = str(export_dir)
+        shard_tar = str(tar_path) if tar_path and tar_path.is_file() else None
+
+        with jf_path.open("r", encoding="utf-8") as jf:
+            for line in jf:
+                if max_samples is not None and stats.converted >= max_samples:
+                    flush_buffer()
+                    if "tar" in tar_cache:
+                        tar_cache["tar"].close()
+                    return stats
+
+                line = line.strip()
+                if not line:
+                    continue
+
+                stats.total_seen += 1
+                record = json.loads(line)
+                record["_bundle_root"] = bundle_root
+                if shard_tar:
+                    record["_shard_tar"] = shard_tar
+
+                sample, members, partial = build_pangu_sample(
+                    record, global_index, tar_cache,
+                )
+                global_index += 1
+
+                if sample is None:
+                    stats.skipped += 1
+                    stats.skip_reasons[partial or "unknown"] += 1
+                    continue
+
+                stats.converted += 1
+                if partial:
+                    stats.skip_reasons[partial] += 1
+                buffer_samples.append(sample)
+                buffer_members.append(members)
+
+                if len(buffer_samples) >= shard_size:
+                    flush_buffer()
+
+    flush_buffer()
+    if "tar" in tar_cache:
+        tar_cache["tar"].close()
+    return stats
+
+
+def main() -> None:
+    args = parse_args()
+    export_dir = args.export_dir.resolve()
+    output_root = args.output_root.resolve()
+
+    if not export_dir.is_dir():
+        raise SystemExit(f"export-dir not found: {export_dir}")
+
+    stats = convert_export(
+        export_dir,
+        output_root,
+        shard_size=args.shard_size,
+        max_samples=args.max_samples,
+        show_progress=not args.no_progress,
+    )
+
+    print(
+        f">>> Pangu ML export: {stats.converted} converted, "
+        f"{stats.skipped} skipped (of {stats.total_seen} seen) -> {output_root}"
+    )
+    if stats.skip_reasons:
+        print(">>> Skip reasons:", dict(stats.skip_reasons))
+
+
+if __name__ == "__main__":
+    main()
