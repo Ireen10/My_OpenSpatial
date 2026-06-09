@@ -14,7 +14,8 @@ Rules (project-specific, stricter than schema 4.2):
   - All images (with every mark overlay) appear only in the first user turn, before text.
   - Later user turns contain text only.
   - Image placeholder tokens (<image>, <|image|>, etc.) are stripped from all text.
-  - Q/A prose applies mark_spec labels (e.g. chair -> chair-(red box)).
+  - Q/A prose: in-place replace legacy ``tag-(red box)`` in messages with
+    ``tag (<phrase>)``; box/point pick randomly from short phrase candidates.
 
 Sample id: export ``sample_id`` (sanitized for tar paths).
 Image tar paths: ``{safe_sample_id}_{view_index:02d}.jpg`` (or .png).
@@ -25,6 +26,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import random
 import re
 import sys
 import tarfile
@@ -55,7 +57,6 @@ from dataset.upstream_export import (  # noqa: E402
     resolve_shard_image,
 )
 from task.annotation.core.mark_spec import (  # noqa: E402
-    all_slots_flat,
     merge_mark_specs,
     render_mark,
     view_mark_spec_slice,
@@ -81,34 +82,56 @@ WHITESPACE_RE = re.compile(r"\s+")
 PATH_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 PANGU_SHARD_BASENAME_FMT = "data_{:06d}"
 
+# Legacy viz form baked into exported messages: chair-(red box)
+LEGACY_MARK_SUFFIX_RE = re.compile(
+    r"\b(\w+)-\(\s*(\w+)\s+(box|mask|point)\s*\)",
+    flags=re.IGNORECASE,
+)
 
-def display_label_from_mark_slot(slot: dict) -> str:
-    tag = str(slot.get("tag", "")).strip()
-    kind = slot.get("mark_kind")
-    color = slot.get("color_name")
-    if tag and kind and color:
-        return f"{tag}-({color} {kind})"
-    return tag
+# Short parenthetical phrases; ``{color}`` filled at replace time.
+BOX_MARK_PHRASES = (
+    "in the {color} box",
+    "inside the {color} box",
+    "in a {color} box",
+    "within the {color} box",
+    "highlighted by a {color} box",
+    "marked with a {color} box",
+)
+POINT_MARK_PHRASES = (
+    "at the {color} point",
+    "on the {color} point",
+    "at a {color} point",
+    "by the {color} point",
+    "highlighted by a {color} point",
+    "marked with a {color} point",
+)
 
 
-def apply_mark_spec_labels_to_text(text: str, mark_spec: Optional[dict]) -> str:
-    """Upgrade bare object tags to marked surface forms (e.g. chair-(red box))."""
-    if not text or not mark_spec:
-        return text or ""
-    out = text
-    for slot in all_slots_flat(mark_spec):
-        tag = str(slot.get("tag", "")).strip()
-        if not tag:
-            continue
-        label = display_label_from_mark_slot(slot)
-        if label == tag or label.lower() in out.lower():
-            continue
-        out = re.sub(
-            rf"\b{re.escape(tag)}\b(?!\s*-\()",
-            label,
-            out,
-            flags=re.IGNORECASE,
-        )
+def pick_mark_phrase_for_kind(color: str, kind: str) -> str:
+    """Random short phrase for box/point; mask keeps a single template."""
+    color = str(color or "").strip().lower()
+    kind = str(kind or "").strip().lower()
+    if kind == "mask":
+        return f"highlighted by a {color} mask"
+    if kind == "point":
+        template = random.choice(POINT_MARK_PHRASES)
+    else:
+        template = random.choice(BOX_MARK_PHRASES)
+    return template.format(color=color)
+
+
+def convert_legacy_marks_to_natural(text: str) -> str:
+    """
+    In-place: ``chair-(red box)`` -> ``chair (in the red box)`` (phrase varies).
+
+    Tag, color, and kind are taken from the legacy token — no second pass over bare tags.
+    """
+
+    def _repl(match: re.Match) -> str:
+        tag, color, kind = match.group(1), match.group(2), match.group(3)
+        return f"{tag} ({pick_mark_phrase_for_kind(color, kind)})"
+
+    out = LEGACY_MARK_SUFFIX_RE.sub(_repl, text or "")
     return re.sub(r"  +", " ", out).strip()
 
 
@@ -323,11 +346,11 @@ def combined_mark_spec_for_view(
     return merge_mark_specs(slices, view_indices=view_indices)
 
 
-def apply_marked_text(text: str, mark_spec: Optional[dict]) -> str:
+def apply_marked_text(text: str, _mark_spec: Optional[dict] = None) -> str:
     stripped = strip_image_placeholder_tokens(text)
     if not stripped:
         return ""
-    return apply_mark_spec_labels_to_text(stripped, mark_spec)
+    return convert_legacy_marks_to_natural(stripped)
 
 
 def render_marked_image_bytes(
