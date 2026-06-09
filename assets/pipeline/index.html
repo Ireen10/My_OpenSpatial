@@ -3,22 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OpenSpatial 交互式管线图</title>
+  <title>OpenSpatial Interactive Pipeline</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
   <div class="app">
     <main class="main">
       <div class="eyebrow">OpenSpatial Visualization</div>
-      <h1>交互式管线流程图</h1>
+      <h1>Interactive Pipeline Flow</h1>
       <p class="lead">
-        点击任意步骤，可以查看它的内部核心逻辑、过滤依据、关键参数/阈值和对应代码入口。
-        主流程覆盖 preprocess、annotation、aggregate、上游 export，以及 Pangu ML 格式转换。
+        Click any step to inspect its internal logic, filtering criteria, key parameters, thresholds, and code entry points.
+        The main path covers preprocess, annotation, aggregate, upstream export, and Pangu ML conversion.
       </p>
 
       <div class="toolbar">
         <div class="legend" id="legend"></div>
-        <div class="hint">提示：点击图中的节点查看详情</div>
+        <div class="hint">Tip: click a node in the diagram</div>
       </div>
 
       <div class="canvas-wrap">
@@ -35,7 +35,7 @@
       </div>
 
       <p class="footer-note">
-        这是一个静态离线页面，可以直接打开 <code>assets/pipeline/index.html</code> 查看。
+        This page is static and self-contained. It can be opened directly from <code>assets/pipeline/index.html</code>.
       </p>
     </main>
 
@@ -345,6 +345,8 @@
     };
 
     PIPELINE_STEPS.forEach((step) => {
+      step.nodeTitle = step.title;
+      step.nodeSummary = step.summary;
       Object.assign(step, LAYOUT[step.id] || {}, ZH[step.id] || {}, CORE_DETAILS[step.id] || {});
     });
 
@@ -418,7 +420,7 @@
 
     function drawLegend() {
       legend.innerHTML = Object.entries(STAGE_LABELS).map(([id, label]) => (
-        `<span class="legend-item"><span class="dot ${id}"></span>${escapeHtml(UI_STAGE_LABELS[id] || label)}</span>`
+        `<span class="legend-item"><span class="dot ${id}"></span>${escapeHtml(label)}</span>`
       )).join("");
     }
 
@@ -437,7 +439,7 @@
           x: band.x + 18,
           y: band.y + 28
         });
-        label.textContent = UI_STAGE_LABELS[band.id] || STAGE_LABELS[band.id];
+        label.textContent = STAGE_LABELS[band.id];
         stageLayer.appendChild(label);
       });
     }
@@ -474,7 +476,7 @@
           "data-stage": step.stage,
           tabindex: 0,
           role: "button",
-          "aria-label": step.title
+          "aria-label": step.nodeTitle || step.title
         });
 
         g.appendChild(svgEl("rect", {
@@ -500,10 +502,10 @@
           x: step.x + 20,
           y: step.y + 31
         });
-        title.textContent = step.title;
+        title.textContent = step.nodeTitle || step.title;
         g.appendChild(title);
 
-        wrapText(step.summary, 28).forEach((line, index) => {
+        wrapText(step.nodeSummary || step.summary, 28).forEach((line, index) => {
           const text = svgEl("text", {
             class: "node-subtitle",
             x: step.x + 20,
