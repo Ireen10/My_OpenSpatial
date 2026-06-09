@@ -1,18 +1,12 @@
 """Point cloud distance, cleaning, loading, and debug I/O utilities."""
 
-import threading
-
 import numpy as np
 import open3d as o3d
-
-# Open3D C++ backends are not reliably thread-safe; serialize heavy calls.
-_OPEN3D_LOCK = threading.Lock()
 
 
 def point_cloud_nn_distances(pcd1, pcd2) -> np.ndarray:
     """Per-point nearest-neighbor distances from pcd1 queries to pcd2 targets."""
-    with _OPEN3D_LOCK:
-        return np.asarray(pcd1.compute_point_cloud_distance(pcd2))
+    return np.asarray(pcd1.compute_point_cloud_distance(pcd2))
 
 
 def compute_point_cloud_distance(pcd1, pcd2):
@@ -53,9 +47,8 @@ def clean_point_cloud(cloud, nb_neighbors=10, std_ratio=1.0):
     Returns:
         Cleaned open3d.geometry.PointCloud.
     """
-    with _OPEN3D_LOCK:
-        _, ind = cloud.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
-        return cloud.select_by_index(ind)
+    _, ind = cloud.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+    return cloud.select_by_index(ind)
 
 
 def load_point_clouds(pointcloud_paths, nb_neighbors=5, std_ratio=2.0):
@@ -74,8 +67,7 @@ def load_point_clouds(pointcloud_paths, nb_neighbors=5, std_ratio=2.0):
 
     restored = []
     for path in pointcloud_paths:
-        with _OPEN3D_LOCK:
-            ori_pcd = o3d.io.read_point_cloud(path)
+        ori_pcd = o3d.io.read_point_cloud(path)
         cleaned = clean_point_cloud(ori_pcd, nb_neighbors=nb_neighbors, std_ratio=std_ratio)
         restored.append(cleaned)
     return restored
