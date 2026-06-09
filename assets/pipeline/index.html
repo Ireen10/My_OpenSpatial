@@ -1,28 +1,28 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OpenSpatial Interactive Pipeline</title>
+  <title>OpenSpatial 交互式管线图</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
   <div class="app">
     <main class="main">
       <div class="eyebrow">OpenSpatial Visualization</div>
-      <h1>Interactive Pipeline Flow</h1>
+      <h1>交互式管线流程图</h1>
       <p class="lead">
-        Click any step to inspect what it computes, which files implement it, and how its outputs feed the next stage.
-        The main path covers preprocess, annotation, aggregate, upstream export, and Pangu ML conversion.
+        点击任意步骤，可以查看它的内部核心逻辑、过滤依据、关键参数/阈值和对应代码入口。
+        主流程覆盖 preprocess、annotation、aggregate、上游 export，以及 Pangu ML 格式转换。
       </p>
 
       <div class="toolbar">
         <div class="legend" id="legend"></div>
-        <div class="hint">Tip: click a node in the diagram</div>
+        <div class="hint">提示：点击图中的节点查看详情</div>
       </div>
 
       <div class="canvas-wrap">
-        <svg id="pipeline-svg" width="1460" height="930" viewBox="0 0 1460 930" role="img" aria-label="OpenSpatial interactive pipeline flow">
+        <svg id="pipeline-svg" width="1680" height="1080" viewBox="0 0 1680 1080" role="img" aria-label="OpenSpatial interactive pipeline flow">
           <defs>
             <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
               <path d="M1.5,1.5 L9,5.5 L1.5,9.5 Z" fill="#64748b"></path>
@@ -35,7 +35,7 @@
       </div>
 
       <p class="footer-note">
-        This page is static and self-contained. It can be opened directly from <code>assets/pipeline/index.html</code>.
+        这是一个静态离线页面，可以直接打开 <code>assets/pipeline/index.html</code> 查看。
       </p>
     </main>
 
@@ -52,11 +52,11 @@
     const legend = document.getElementById("legend");
 
     const stageBands = [
-      { id: "orchestration", x: 24, y: 20, w: 1412, h: 136 },
-      { id: "preprocess", x: 24, y: 184, w: 1412, h: 136 },
-      { id: "annotation", x: 24, y: 382, w: 1218, h: 136 },
-      { id: "aggregate", x: 24, y: 580, w: 1218, h: 136 },
-      { id: "export", x: 268, y: 778, w: 734, h: 136 }
+      { id: "orchestration", x: 24, y: 30, w: 1632, h: 150 },
+      { id: "preprocess", x: 24, y: 210, w: 1632, h: 165 },
+      { id: "annotation", x: 24, y: 440, w: 1372, h: 165 },
+      { id: "aggregate", x: 24, y: 660, w: 1372, h: 165 },
+      { id: "export", x: 284, y: 880, w: 872, h: 165 }
     ];
 
     const stageColors = {
@@ -66,6 +66,287 @@
       aggregate: "#8b5cf6",
       export: "#ec4899"
     };
+
+    const UI_STAGE_LABELS = {
+      orchestration: "调度",
+      preprocess: "预处理",
+      annotation: "标注生成",
+      aggregate: "聚合",
+      export: "导出"
+    };
+
+    const LAYOUT = {
+      runner: { x: 70, y: 75, w: 240, h: 90 },
+      source: { x: 70, y: 260, w: 200, h: 96 },
+      flatten: { x: 330, y: 260, w: 200, h: 96 },
+      filter: { x: 590, y: 260, w: 200, h: 96 },
+      localization: { x: 850, y: 260, w: 200, h: 96 },
+      fusion: { x: 1110, y: 260, w: 200, h: 96 },
+      group: { x: 1370, y: 260, w: 200, h: 96 },
+      "annotation-input": { x: 70, y: 490, w: 200, h: 96 },
+      "scene-graph": { x: 330, y: 490, w: 200, h: 96 },
+      "task-logic": { x: 590, y: 490, w: 200, h: 96 },
+      "prompt-metadata": { x: 850, y: 490, w: 200, h: 96 },
+      "annotation-output": { x: 1110, y: 490, w: 200, h: 96 },
+      "aggregate-input": { x: 70, y: 710, w: 200, h: 96 },
+      "turn-load": { x: 330, y: 710, w: 200, h: 96 },
+      dedup: { x: 590, y: 710, w: 200, h: 96 },
+      merge: { x: 850, y: 710, w: 200, h: 96 },
+      "merged-parquet": { x: 1110, y: 710, w: 200, h: 96 },
+      "upstream-export": { x: 330, y: 930, w: 200, h: 96 },
+      pangu: { x: 590, y: 930, w: 200, h: 96 },
+      final: { x: 850, y: 930, w: 200, h: 96 }
+    };
+
+    const ZH = {
+      runner: {
+        title: "管线调度器",
+        summary: "读取 YAML 配置，创建 BasePipeline，解析任务依赖，并把每个 stage 的输出写入固定目录。",
+        inputs: ["config/preprocessing/demo_preprocessing_*.yaml", "config/annotation/demo_*_all.yaml", "config/aggregate/demo_aggregate_*.yaml", "--output_dir 运行根目录"],
+        flow: ["解析命令行参数和 YAML 配置。", "根据 pipeline.file_name 和配置文件名创建本次运行目录。", "实例化 pipeline.<file_name>.<class_name>，并按 pipeline.stages 创建任务队列。", "对每个任务解析 depends_on：可以是 parquet 文件、目录、显式 task ref，或前序 stage/task 输出。", "执行 task.run(DataFrame)，除 skip_parquet 的 export_stage 外，统一保存 data.parquet。"],
+        outputs: ["{run_root}/{stage}/{task}/data.parquet", "各阶段副产物，例如 masks、pointclouds、JSONL、图片 tar 分片"]
+      },
+      source: {
+        title: "源数据集",
+        summary: "输入 parquet 以及原始 RGB、深度、相机参数和物体标注元信息。",
+        inputs: ["image", "depth_map + depth_scale", "pose + intrinsic", "obj_tags", "bboxes_3d_world_coords"],
+        flow: ["从 dataset.data_dir 构建 ImageBase 数据集。", "必要时用 raw_data_root 补全相对资源路径。", "把数据暴露为 pandas DataFrame，供第一个预处理任务消费。"],
+        outputs: ["预处理任务使用的 DataFrame 行"]
+      },
+      flatten: {
+        title: "样本展开",
+        summary: "可选步骤：把 list-valued 的多图样本展开为一图一行。",
+        inputs: ["anchor_col 通常是 image，可能为列表", "split_col_list 中字段长度需要与 anchor_col 一致"],
+        flow: ["检查 anchor 字段是否为列表。", "验证每个 split 字段存在且长度一致。", "按图片索引创建新行，split 字段取对应元素，非 split 字段原样复制。", "已经是单图的行保持不变。"],
+        outputs: ["image/depth/pose/intrinsic 等字段为标量的单图行"]
+      },
+      filter: {
+        title: "3D 框过滤",
+        summary: "移除背景或无效物体，并为保留下来的 3D box 生成物体 mask。",
+        inputs: ["image, depth_map, depth_scale", "pose, intrinsic", "obj_tags", "bboxes_3d_world_coords"],
+        flow: ["加载 RGB 图像和 metric depth。", "过滤 ceiling、floor、wall、object 等背景标签。", "把每个 3D box 投影到图像平面，检查可见投影面积。", "把深度反投影成场景点云，检查 oriented box 内的点数和体积占比。", "保存有效物体的二值 mask，并同步过滤 object-aligned 字段。"],
+        outputs: ["过滤后的 obj_tags 和 bboxes_3d_world_coords", "filter_stage/3dbox_filter/masks 下的 mask PNG", "filter_stage/3dbox_filter/data.parquet"]
+      },
+      localization: {
+        title: "定位精修",
+        summary: "使用 SAM2 或 SAM3 对过滤后的物体定位结果进行 mask/box 精修。",
+        inputs: ["过滤后的图像和物体行", "obj_tags 与 bboxes_3d_world_coords", "已有 mask 或 box prompt，取决于 localizer"],
+        flow: ["加载配置中指定的定位模型。", "根据物体框或已有 mask 生成更精细的 object masks。", "保留后续 annotation 和 scene fusion 需要的 object-aligned 字段。"],
+        outputs: ["精修后的 masks / bboxes_2d / object fields", "localization_stage/sam*_refiner/data.parquet"]
+      },
+      fusion: {
+        title: "场景融合",
+        summary: "把每个物体 mask 通过深度反投影成清洗后的 3D 物体点云。",
+        inputs: ["intrinsic", "depth_map + depth_scale", "masks", "obj_tags"],
+        flow: ["从路径或 bytes 加载 mask，并 resize 到 depth 分辨率。", "把整张深度图反投影到 3D 相机坐标。", "取出每个 mask 覆盖的点，做 statistical outlier removal，并写出 .pcd。", "丢弃无效 mask/object，要求至少保留两个有效物体点云。"],
+        outputs: ["每行新增 pointclouds 列", "scene_fusion_stage/depth_back_projection/pointclouds/*.pcd", "scene_fusion_stage/depth_back_projection/data.parquet"]
+      },
+      group: {
+        title: "多视角分组",
+        summary: "可选的 multiview 步骤：把单图行按场景聚合成 list-valued 的多视角行。",
+        inputs: ["单图 fused rows", "group_by，例如 scene_id", "group_col_list 中的图像、深度、pose、物体字段"],
+        flow: ["遍历每一行，按 group key 收集同一场景。", "group_col_list 字段追加成列表，稳定的场景级字段只复制一次。", "返回一场景一行，供 multiview annotation 使用。"],
+        outputs: ["group_stage/group/data.parquet", "list-valued 的 multiview rows"]
+      },
+      "annotation-input": {
+        title: "标注输入",
+        summary: "singleview 或 multiview annotation 配置所指向的预处理 parquet。",
+        inputs: ["Singleview: scene_fusion_stage/depth_back_projection/data.parquet", "Multiview: group_stage/group/data.parquet"],
+        flow: ["在 config 中设置 dataset.data_dir 或 task depends_on。", "多个 annotation task 通常指回同一个预处理输入，而不是串联上一个 annotation 输出。", "BasePipeline 会在每个任务执行前加载对应 parquet。"],
+        outputs: ["每个 annotation task 的输入 DataFrame"]
+      },
+      "scene-graph": {
+        title: "SceneGraph 构建",
+        summary: "把每行数据转换成 annotation task 使用的物体、视角和几何结构。",
+        inputs: ["singleview 或 multiview row", "物体标签、mask、点云、pose、intrinsic"],
+        flow: ["检查必要字段，跳过缺失或空物体列表的样本。", "singleview 使用 SceneGraph.from_singleview_example。", "multiview 使用 SceneGraph.from_multiview_example，并受 max_num_views 和 pose diversity 参数控制。", "向任务逻辑暴露 nodes、view appearances、相机几何和物体点云。"],
+        outputs: ["包含 SceneNode 和 view appearance 的 SceneGraph"]
+      },
+      "task-logic": {
+        title: "任务逻辑",
+        summary: "距离、深度、尺寸、位置、grounding 和 multiview 任务在这里采样对象/视角并计算答案。",
+        inputs: ["SceneGraph", "sub_tasks 配置", "问题模板与 metric gating"],
+        flow: ["根据任务选择合法的物体对、目标物体或视角组合。", "计算距离、深度顺序、尺寸、位置、对应关系等几何量。", "根据启用的 sub_tasks 选择 OE、MCQ 或 grounding 模板。", "必要时用 box、point 或 mask 标记 referent。"],
+        outputs: ["包含问题和答案的 prompt 字符串", "处理过或标记过的 QA 图像", "question tags 与 question types"]
+      },
+      "prompt-metadata": {
+        title: "Prompt 与元数据",
+        summary: "渲染结构化 prompt，并记录可追踪的 turn metadata。",
+        inputs: ["任务生成的 prompt 与 answer", "VisualMarker 产生的 mark_spec", "预处理行中的 visual anchor"],
+        flow: ["渲染模板，并拆分 question/answer 文本。", "记录 task name、sub_task、question_type、template_id、answer、referent slots、view indices 等 turn 信息。", "构造 visual_anchor，把 annotation 行追溯到 parent preprocess id 和 image refs。", "创建 singleview 或 multiview messages，并插入对应数量的 image placeholder。"],
+        outputs: ["messages", "metadata.turns", "metadata.visual_anchor", "metadata.mark_spec"]
+      },
+      "annotation-output": {
+        title: "标注 Parquet",
+        summary: "每个 annotation task 独立写出一个扁平 parquet，供聚合阶段读取。",
+        inputs: ["BaseAnnotationTask.apply_transform 返回的任务 DataFrame"],
+        flow: ["BasePipeline 调用 dataset.save_data，并设置 annotation_flag=True。", "标注输出保留 messages、metadata、question_tags、question_types 等紧凑字段。", "每个配置中的 task 独立写到 annotation_stage 下。"],
+        outputs: ["annotation_stage/distance/data.parquet", "annotation_stage/depth_annotation/data.parquet", "annotation_stage/multiview_correspondence/data.parquet", "其他 annotation_stage/*/data.parquet"]
+      },
+      "aggregate-input": {
+        title: "聚合配置",
+        summary: "选择需要合并的 annotation task 输出集合。",
+        inputs: ["input_tasks_prefix", "input_tasks 列表", "dedup 与 merge 策略开关"],
+        flow: ["当配置了 input_tasks 时，aggregate run 会延迟常规 dataset 加载。", "把每个 task ref 解析到具体 annotation 输出目录。", "读取所有 annotation task parquets，并展开成 turn records。"],
+        outputs: ["跨任务的 TurnRecord 列表"]
+      },
+      "turn-load": {
+        title: "Turn 加载",
+        summary: "把 annotation row 展开成逐轮记录，并计算去重/合并 key。",
+        inputs: ["annotation parquet 中的 messages 与 metadata", "input task ref 中推导出的 task_name"],
+        flow: ["读取 annotation conversations 和 metadata turns。", "提取每个 turn 的可视化 question/answer 文本。", "计算 question_core_key，用于识别语义重复问题。", "用 task name、visual anchor、view group 和 question key 计算 dedup_fingerprint。", "用有序 image refs、view group 和标准化 mark_spec 计算 merge_group_key。"],
+        outputs: ["带 dedup_fingerprint 与 merge_group_key 的 TurnRecord 列表"]
+      },
+      dedup: {
+        title: "Turn 去重",
+        summary: "在每个任务内部移除重复 turn，优先保留结构化语义信息更完整的记录。",
+        inputs: ["按 task 分组的 TurnRecord", "dedup_keep_policy，例如 semantic_first"],
+        flow: ["在每个 task 内按 dedup_fingerprint 分组。", "如果同组有多个候选，用 pick_dedup_winner 选择保留项。", "保留 source order；必要时从源 row 刷新可视化 Q/A。"],
+        outputs: ["去重后的 TurnRecord 列表", "Aggregate stats 中的 turns_in 和 dedup_removed"]
+      },
+      merge: {
+        title: "样本合并",
+        summary: "把具有相同 visual input group 的 turns 合并为一个训练样本。",
+        inputs: ["去重后的 TurnRecord 列表", "merge_group_key"],
+        flow: ["按 merge_group_key 分组。", "grounding turns 排在最前，其余保持原 parquet 顺序。", "把可视化 Q/A turn 展平成 messages。", "携带 image_refs、visual_anchor、代表性 mark_spec、source task provenance 和 turn metadata。", "为合并样本分配新的 sample_id。"],
+        outputs: ["schema_version", "sample_id", "merge_group_key", "image_refs", "messages_json", "metadata_json"]
+      },
+      "merged-parquet": {
+        title: "合并 Parquet",
+        summary: "聚合后的标准样本表，是上游 exporter 的输入。",
+        inputs: ["合并后的 sample dictionaries"],
+        flow: ["把嵌套 numpy 值转换成 JSON-safe 对象。", "把 messages 和 metadata 序列化为 JSON 字符串。", "通过 BasePipeline 保存为 aggregate_stage/sample_aggregator/data.parquet。"],
+        outputs: ["aggregate_stage/sample_aggregator/data.parquet"]
+      },
+      "upstream-export": {
+        title: "上游导出",
+        summary: "写出 OpenSpatial 上游 sharded metadata 和图片归档。",
+        inputs: ["aggregate_stage/sample_aggregator/data.parquet", "view_scope: singleview 或 multiview", "schema_version"],
+        flow: ["把每个 merged parquet row 转换成 upstream record。", "从 messages_json 归一化 messages。", "收集 image_refs，并把引用图片打包到按 shard 切分的 tar。", "写出 JSONL metadata shards 和 dataset-level metadata.json。", "当 skip_parquet=true 时，不额外写 export_stage/data.parquet。"],
+        outputs: ["export_stage/dataset_exporter/jsonl/metadata_*.jsonl", "export_stage/dataset_exporter/images/metadata_*.tar", "export_stage/dataset_exporter/metadata.json"]
+      },
+      pangu: {
+        title: "Pangu ML 转换",
+        summary: "把上游 bundle 转成下游 Pangu ML 训练格式。",
+        inputs: ["--export-dir 指向 upstream export root", "--output-root 指向 Pangu ML 输出目录", "metadata_*.jsonl + metadata_*.tar"],
+        flow: ["发现 upstream shard pairs，并可按 shard 并行处理。", "从每个 upstream tar 中解析图片，必要时根据 mark_spec 渲染标记 overlay。", "把所有 image content 移到第一轮 user turn，并清理文本中的 image placeholder。", "把角色从 human/gpt 映射为 user/assistant。", "写出 data_*.jsonl 和 data_*.tar，使用 Pangu-safe 的 sample/image 路径。"],
+        outputs: ["jsonl/data_*.jsonl", "images/data_*.tar", "Pangu ML 兼容的多模态训练记录"]
+      },
+      final: {
+        title: "训练数据包",
+        summary: "最终下游数据包，可交给 Pangu ML loader 使用。",
+        inputs: ["Pangu ML 转换输出"],
+        flow: ["分片命名为 data_{shard:06d}.jsonl 和 data_{shard:06d}.tar。", "每行 JSONL 通过 tar-relative path 引用图片。", "conversation roles 和 content blocks 符合下游训练 schema。"],
+        outputs: ["{output_root}/jsonl/data_*.jsonl", "{output_root}/images/data_*.tar"]
+      }
+    };
+
+    const CORE_DETAILS = {
+      runner: {
+        summary: "这里的核心不是计算数据，而是决定每个 task 应该读哪里、写哪里，以及多个 stage 如何串起来。",
+        flow: ["配置中的 stage/task 会按 YAML 顺序进入 task_queue；同名 task 会自动追加 dup 后缀，避免输出目录冲突。", "depends_on 解析有优先级：先认真实文件或目录，再认 task ref，最后尝试相对 output_root 的历史路径。", "如果某个 task 没有 depends_on，就默认读取前一个 task 的输出；annotation 配置里常显式指回同一个预处理 parquet，避免 annotation task 彼此串联。", "每个 task 都拿到当前 DataFrame 的 deep copy，执行 run/apply_transform 后再统一保存。"],
+        params: ["--max_samples 与 --start_from 只做调试切片，会在每次 override_data 后重新应用。", "export_stage + skip_parquet=true 时，只保留导出 bundle，不写空 parquet。"]
+      },
+      source: {
+        summary: "源数据阶段的关键是保证后续几何计算所需的 RGB、深度、相机参数和物体 3D 框在同一行内对齐。",
+        flow: ["ImageBase 把 parquet 读成 DataFrame，后续所有 task 都假设同一行里的 image/depth/pose/intrinsic 描述同一个视角。", "如果数据集提供相对路径，raw_data_root 会作为资源根目录参与解析。", "从这个阶段开始，物体相关字段必须保持同顺序：obj_tags[i]、bboxes_3d_world_coords[i]、mask[i]、pointclouds[i] 指向同一个物体。"],
+        params: ["核心约束不是阈值，而是字段对齐；一旦某个 task 过滤物体，必须同步过滤所有 object-aligned 列。"]
+      },
+      flatten: {
+        summary: "Flatten 的核心逻辑是把 list-valued 多图样本拆成单图样本，同时保持每个视角自己的相机和资源字段。",
+        flow: ["先看 anchor_col，默认是 image；如果它不是 list，样本直接通过。", "如果 anchor_col 是 list，则要求 split_col_list 中所有字段也都是等长 list。", "对第 i 个视角生成一行：split 字段取 v[i]，非 split 字段复制原值。", "这一步不会做几何过滤，只改变样本粒度。"],
+        params: ["anchor_col 默认 image。", "split_col_list 在 config 中显式指定，常包含 image、id、depth_map、pose、intrinsic 等。"]
+      },
+      filter: {
+        summary: "3D Box Filter 的核心是用 2D 可见性和 3D 几何一致性双重门控，过滤掉投影不可见或与深度点云不匹配的物体框。",
+        flow: ["先过滤语义背景类：config 中的 filter_tags 通常包含 ceiling、floor、wall、object，这些不进入 QA。", "对每个候选 3D box 计算 8 个角点，并用 intrinsic @ world_to_camera 投影到图像平面。", "把 3D box 的 6 个面 rasterize 成 2D mask，计算“落在图像内的像素面积 / 投影多边形 union 面积”；比例低于 proj_mask_threshold 的框认为视角中不可见。", "把 depth map 反投影为场景点云，用缩放后的 oriented bounding box 取内部点。内部点少于 MIN_POINTS_IN_BOX 会丢弃。", "对 box 内点云估计 convex hull 或 oriented bbox 体积，要求 selected_volume / box_volume 达到 box3d_pcd_threshold。", "再把 box 内点映射成像素 mask，要求 mask_area / image_area 达到 mask_area_threshold。", "通过所有门控的物体会写出二值 mask；没有任何物体通过时整行样本被丢弃。"],
+        params: ["proj_mask_threshold：demo config 中为 0.1。", "box3d_pcd_threshold：demo config 中为 0.1；类默认值是 0.07。", "box_scale_factor：demo config 中为 0.9，用于收缩 oriented box 后再取点。", "mask_area_threshold：demo config 中为 0.005；类默认值是 0.02。", "MIN_POINTS_IN_BOX：代码常量 50。", "EPS：1e-4，用于避免投影除以接近 0 的 z。"]
+      },
+      localization: {
+        summary: "Localization 的核心是用分割模型把粗 mask/box prompt 精修成更可靠的物体 mask，并按质量分数继续过滤物体。",
+        flow: ["SAM2 路径会先从 coarse mask 计算 axis-aligned bbox，再把这些 boxes 作为 prompt 输入 SAM2。", "SAM2 使用 multimask_output=False，每个 box 只取一个预测 mask。", "预测结果先按 score 过滤，再按 mask 像素数量过滤；未通过的物体会从 obj_tags、3D boxes 等 update_keys 中同步删除。", "SAM3 路径会用 processor/model 产生 instance segmentation proposals，再用 coverage 与 precision 评估 proposal 和 coarse mask 的匹配程度。", "没有任何 mask 通过时，整行样本被丢弃。"],
+        params: ["SAM2 MIN_SCORE：0.6。", "SAM2 MIN_MASK_PIXELS：20。", "SAM3 post_process threshold：min_score；mask_threshold 固定 0.5。", "SAM3 会记录 coverage/precision 通过率，每 500 张图输出一次 keep/drop 统计。"]
+      },
+      fusion: {
+        summary: "Scene Fusion 的核心是把 2D mask 对应的深度像素提升到 3D，并为每个物体保存清洗后的点云。",
+        flow: ["读取 mask，如果 mask 分辨率和 depth 不一致，用 nearest resize 到 depth shape。", "用 intrinsic 和 depth map 对整张图做 backproject，得到每个像素对应的 3D 点。", "对每个物体 mask，取 mask>0 的像素对应点，形成物体点云。", "用 Open3D remove_statistical_outlier(nb_neighbors=10, std_ratio=2.0) 清理离群点。", "空点云会使该物体无效，并同步过滤所有长度匹配的 object list 字段。", "一行中有效物体点云数量 <= 1 时，该样本被丢弃，因为多数空间 QA 至少需要两个物体。"],
+        params: ["outlier nb_neighbors：10。", "outlier std_ratio：2.0。", "有效样本要求 len(pointclouds) > 1。"]
+      },
+      group: {
+        summary: "Group Views 的核心是把同一 scene_id 下的多个单图观测恢复成多视角样本，供 multiview 任务跨视角推理。",
+        flow: ["以 group_by 字段作为 key，默认配置里常用 scene_id。", "group_col_list 中的字段会被 append 成 list，例如 image、depth_map、pose、intrinsic、masks、pointclouds。", "不在 group_col_list 中的字段只保留首次出现的值，作为场景级元信息。", "这一步不做视角筛选；真正的视角多样性过滤发生在 multiview annotation 的 SceneGraph/任务逻辑中。"],
+        params: ["group_by：demo embodiedscan config 使用 scene_id。", "group_col_list 必须包含 multiview annotation 需要逐视角读取的字段。"]
+      },
+      "annotation-input": {
+        summary: "Annotation Input 的核心是保证每个 annotation task 都从同一份预处理结果采样，而不是吃上一个 QA 任务生成的结果。",
+        flow: ["singleview 通常使用 scene_fusion_stage/depth_back_projection/data.parquet。", "multiview 通常使用 group_stage/group/data.parquet。", "demo_singleview_all.yaml 中除第一个任务外，其余任务用 depends_on 指回同一个输入 parquet。", "这样 distance、depth、size、position、grounding 是并列生成不同 QA，而不是互相改写同一批样本。"],
+        params: ["核心策略：annotation tasks 并列消费 preprocess output。"]
+      },
+      "scene-graph": {
+        summary: "SceneGraph 的核心是把行数据组织成统一的对象-视角结构，让不同 QA 任务可以复用同一套几何访问方式。",
+        flow: ["singleview 会把每个物体包装成 SceneNode，并挂上该视角中的 mask、pointcloud、bbox 等 appearance。", "multiview 会为同一场景构建多个 view，并记录每个物体在哪些 view 中可见。", "multiview 还会检查基础字段长度一致：image、pose、intrinsic、obj_tags、masks、depth_map、bboxes_3d_world_coords 必须同长度。", "后续 task 不直接操作原始 parquet 字段，而是通过 graph.nodes 和 graph.views 做采样、投影和点云距离计算。"],
+        params: ["max_num_views：demo multiview config 中为 400。", "min_rot_angle：demo multiview config 中为 15.0 度。", "min_translation：demo multiview config 中为 0.0，即默认不启用平移距离门控。"]
+      },
+      "task-logic": {
+        summary: "Task Logic 的核心是按具体空间问题采样对象/视角，计算几何答案，再选择 OE/MCQ/grounding 模板表达出来。",
+        flow: ["distance task 会清洗物体点云，并用点云间最近距离计算 absolute distance 或 relative distance。", "absolute distance 会把小于 1m 的答案格式化为厘米，否则格式化为米。", "relative distance 会比较 dist(A,C) 和 dist(B,C)，随机问 farther 或 closer，并可生成 OE 或 MCQ。", "metric_gating 会避免在非 metric depth 样本上使用要求真实距离估计的 reasoning/stem。", "multiview correspondence 会找两个有重叠物体且视角足够不同的 view，把有效深度像素反投影到世界坐标，用最近邻距离找重叠点，再投影回两张图生成对应点问题。", "MCQ 类任务会把正确答案和 distractors shuffle，避免答案位置偏置。"],
+        params: ["format_distance_value 阈值：1.0m，小于该值用 centimeters。", "instruction free 模式默认采样权重：0.6。", "multiview correspondence overlap_dist：0.003m。", "min_overlap_points：10。", "boundary_margin：10px。", "min_distractor_dist：20px。", "correspondence 点云过大时每侧最多采样 50000 点做最近邻。"]
+      },
+      "prompt-metadata": {
+        summary: "Prompt 与元数据的核心是把一次几何计算变成可追踪、可去重、可重新渲染视觉标记的 turn record。",
+        flow: ["render_structured_prompt 会记录 template_id、question_text、answer_text、slot bindings 等结构化信息。", "VisualMarker 生成 mark_spec，描述每个 view 上哪些 slot 被 box/point/mask 标记，以及颜色、几何位置和 image_ref。", "build_turn_record 把 task、sub_task、question_type、template_id、referent_slots、answer_text、view_indices 等写入 metadata.turns。", "build_visual_anchor 把 QA 绑定回 parent_preprocess_id、raw_image_ref(s)、view_group_id，后续 aggregate 用它判断是否属于同一视觉输入。", "如果单视角 mark_spec 还没有 per-view 包装，会补成统一的 per_view 结构，便于 export 阶段重绘。"],
+        params: ["唯一 tag 的可选标记概率 OPTIONAL_MARK_ENABLE_PROB：0.25。", "distance 的 mark type 权重：point 0.25，box 0.75。"]
+      },
+      "annotation-output": {
+        summary: "Annotation Parquet 的核心是把每个 task 的 QA turn 压成可聚合的最小记录，而不是保存完整中间计算状态。",
+        flow: ["BaseAnnotationTask.apply_transform 对每行先 check_example，再 build SceneGraph，再运行子类 process。", "process 返回 prompts、processed_images、question_tags、question_types 后，会统一构造 messages。", "metadata 中保存 turn 级结构化信息；messages 中保存训练时看到的问答文本。", "save_data(annotation_flag=True) 会保留 messages、metadata、question_tags、question_types 等列，并排除 QA_images 这类大对象。"],
+        params: ["annotation save_batch_size 默认 8192；multiview demo 中常设为 100。"]
+      },
+      "aggregate-input": {
+        summary: "聚合配置的核心是定义哪些 QA 任务可以合并，以及去重发生在什么粒度。",
+        flow: ["input_tasks_prefix 指向 annotation_stage，input_tasks 枚举要合并的任务目录。", "singleview 聚合 distance、depth_annotation、size、position、3d_grounding。", "multiview 聚合 multiview_distance、multiview_size、multiview_correspondence、multiview_distance_obj_cam、multiview_object_position。", "dedup_within_task=true 表示只在同一任务内部先去重，避免不同任务的不同意图被误合并。", "merge_by_visual_input_group=true 表示去重后再把同一视觉输入上的多轮 QA 合成一个样本。"],
+        params: ["dedup_keep_policy：demo config 使用 semantic_first。"]
+      },
+      "turn-load": {
+        summary: "Turn 加载的核心是为每个 QA turn 计算两个 hash：一个用于去重，一个用于合并。",
+        flow: ["question_core_key 先归一化问题意图：例如部分 OE/MCQ 模板会折叠成同一语义问题。", "dedup_fingerprint = task_name + visual_anchor + view_group_id + question_core_key 的 hash，因此只在同任务、同视觉输入、同问题核心下去重。", "merge_group_key = ordered image_refs + view_group_id + normalized mark_spec 的 hash，因此只有视觉输入和标记方式一致的 turns 才会合并。", "mark_spec_norm 会按 view_index、slot_id、obj_idx 排序并保留 box/uv/mask_ref 等几何信息，避免同图不同标记被误合并。"],
+        params: ["hash 使用 SHA-256 的 canonical JSON。", "visual_anchor 优先使用 parent_preprocess_id，否则回退到 id/scene_id/image。"]
+      },
+      dedup: {
+        summary: "Turn 去重的核心是删除同一任务内语义等价的 QA，同时优先保留结构化信息更完整的版本。",
+        flow: ["按 dedup_fingerprint 分组；单元素组直接保留。", "多元素组调用 pick_dedup_winner。semantic_first 策略优先选择带 prompt_struct 的 turn。", "如果多个候选都有结构化信息，则按 template_id 稳定排序选最小项。", "保留 winner 的 turn 内容，同时继承最早 source_order，保证后续排序稳定。"],
+        params: ["当前 demo 策略：semantic_first。", "OE/MCQ collapse 只对代码列出的模板族生效，例如 counting、depth、distance.relative 等。"]
+      },
+      merge: {
+        summary: "样本合并的核心是把同一视觉输入上的多个 QA turn 组成一个多轮样本，同时保留 provenance。",
+        flow: ["先按 merge_group_key 分组，确保 image_refs、view_group 和 mark_spec 一致。", "组内排序时 grounding turn 固定排最前，其他 turn 按原始 parquet 顺序。", "每个 turn 被转换成 human/gpt 两条 message；问题前会按 image_placeholder_count 补对应数量的 <image>。", "metadata.provenance 记录 source_tasks、turn_count、是否 merged，方便追踪样本由哪些任务贡献。", "组内第一个可用 mark_spec 会作为样本级 mark_spec，用于后续 export/render。"],
+        params: ["schema_version 当前为 1.1。", "sample_id 使用 uuid4 重新生成。"]
+      },
+      "merged-parquet": {
+        summary: "合并 parquet 的核心是把嵌套 Python/numpy 对象压成稳定可读写的 JSON 字符串列。",
+        flow: ["_json_safe 会递归处理 numpy scalar/array、list、dict，避免 parquet 写入复杂对象失败。", "messages 写入 messages_json，metadata 写入 metadata_json。", "image_refs 保持列表列，供上游导出时定位原图。", "这个 parquet 是 OpenSpatial 内部聚合后的标准中间格式，不是最终训练格式。"],
+        params: ["输出列包括 schema_version、sample_id、merge_group_key、image_refs、messages_json、metadata_json。"]
+      },
+      "upstream-export": {
+        summary: "上游导出的核心是把合并样本切成 metadata JSONL 和图片 tar，并把 image_refs 改写为 tar 内路径。",
+        flow: ["merged_row_to_upstream_record 会反序列化 messages_json/metadata_json，并收集 image_refs。", "write_sharded_upstream_bundle 按 SHARD_SIZE 缓冲样本，flush 时同时写一个 metadata_*.jsonl 和 metadata_*.tar。", "每张图片会按 images/{sample_id}/{index:02d}.{ext} 加入 tar；同一 shard 内相同源路径会复用 tar member。", "如果原图不存在，会保留原 ref 并记录 missing，而不是中断整个导出。", "metadata.json 汇总 schema、view_scope、shard 信息和统计。"],
+        params: ["SHARD_SIZE：8192。", "shard 文件名：metadata_{:06d}.jsonl / .tar。", "支持图片扩展：.jpg、.jpeg、.png、.webp；未知扩展回退 .jpg。"]
+      },
+      pangu: {
+        summary: "Pangu ML 转换的核心是把 OpenSpatial 上游 bundle 规整成下游训练 schema，尤其是图像 turn 组织和标记重绘。",
+        flow: ["discover_shard_pairs 按 metadata_*.jsonl 找到对应 metadata_*.tar，逐 shard 转换。", "每条 upstream record 会解析 messages、metadata、image_refs，并从 tar 中读取图像。", "如果 mark_spec 指定了 box/point/mask overlay，会调用 render_mark/view_mark_spec_slice 重新渲染对应视图。", "所有图片内容只放在第一轮 user turn；后续 user turn 只保留文本。", "文本中的 <image>、<|image|> 等 placeholder 会被清理。", "角色从 human/gpt 映射到 user/assistant，输出 data_*.jsonl 与 data_*.tar。"],
+        params: ["ROLE_MAP：human -> user，gpt -> assistant。", "Pangu shard 名：data_{:06d}.jsonl / .tar。", "sample_id 会做路径安全化，最多保留 200 字符。", "mark phrase 会随机把 legacy tag-(red box) 转成更自然的 parenthetical phrase。"]
+      },
+      final: {
+        summary: "最终数据包本身没有复杂计算，它的核心约束是 JSONL 中的图片引用必须能在对应 tar 中解析，且对话结构符合 Pangu ML schema。",
+        flow: ["jsonl/data_*.jsonl 中每行是一条训练样本。", "images/data_*.tar 中保存该 shard 对应的图片二进制。", "第一轮 user content 包含图片块和文本块；后续轮次只包含文本块。", "训练时 loader 通过 JSONL 中的相对路径到同 shard tar 中取图。"],
+        params: ["分片一一对应：upstream metadata_N 通常转成 downstream data_N。"]
+      }
+    };
+
+    PIPELINE_STEPS.forEach((step) => {
+      Object.assign(step, LAYOUT[step.id] || {}, ZH[step.id] || {}, CORE_DETAILS[step.id] || {});
+    });
 
     const byId = Object.fromEntries(PIPELINE_STEPS.map((step) => [step.id, step]));
     let activeId = "runner";
@@ -86,6 +367,13 @@
     }
 
     function wrapText(text, maxChars = 26) {
+      if (!String(text).includes(" ")) {
+        const chunks = [];
+        for (let i = 0; i < String(text).length; i += maxChars) {
+          chunks.push(String(text).slice(i, i + maxChars));
+        }
+        return chunks.slice(0, 3);
+      }
       const words = String(text).split(" ");
       const lines = [];
       let current = "";
@@ -130,7 +418,7 @@
 
     function drawLegend() {
       legend.innerHTML = Object.entries(STAGE_LABELS).map(([id, label]) => (
-        `<span class="legend-item"><span class="dot ${id}"></span>${escapeHtml(label)}</span>`
+        `<span class="legend-item"><span class="dot ${id}"></span>${escapeHtml(UI_STAGE_LABELS[id] || label)}</span>`
       )).join("");
     }
 
@@ -149,7 +437,7 @@
           x: band.x + 18,
           y: band.y + 28
         });
-        label.textContent = STAGE_LABELS[band.id];
+        label.textContent = UI_STAGE_LABELS[band.id] || STAGE_LABELS[band.id];
         stageLayer.appendChild(label);
       });
     }
@@ -243,31 +531,30 @@
     }
 
     function renderDetail(step) {
+      const paramsBlock = step.params && step.params.length
+        ? `
+        <div class="section">
+          <h3>关键参数 / 阈值</h3>
+          ${listItems(step.params)}
+        </div>`
+        : "";
       detail.innerHTML = `
         <div class="detail-stage">
           <span class="dot ${step.stage}"></span>
-          ${escapeHtml(STAGE_LABELS[step.stage] || step.stage)}
+          ${escapeHtml(UI_STAGE_LABELS[step.stage] || STAGE_LABELS[step.stage] || step.stage)}
         </div>
         <h2>${escapeHtml(step.title)}</h2>
         <p class="detail-summary">${escapeHtml(step.summary)}</p>
 
         <div class="section">
-          <h3>Computation Flow</h3>
+          <h3>计算流程</h3>
           ${listItems(step.flow, true)}
         </div>
 
-        <div class="section">
-          <h3>Inputs</h3>
-          ${listItems(step.inputs)}
-        </div>
+        ${paramsBlock}
 
         <div class="section">
-          <h3>Outputs</h3>
-          ${listItems(step.outputs)}
-        </div>
-
-        <div class="section">
-          <h3>Code References</h3>
+          <h3>代码入口</h3>
           <div class="file-list">
             ${step.files.map((file) => `<div class="file-chip">${escapeHtml(file)}</div>`).join("")}
           </div>
