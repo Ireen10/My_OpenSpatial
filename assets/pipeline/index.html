@@ -263,9 +263,9 @@
         params: ["proj_mask_threshold：demo config 中为 0.1。", "box3d_pcd_threshold：demo config 中为 0.1；类默认值是 0.07。", "box_scale_factor：demo config 中为 0.9，用于收缩 oriented box 后再取点。", "mask_area_threshold：demo config 中为 0.005；类默认值是 0.02。", "MIN_POINTS_IN_BOX：代码常量 50。", "EPS：1e-4，用于避免投影除以接近 0 的 z。"]
       },
       localization: {
-        summary: "Localization 的核心是用分割模型把粗 mask/box prompt 精修成更可靠的物体 mask，并按质量分数继续过滤物体。",
-        flow: ["SAM2 路径会先从 coarse mask 计算 axis-aligned bbox，再把这些 boxes 作为 prompt 输入 SAM2。", "SAM2 使用 multimask_output=False，每个 box 只取一个预测 mask。", "预测结果先按 score 过滤，再按 mask 像素数量过滤；未通过的物体会从 obj_tags、3D boxes 等 update_keys 中同步删除。", "SAM3 路径会用 processor/model 产生 instance segmentation proposals，再用 coverage 与 precision 评估 proposal 和 coarse mask 的匹配程度。", "没有任何 mask 通过时，整行样本被丢弃。"],
-        params: ["SAM2 MIN_SCORE：0.6。", "SAM2 MIN_MASK_PIXELS：20。", "SAM3 post_process threshold：min_score；mask_threshold 固定 0.5。", "SAM3 会记录 coverage/precision 通过率，每 500 张图输出一次 keep/drop 统计。"]
+        summary: "Localization 的核心是把上一阶段得到的粗 mask/box 变成更可靠的分割 mask；SAM2 主要信任模型 score，SAM3 则因为 proposal score 不稳定，改用几何匹配指标过滤。",
+        flow: ["先从上一阶段的 coarse mask 计算 axis-aligned bounding box，作为分割模型的 box prompt。", "SAM2 路径：把这些 boxes 输入 SAM2，multimask_output=False，所以每个 box 只取一个预测 mask；然后要求模型 score >= 0.6，并且 mask 像素数 > 20。", "SAM3 路径：SAM3 是 DETR-style 模型，每张图会输出约 200 个 proposals；这些 proposals 不和输入 box 一一对应，所以代码会为每个输入 box 找“覆盖该 box 最多”的 proposal。", "对某个输入 box，先计算每个 proposal 与 box 区域的交集像素 roi_hits，然后选 coverage = roi_hits / box_area 最大的 proposal。", "选中的 proposal 还必须通过 precision 检查：precision = roi_hits / mask_pixels，也就是这个 proposal 有多少比例真正落在输入 box 内。coverage 低说明 mask 没覆盖住目标 box；precision 低说明 mask 大量漂到 box 外，可能分到墙、地面或别的物体。", "最终 SAM3 要同时满足 mask_pixels > 20、coverage >= 0.10、precision >= 0.40；否则该物体被丢弃。", "被丢弃的物体会通过 keep_indices 同步从 obj_tags、bboxes_3d_world_coords 等 update_keys 中删除；如果一行没有任何 mask 通过，整行样本被丢弃。"],
+        params: ["SAM2 score 阈值 MIN_SCORE：0.6。", "SAM2 / SAM3 最小 mask 像素数 MIN_MASK_PIXELS：20。", "SAM3 matching 阶段的宽松覆盖下限：coverage >= 0.05；低于这个值时认为该 box 没匹配到有效 proposal，返回空 mask。", "SAM3 最终覆盖阈值 MIN_COVERAGE：0.10，即选中的 proposal 至少覆盖输入 box 面积的 10%。", "SAM3 最终纯度阈值 MIN_PRECISION：0.40，即选中的 proposal 至少 40% 像素必须落在输入 box 内。", "SAM3 proposal 二值化阈值：mask > 0.5。", "SAM3 post_process_instance_segmentation 调用时 threshold=0.0，是为了保留所有 proposals 再做几何匹配，而不是直接用 SAM3 自身低且不稳定的分类分数。", "SAM3 每 500 张图统计一次 boxes_in、boxes_kept、dropped，用来观察 coverage/precision 门控的保留率。"]
       },
       fusion: {
         summary: "Scene Fusion 的核心是把 2D mask 对应的深度像素提升到 3D，并为每个物体保存清洗后的点云。",
