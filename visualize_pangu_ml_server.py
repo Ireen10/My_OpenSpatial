@@ -58,6 +58,8 @@ _ROOT_BUILD_LOCKS: Dict[str, threading.Lock] = {}
 class SampleFacts:
     is_3d_grounding: bool
     image_count: int
+    turn_count: int
+    is_mcq: bool
 
 
 @dataclass(frozen=True)
@@ -122,9 +124,13 @@ def discover_pangu_roots(data_dir: str) -> List[dict]:
 
 def _facts_from_sample(sample: dict) -> SampleFacts:
     n_img = len(extract_image_entries(sample))
+    turns = pangu_to_display_turns(sample)
+    all_q = "\n".join((t.get("question") or "") for t in turns)
     return SampleFacts(
         is_3d_grounding=is_3d_grounding_sample(sample),
         image_count=n_img,
+        turn_count=len(turns),
+        is_mcq="options:" in all_q.lower(),
     )
 
 
@@ -308,6 +314,8 @@ def _text_row_from_sample(cache: dict, index: int, sample: dict) -> dict:
         "turns": pangu_to_display_turns(sample),
         "can_3d_overlay": fact.is_3d_grounding,
         "image_count": fact.image_count,
+        "turn_count": fact.turn_count,
+        "is_mcq": fact.is_mcq,
     }
 
 
@@ -410,10 +418,18 @@ def _fact_matches(fact: SampleFacts, filter_kind: str) -> bool:
     fk = filter_kind.strip().lower()
     if fk == "3d_grounding":
         return fact.is_3d_grounding
+    if fk == "mcq":
+        return fact.is_mcq
+    if fk == "oe":
+        return not fact.is_mcq and not fact.is_3d_grounding
+    if fk == "turns_1":
+        return fact.turn_count == 1
+    if fk == "turns_2plus":
+        return fact.turn_count >= 2
     if fk == "single_image":
         return fact.image_count == 1
     if fk == "multi_image":
-        return fact.image_count > 1
+        return fact.image_count >= 2
     return True
 
 
@@ -656,10 +672,14 @@ HTML_TEMPLATE = """
   <div class="filters">
     <label>Filter
       <select id="filterKind" onchange="applyFilters()">
-        <option value="">All samples</option>
-        <option value="3d_grounding">3D grounding only</option>
-        <option value="single_image">Single image</option>
-        <option value="multi_image">Multi image</option>
+        <option value="">All</option>
+        <option value="turns_1">Single-turn</option>
+        <option value="turns_2plus">Multi-turn (2+)</option>
+        <option value="mcq">MCQ (has Options)</option>
+        <option value="oe">Open-ended (non-MCQ)</option>
+        <option value="3d_grounding">3D grounding</option>
+        <option value="single_image">1 image</option>
+        <option value="multi_image">2+ images</option>
       </select>
     </label>
   </div>
@@ -680,6 +700,7 @@ HTML_TEMPLATE = """
 let currentRoot = '', currentPage = 0, totalRows = 0, filteredTotal = 0;
 let fetchSeq = 0, imageSeq = 0;
 const pageSize = 8;
+const imageCache = new Map();
 
 function filterParams() {
   const p = new URLSearchParams();
@@ -691,6 +712,7 @@ function filterParams() {
 function applyFilters() {
   if (!currentRoot) return;
   currentPage = 0;
+  imageCache.clear();
   fetchPage();
 }
 
@@ -698,8 +720,14 @@ function loadRoot() {
   currentRoot = document.getElementById('rootSelect').value;
   currentPage = 0;
   document.getElementById('filterKind').value = '';
+  imageCache.clear();
   if (!currentRoot) return;
   fetchPage();
+}
+
+function imageCacheKey(page) {
+  const fk = document.getElementById('filterKind')?.value || '';
+  return `${currentRoot}|p${page}|${fk}`;
 }
 
 function fetchPage() {
@@ -719,7 +747,8 @@ function fetchPage() {
       filteredTotal = data.filtered_total ?? data.total;
       renderRows(data.rows);
       updateNav();
-      loadPageImages(data.rows, seq);
+      loadPageImagesBatched(data.rows, currentPage, seq);
+      prefetchNextPage(seq);
     })
     .catch(() => {
       if (seq !== fetchSeq) return;
@@ -780,29 +809,68 @@ function setCardImages(rowIndex, srcList) {
     `<img src="${src}" onclick="openLightbox(this.src)" alt="">`).join('');
 }
 
-function loadPageImages(rows, seq) {
+function applyImageBatch(rows, byIndex) {
+  (rows || []).forEach(r => {
+    if (!(r.image_count > 0)) return;
+    const key = String(r.row_index);
+    const imgs = (byIndex && (byIndex[key] || byIndex[r.row_index])) || [];
+    setCardImages(r.row_index, imgs);
+  });
+}
+
+function fetchImageBatch(rows, page, seq, {storeOnly=false} = {}) {
   const withImages = (rows || []).filter(r => (r.image_count || 0) > 0);
-  withImages.forEach(r => {
-    const q = new URLSearchParams({
-      root: currentRoot,
-      indices: String(r.row_index),
-      overlay_3d: r.can_3d_overlay ? '1' : '0',
-    });
-    fetch('/api/images?' + q.toString())
-      .then(res => res.json())
-      .then(data => {
-        if (seq !== imageSeq) return;
-        const key = String(r.row_index);
-        const imgs = (data.by_index && (data.by_index[key] || data.by_index[r.row_index])) || [];
-        setCardImages(r.row_index, imgs);
-      })
-      .catch(() => {
-        if (seq !== imageSeq) return;
-        const card = cardForRow(r.row_index);
-        const row = card?.querySelector('.images-row');
+  if (!withImages.length) return Promise.resolve();
+  const ck = imageCacheKey(page);
+  const cached = imageCache.get(ck);
+  if (cached) {
+    if (!storeOnly) applyImageBatch(withImages, cached);
+    return Promise.resolve();
+  }
+  const indices = withImages.map(r => r.row_index).join(',');
+  const q = new URLSearchParams({
+    root: currentRoot,
+    indices,
+    overlay_3d: '1',
+  });
+  return fetch('/api/images?' + q.toString())
+    .then(res => res.json())
+    .then(data => {
+      if (seq !== imageSeq) return;
+      const byIndex = data.by_index || {};
+      imageCache.set(ck, byIndex);
+      if (!storeOnly) applyImageBatch(withImages, byIndex);
+    })
+    .catch(() => {
+      if (seq !== imageSeq || storeOnly) return;
+      withImages.forEach(r => {
+        const row = cardForRow(r.row_index)?.querySelector('.images-row');
         if (row) row.innerHTML = '<div class="img-placeholder">Image load failed</div>';
       });
-  });
+    });
+}
+
+function loadPageImagesBatched(rows, page, seq) {
+  fetchImageBatch(rows, page, seq, {storeOnly: false});
+}
+
+function prefetchNextPage(seq) {
+  const maxPage = Math.max(0, Math.ceil(filteredTotal / pageSize) - 1);
+  const nextPage = currentPage + 1;
+  if (nextPage > maxPage) return;
+  const ck = imageCacheKey(nextPage);
+  if (imageCache.has(ck)) return;
+  const q = filterParams();
+  q.set('root', currentRoot);
+  q.set('page', String(nextPage));
+  q.set('page_size', String(pageSize));
+  fetch('/api/data?' + q.toString())
+    .then(r => r.json())
+    .then(data => {
+      if (seq !== fetchSeq) return;
+      fetchImageBatch(data.rows || [], nextPage, seq, {storeOnly: true});
+    })
+    .catch(() => {});
 }
 
 function cardHtml(r) {
@@ -821,7 +889,7 @@ function cardHtml(r) {
     <div class="card-header">
       <span class="tag tag-id">${escapeHtml(r.sample_id || '')}</span>
       ${tag3d}
-      <span style="font-size:12px;color:#666;">images: ${r.image_count || 0}</span>
+      <span style="font-size:12px;color:#666;">turns: ${r.turn_count || 0} · images: ${r.image_count || 0}${r.is_mcq ? ' · MCQ' : ''}</span>
       <button class="btn-raw" onclick="toggleRaw(${r.row_index}, this)">Raw JSON</button>
     </div>
     <div class="card-body">

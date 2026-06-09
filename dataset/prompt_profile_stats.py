@@ -20,6 +20,8 @@ _LEGACY_MODE_ALIASES = {
     "default": "direct",
     "letter_only": "direct",
 }
+# Raw profile keys that alias to direct; template_id suffix wins when present.
+_LEGACY_ALIAS_KEYS = frozenset(_LEGACY_MODE_ALIASES.keys())
 
 
 def normalize_question_type_enum(raw: str) -> str:
@@ -69,12 +71,21 @@ def prompt_profile_stat_key(turn: Dict[str, Any]) -> str:
     )
 
     mode: Optional[str] = None
+    template_id = str(ps.get("template_id") or "")
+    mode_from_tid = _mode_from_template_id(template_id)
+
     cm = ps.get("constraint_mode")
     if isinstance(cm, str) and cm.strip():
-        mode = _normalize_mode(cm)
+        raw_cm = cm.strip()
+        # Legacy answer profiles (default / letter_only) do not encode the sampled
+        # constraint mode; prefer the template_id suffix when available.
+        if raw_cm in _LEGACY_ALIAS_KEYS and mode_from_tid:
+            mode = mode_from_tid
+        else:
+            mode = _normalize_mode(raw_cm)
 
     if mode is None:
-        mode = _mode_from_template_id(str(ps.get("template_id") or ""))
+        mode = mode_from_tid
 
     if mode is None:
         it = (ps.get("instruction_type") or "").strip()

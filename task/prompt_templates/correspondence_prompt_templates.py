@@ -81,7 +81,7 @@ from ..annotation.core.structured_prompt_template import AnswerInstructionProfil
 from .register_structured import (
     EMPTY_QUESTION_INSTRUCTION,
     MCQ_ANSWER_WITH_OPTION_TEXT_INSTRUCTIONS,
-    register_mcq,
+    register_mcq_mode,
     register_oe,
 )
 
@@ -119,11 +119,11 @@ def _register_point2point_family(
         ("sentence", correspondence_mcq_sentence_instructions, correspondence_mcq_sentence_answers),
         ("free", EMPTY_QUESTION_INSTRUCTION, correspondence_mcq_sentence_answers),
     ):
-        register_mcq(
+        register_mcq_mode(
             f"{base}.mcq.{mode}",
+            mode,
             mcq_stems,
             answers=answers,
-            letter_only=False,
             introduction=correspondence_introduction,
             question_instruction=qinstr,
         )
