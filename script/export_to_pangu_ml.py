@@ -10,6 +10,9 @@ Output (Pangu ML, see HW_pangu_ml/docs/pangu_ml_data_schema.md):
   {output_root}/jsonl/data_{shard:06d}.jsonl
   {output_root}/images/data_{shard:06d}.tar
 
+Sharding: 1:1 with upstream (metadata_{N} -> data_{N}). Use ``--num-workers``
+for shard-level parallel conversion (ProcessPoolExecutor).
+
 Rules (project-specific, stricter than schema 4.2):
   - All images (with every mark overlay) appear only in the first user turn, before text.
   - Later user turns contain text only.
@@ -26,11 +29,13 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import random
 import re
 import sys
 import tarfile
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -160,16 +165,22 @@ def parse_args() -> argparse.Namespace:
         help="Output root; creates jsonl/ and images/ subdirectories.",
     )
     parser.add_argument(
-        "--shard-size",
+        "--num-workers",
         type=int,
-        default=8192,
-        help="Samples per output shard (should be a multiple of 16).",
+        default=None,
+        help="Shard-level parallel workers (default: min(shard_count, cpu_count)).",
     )
     parser.add_argument(
         "--max-samples",
         type=int,
         default=None,
-        help="Optional cap for quick validation runs.",
+        help="Optional cap for quick validation runs (forces sequential).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="RNG seed for mark phrase randomization (per-shard: seed + shard_index).",
     )
     parser.add_argument(
         "--no-progress",
@@ -480,6 +491,29 @@ def build_pangu_sample(
     return sample, tar_members, skip_reason
 
 
+def shard_index_from_jsonl(jf_path: Path) -> int:
+    return int(jf_path.stem.rsplit("_", 1)[-1])
+
+
+@dataclass
+class ShardJob:
+    shard_index: int
+    jsonl_path: str
+    tar_path: Optional[str]
+    export_dir: str
+    output_root: str
+    global_index_start: int
+    max_converted: Optional[int] = None
+    seed: Optional[int] = None
+
+
+def _merge_stats(into: ConvertStats, other: ConvertStats) -> None:
+    into.total_seen += other.total_seen
+    into.converted += other.converted
+    into.skipped += other.skipped
+    into.skip_reasons.update(other.skip_reasons)
+
+
 def write_shard(
     shard_index: int,
     samples: List[Dict[str, Any]],
@@ -504,12 +538,105 @@ def write_shard(
                 tar.addfile(tarinfo=info, fileobj=io.BytesIO(blob))
 
 
+def convert_one_shard(job: ShardJob) -> ConvertStats:
+    """Convert a single upstream shard to one Pangu ML shard (1:1 id)."""
+    stats = ConvertStats()
+    if job.seed is not None:
+        random.seed(job.seed + job.shard_index)
+
+    jf_path = Path(job.jsonl_path)
+    tar_path = Path(job.tar_path) if job.tar_path else None
+    output_root = Path(job.output_root)
+    bundle_root = job.export_dir
+    shard_tar = str(tar_path) if tar_path and tar_path.is_file() else None
+
+    buffer_samples: List[Dict[str, Any]] = []
+    buffer_members: List[List[Tuple[str, bytes]]] = []
+    tar_cache: dict = {}
+    line_index = 0
+
+    with jf_path.open("r", encoding="utf-8") as jf:
+        for line in jf:
+            if job.max_converted is not None and stats.converted >= job.max_converted:
+                break
+
+            line = line.strip()
+            if not line:
+                continue
+
+            stats.total_seen += 1
+            record = json.loads(line)
+            record["_bundle_root"] = bundle_root
+            if shard_tar:
+                record["_shard_tar"] = shard_tar
+
+            global_index = job.global_index_start + line_index
+            line_index += 1
+
+            sample, members, partial = build_pangu_sample(
+                record, global_index, tar_cache,
+            )
+
+            if sample is None:
+                stats.skipped += 1
+                stats.skip_reasons[partial or "unknown"] += 1
+                continue
+
+            stats.converted += 1
+            if partial:
+                stats.skip_reasons[partial] += 1
+            buffer_samples.append(sample)
+            buffer_members.append(members)
+
+    if "tar" in tar_cache:
+        tar_cache["tar"].close()
+
+    if buffer_samples:
+        write_shard(job.shard_index, buffer_samples, buffer_members, output_root)
+
+    return stats
+
+
+def _build_shard_jobs(
+    pairs: List[Tuple[Path, Optional[Path]]],
+    export_dir: Path,
+    output_root: Path,
+    *,
+    seed: Optional[int],
+) -> List[ShardJob]:
+    jobs: List[ShardJob] = []
+    global_index = 0
+
+    for jf_path, tar_path in pairs:
+        shard_idx = shard_index_from_jsonl(jf_path)
+        n_lines = 0
+        with jf_path.open("r", encoding="utf-8") as jf:
+            for line in jf:
+                if line.strip():
+                    n_lines += 1
+
+        jobs.append(ShardJob(
+            shard_index=shard_idx,
+            jsonl_path=str(jf_path),
+            tar_path=str(tar_path) if tar_path else None,
+            export_dir=str(export_dir),
+            output_root=str(output_root),
+            global_index_start=global_index,
+            max_converted=None,
+            seed=seed,
+        ))
+        global_index += n_lines
+
+    return jobs
+
+
 def convert_export(
     export_dir: Path,
     output_root: Path,
     *,
-    shard_size: int = 8192,
+    num_workers: Optional[int] = None,
     max_samples: Optional[int] = None,
+    seed: Optional[int] = None,
     show_progress: bool = True,
 ) -> ConvertStats:
     stats = ConvertStats()
@@ -517,69 +644,49 @@ def convert_export(
     if not pairs:
         raise FileNotFoundError(f"No upstream shards under {export_dir / 'jsonl'}")
 
-    buffer_samples: List[Dict[str, Any]] = []
-    buffer_members: List[List[Tuple[str, bytes]]] = []
-    out_shard_idx = 0
-    tar_cache: dict = {}
-    global_index = 0
+    jobs = _build_shard_jobs(pairs, export_dir, output_root, seed=seed)
+    if not jobs:
+        return stats
 
-    def flush_buffer() -> None:
-        nonlocal out_shard_idx
-        if not buffer_samples:
-            return
-        write_shard(out_shard_idx, buffer_samples, buffer_members, output_root)
-        out_shard_idx += 1
-        buffer_samples.clear()
-        buffer_members.clear()
+    if max_samples is not None:
+        workers = 1
+    else:
+        cpu = os.cpu_count() or 1
+        workers = num_workers if num_workers is not None else min(len(jobs), cpu)
+        workers = max(1, min(workers, len(jobs)))
 
-    iterator = pairs
+    print(f">>> Converting {len(jobs)} shard(s) with {workers} worker(s) (1:1 shard id)")
+
+    if workers == 1:
+        remaining = max_samples
+        job_iter: Any = jobs
+        if tqdm is not None and show_progress:
+            job_iter = tqdm(jobs, desc="shards", unit="shard")
+        for job in job_iter:
+            if remaining is not None and remaining <= 0:
+                break
+            job.max_converted = remaining
+            shard_stats = convert_one_shard(job)
+            _merge_stats(stats, shard_stats)
+            if remaining is not None:
+                remaining -= shard_stats.converted
+        return stats
+
     if tqdm is not None and show_progress:
-        iterator = tqdm(pairs, desc="input shards", unit="shard")
+        pbar = tqdm(total=len(jobs), desc="shards", unit="shard")
+    else:
+        pbar = None
 
-    for jf_path, tar_path in iterator:
-        bundle_root = str(export_dir)
-        shard_tar = str(tar_path) if tar_path and tar_path.is_file() else None
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(convert_one_shard, job): job for job in jobs}
+        for fut in as_completed(futures):
+            _merge_stats(stats, fut.result())
+            if pbar is not None:
+                pbar.update(1)
 
-        with jf_path.open("r", encoding="utf-8") as jf:
-            for line in jf:
-                if max_samples is not None and stats.converted >= max_samples:
-                    flush_buffer()
-                    if "tar" in tar_cache:
-                        tar_cache["tar"].close()
-                    return stats
+    if pbar is not None:
+        pbar.close()
 
-                line = line.strip()
-                if not line:
-                    continue
-
-                stats.total_seen += 1
-                record = json.loads(line)
-                record["_bundle_root"] = bundle_root
-                if shard_tar:
-                    record["_shard_tar"] = shard_tar
-
-                sample, members, partial = build_pangu_sample(
-                    record, global_index, tar_cache,
-                )
-                global_index += 1
-
-                if sample is None:
-                    stats.skipped += 1
-                    stats.skip_reasons[partial or "unknown"] += 1
-                    continue
-
-                stats.converted += 1
-                if partial:
-                    stats.skip_reasons[partial] += 1
-                buffer_samples.append(sample)
-                buffer_members.append(members)
-
-                if len(buffer_samples) >= shard_size:
-                    flush_buffer()
-
-    flush_buffer()
-    if "tar" in tar_cache:
-        tar_cache["tar"].close()
     return stats
 
 
@@ -591,11 +698,15 @@ def main() -> None:
     if not export_dir.is_dir():
         raise SystemExit(f"export-dir not found: {export_dir}")
 
+    if args.max_samples is not None and args.num_workers not in (None, 1):
+        print(">>> max_samples set; running sequentially (num_workers=1)")
+
     stats = convert_export(
         export_dir,
         output_root,
-        shard_size=args.shard_size,
+        num_workers=args.num_workers,
         max_samples=args.max_samples,
+        seed=args.seed,
         show_progress=not args.no_progress,
     )
 
