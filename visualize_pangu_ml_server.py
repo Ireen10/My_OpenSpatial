@@ -25,6 +25,7 @@ import os
 import socket
 import tarfile
 import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,12 @@ _WORKERS = {
     "read": 16,
     "image": 32,
 }
+_SETTINGS = {
+    "image_cache_items": 4096,
+    "tar_cache_handles": 128,
+    "prefetch_pages": 4,
+    "page_size": 8,
+}
 
 
 def _log(msg: str) -> None:
@@ -52,6 +59,10 @@ def _log(msg: str) -> None:
 _ROOT_CACHE: Dict[str, dict] = {}
 _ROOT_LOCK = threading.Lock()
 _ROOT_BUILD_LOCKS: Dict[str, threading.Lock] = {}
+_IMAGE_RESULT_CACHE: "OrderedDict[Tuple[str, float, int, bool], List[str]]" = OrderedDict()
+_IMAGE_CACHE_LOCK = threading.Lock()
+_TAR_HANDLE_CACHE: "OrderedDict[str, dict]" = OrderedDict()
+_TAR_CACHE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -466,8 +477,68 @@ def _page_indices(
     return matches[start : start + page_size], len(matches)
 
 
-def load_image_bytes(relative_path: str, tar_path: Path, tar_cache: dict) -> Optional[bytes]:
-    ref = str(relative_path).replace("\\", "/")
+def _close_tar_entry(entry: dict) -> None:
+    tf = entry.get("tar")
+    if tf is not None:
+        try:
+            tf.close()
+        except OSError:
+            pass
+
+
+def _get_shared_tar_entry(tar_path: Path) -> Optional[dict]:
+    if _SETTINGS["tar_cache_handles"] <= 0:
+        return None
+
+    tar_key = str(tar_path.resolve())
+    try:
+        mtime = tar_path.stat().st_mtime
+    except OSError:
+        return None
+
+    with _TAR_CACHE_LOCK:
+        entry = _TAR_HANDLE_CACHE.get(tar_key)
+        if entry is not None and entry.get("mtime") == mtime:
+            _TAR_HANDLE_CACHE.move_to_end(tar_key)
+            entry["lock"].acquire()
+            return entry
+
+        if entry is not None:
+            entry["lock"].acquire()
+            try:
+                _close_tar_entry(entry)
+            finally:
+                entry["lock"].release()
+            _TAR_HANDLE_CACHE.pop(tar_key, None)
+
+        try:
+            entry = {
+                "mtime": mtime,
+                "tar": tarfile.open(tar_path, "r"),
+                "lock": threading.Lock(),
+            }
+        except (tarfile.TarError, OSError):
+            return None
+
+        _TAR_HANDLE_CACHE[tar_key] = entry
+        _TAR_HANDLE_CACHE.move_to_end(tar_key)
+        while len(_TAR_HANDLE_CACHE) > _SETTINGS["tar_cache_handles"]:
+            old_key, old_entry = _TAR_HANDLE_CACHE.popitem(last=False)
+            if old_entry["lock"].acquire(blocking=False):
+                try:
+                    _close_tar_entry(old_entry)
+                finally:
+                    old_entry["lock"].release()
+            else:
+                # Keep in-use archives alive; the cache may temporarily exceed the limit.
+                _TAR_HANDLE_CACHE[old_key] = old_entry
+                _TAR_HANDLE_CACHE.move_to_end(old_key)
+                break
+        entry["lock"].acquire()
+        return entry
+
+
+def _load_image_bytes_from_tar(ref: str, tar_path: Path, tar_cache: dict) -> Optional[bytes]:
     tar_key = str(tar_path.resolve())
     try:
         if tar_cache.get("shard_tar") != tar_key:
@@ -484,6 +555,25 @@ def load_image_bytes(relative_path: str, tar_path: Path, tar_cache: dict) -> Opt
         return f.read()
     except (KeyError, tarfile.TarError, OSError):
         return None
+
+
+def load_image_bytes(relative_path: str, tar_path: Path, tar_cache: dict) -> Optional[bytes]:
+    ref = str(relative_path).replace("\\", "/")
+    shared_entry = _get_shared_tar_entry(tar_path)
+    if shared_entry is None:
+        return _load_image_bytes_from_tar(ref, tar_path, tar_cache)
+
+    try:
+        tf = shared_entry["tar"]
+        member = tf.getmember(ref)
+        f = tf.extractfile(member)
+        if f is None:
+            return None
+        return f.read()
+    except (KeyError, tarfile.TarError, OSError):
+        return None
+    finally:
+        shared_entry["lock"].release()
 
 
 def load_pangu_images(
@@ -554,6 +644,28 @@ def _close_tar_cache(tar_cache: dict) -> None:
     tar_cache.clear()
 
 
+def _image_cache_get(key: Tuple[str, float, int, bool]) -> Optional[List[str]]:
+    """Return cached rendered data URIs, refreshing LRU order on hit."""
+    if _SETTINGS["image_cache_items"] <= 0:
+        return None
+    with _IMAGE_CACHE_LOCK:
+        cached = _IMAGE_RESULT_CACHE.get(key)
+        if cached is None:
+            return None
+        _IMAGE_RESULT_CACHE.move_to_end(key)
+        return list(cached)
+
+
+def _image_cache_put(key: Tuple[str, float, int, bool], value: List[str]) -> None:
+    if _SETTINGS["image_cache_items"] <= 0:
+        return
+    with _IMAGE_CACHE_LOCK:
+        _IMAGE_RESULT_CACHE[key] = list(value)
+        _IMAGE_RESULT_CACHE.move_to_end(key)
+        while len(_IMAGE_RESULT_CACHE) > _SETTINGS["image_cache_items"]:
+            _IMAGE_RESULT_CACHE.popitem(last=False)
+
+
 @dataclass(frozen=True)
 class _ImageRenderJob:
     root_path: str
@@ -563,6 +675,11 @@ class _ImageRenderJob:
 
 def _render_images_for_index(job: _ImageRenderJob) -> Tuple[int, List[str]]:
     cache = _get_root_cache(job.root_path)
+    cache_key = (job.root_path, cache["mtime"], job.index, job.overlay_3d)
+    cached = _image_cache_get(cache_key)
+    if cached is not None:
+        return job.index, cached
+
     sample = read_sample_at(cache, job.index)
     if sample is None:
         return job.index, []
@@ -580,7 +697,9 @@ def _render_images_for_index(job: _ImageRenderJob) -> Tuple[int, List[str]]:
             overlay_3d=job.overlay_3d,
             tar_cache=tar_cache,
         )
-        return job.index, [ann_viz.pil_to_base64(img) for img in images]
+        rendered = [ann_viz.pil_to_base64(img) for img in images]
+        _image_cache_put(cache_key, rendered)
+        return job.index, rendered
     finally:
         _close_tar_cache(tar_cache)
 
@@ -699,7 +818,8 @@ HTML_TEMPLATE = """
 <script>
 let currentRoot = '', currentPage = 0, totalRows = 0, filteredTotal = 0;
 let fetchSeq = 0, imageSeq = 0;
-const pageSize = 8;
+const pageSize = {{ page_size }};
+const prefetchPages = {{ prefetch_pages }};
 const imageCache = new Map();
 
 function filterParams() {
@@ -725,9 +845,12 @@ function loadRoot() {
   fetchPage();
 }
 
-function imageCacheKey(page) {
-  const fk = document.getElementById('filterKind')?.value || '';
-  return `${currentRoot}|p${page}|${fk}`;
+function currentFilterKind() {
+  return document.getElementById('filterKind')?.value || '';
+}
+
+function imageCacheKey(page, root = currentRoot, filterKind = currentFilterKind()) {
+  return `${root}|p${page}|${filterKind}|overlay1`;
 }
 
 function fetchPage() {
@@ -748,7 +871,7 @@ function fetchPage() {
       renderRows(data.rows);
       updateNav();
       loadPageImagesBatched(data.rows, currentPage, seq);
-      prefetchNextPage(seq);
+      prefetchNearbyPages(seq);
     })
     .catch(() => {
       if (seq !== fetchSeq) return;
@@ -818,10 +941,10 @@ function applyImageBatch(rows, byIndex) {
   });
 }
 
-function fetchImageBatch(rows, page, seq, {storeOnly=false} = {}) {
+function fetchImageBatch(rows, page, seq, {storeOnly=false, root=currentRoot, filterKind=currentFilterKind()} = {}) {
   const withImages = (rows || []).filter(r => (r.image_count || 0) > 0);
   if (!withImages.length) return Promise.resolve();
-  const ck = imageCacheKey(page);
+  const ck = imageCacheKey(page, root, filterKind);
   const cached = imageCache.get(ck);
   if (cached) {
     if (!storeOnly) applyImageBatch(withImages, cached);
@@ -829,14 +952,16 @@ function fetchImageBatch(rows, page, seq, {storeOnly=false} = {}) {
   }
   const indices = withImages.map(r => r.row_index).join(',');
   const q = new URLSearchParams({
-    root: currentRoot,
+    root,
     indices,
     overlay_3d: '1',
   });
   return fetch('/api/images?' + q.toString())
     .then(res => res.json())
     .then(data => {
-      if (seq !== imageSeq) return;
+      const stillSameView = root === currentRoot && filterKind === currentFilterKind();
+      if (!storeOnly && (seq !== imageSeq || !stillSameView)) return;
+      if (storeOnly && !stillSameView) return;
       const byIndex = data.by_index || {};
       imageCache.set(ck, byIndex);
       if (!storeOnly) applyImageBatch(withImages, byIndex);
@@ -854,23 +979,33 @@ function loadPageImagesBatched(rows, page, seq) {
   fetchImageBatch(rows, page, seq, {storeOnly: false});
 }
 
-function prefetchNextPage(seq) {
-  const maxPage = Math.max(0, Math.ceil(filteredTotal / pageSize) - 1);
-  const nextPage = currentPage + 1;
-  if (nextPage > maxPage) return;
-  const ck = imageCacheKey(nextPage);
+function prefetchPage(page, seq, root, filterKind) {
+  const ck = imageCacheKey(page, root, filterKind);
   if (imageCache.has(ck)) return;
-  const q = filterParams();
-  q.set('root', currentRoot);
-  q.set('page', String(nextPage));
+  const q = new URLSearchParams();
+  if (filterKind) q.set('filter_kind', filterKind);
+  q.set('root', root);
+  q.set('page', String(page));
   q.set('page_size', String(pageSize));
   fetch('/api/data?' + q.toString())
     .then(r => r.json())
     .then(data => {
-      if (seq !== fetchSeq) return;
-      fetchImageBatch(data.rows || [], nextPage, seq, {storeOnly: true});
+      if (root !== currentRoot || filterKind !== currentFilterKind()) return;
+      fetchImageBatch(data.rows || [], page, seq, {storeOnly: true, root, filterKind});
     })
     .catch(() => {});
+}
+
+function prefetchNearbyPages(seq) {
+  const maxPage = Math.max(0, Math.ceil(filteredTotal / pageSize) - 1);
+  const root = currentRoot;
+  const filterKind = currentFilterKind();
+  for (let d = 1; d <= prefetchPages; d++) {
+    const nextPage = currentPage + d;
+    if (nextPage <= maxPage) prefetchPage(nextPage, seq, root, filterKind);
+  }
+  const prevPage = currentPage - 1;
+  if (prevPage >= 0) prefetchPage(prevPage, seq, root, filterKind);
 }
 
 function cardHtml(r) {
@@ -968,7 +1103,13 @@ def _log_request() -> None:
 def index():
     roots = discover_pangu_roots(DATA_DIR)
     selected = request.args.get("root", "")
-    return render_template_string(HTML_TEMPLATE, roots=roots, selected=selected)
+    return render_template_string(
+        HTML_TEMPLATE,
+        roots=roots,
+        selected=selected,
+        page_size=_SETTINGS["page_size"],
+        prefetch_pages=_SETTINGS["prefetch_pages"],
+    )
 
 
 @app.route("/api/data")
@@ -1070,13 +1211,43 @@ if __name__ == "__main__":
         "--image-workers",
         type=int,
         default=None,
-        help="Parallel workers for image decode per request (default: min(48, CPU)).",
+        help="Parallel workers for image decode per request (default: min(96, CPU)).",
     )
     parser.add_argument(
         "--read-workers",
         type=int,
         default=None,
-        help="Parallel workers for JSONL text reads per page (default: min(32, CPU)).",
+        help="Parallel workers for JSONL text reads per page (default: min(64, CPU)).",
+    )
+    parser.add_argument(
+        "--page-size",
+        type=int,
+        default=8,
+        help="Rows per browser page (default: 8).",
+    )
+    parser.add_argument(
+        "--prefetch-pages",
+        type=int,
+        default=4,
+        help="Number of following pages whose images are prefetched in the browser (default: 4).",
+    )
+    parser.add_argument(
+        "--image-cache-items",
+        type=int,
+        default=4096,
+        help=(
+            "Server-side LRU cache size for rendered row image results. "
+            "Use 0 to disable (default: 4096 rows)."
+        ),
+    )
+    parser.add_argument(
+        "--tar-cache-handles",
+        type=int,
+        default=128,
+        help=(
+            "Number of tar archives kept open to avoid repeated member scans. "
+            "Use 0 to disable (default: 128)."
+        ),
     )
     parser.add_argument(
         "--warm-index",
@@ -1087,14 +1258,24 @@ if __name__ == "__main__":
 
     _cpu = os.cpu_count() or 32
     _WORKERS["index"] = args.index_workers if args.index_workers is not None else _cpu
-    _WORKERS["image"] = args.image_workers if args.image_workers is not None else min(_cpu, 48)
-    _WORKERS["read"] = args.read_workers if args.read_workers is not None else min(_cpu, 32)
+    _WORKERS["image"] = args.image_workers if args.image_workers is not None else min(_cpu, 96)
+    _WORKERS["read"] = args.read_workers if args.read_workers is not None else min(_cpu, 64)
+    _SETTINGS["page_size"] = max(1, args.page_size)
+    _SETTINGS["prefetch_pages"] = max(0, args.prefetch_pages)
+    _SETTINGS["image_cache_items"] = max(0, args.image_cache_items)
+    _SETTINGS["tar_cache_handles"] = max(0, args.tar_cache_handles)
 
     DATA_DIR = args.data_dir
     _log("Pangu ML visualizer starting ...")
     roots = discover_pangu_roots(DATA_DIR)
     _log(f"Workers: index={_WORKERS['index']}, read={_WORKERS['read']}, "
          f"image={_WORKERS['image']}")
+    _log(
+        f"Page/cache: page_size={_SETTINGS['page_size']}, "
+        f"prefetch_pages={_SETTINGS['prefetch_pages']}, "
+        f"image_cache_items={_SETTINGS['image_cache_items']}, "
+        f"tar_cache_handles={_SETTINGS['tar_cache_handles']}"
+    )
     if args.warm_index:
         for r in roots:
             _log(f"Warm-index: {r['path']}")
