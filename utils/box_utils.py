@@ -94,6 +94,51 @@ def compute_box_3d_corners(center, size, rotation, euler_order='zxy'):
     return corners
 
 
+def rotation_matrix_from_box_euler(rotation, euler_order=EULER_GROUNDING_ORDER):
+    """3x3 rotation matrix for a 9-param box's euler angles."""
+    return SciRotation.from_euler(euler_order, list(rotation), degrees=False).as_matrix()
+
+
+def shrunk_oriented_box_geometry(box_params, scale_factor=1.0, euler_order=EULER_GROUNDING_ORDER):
+    """Center, extent, and rotation for a scaled oriented box from 9 params."""
+    center = np.asarray(box_params[:3], dtype=np.float64)
+    extent = np.asarray(box_params[3:6], dtype=np.float64) * float(scale_factor)
+    rotation = rotation_matrix_from_box_euler(box_params[6:9], euler_order)
+    return center, extent, rotation
+
+
+def oriented_box_volume(extent):
+    """Volume of an oriented box given axis lengths (xl, yl, zl)."""
+    extent = np.asarray(extent, dtype=np.float64)
+    return float(np.prod(np.maximum(extent, 0.0)))
+
+
+def points_inside_oriented_box(points, center, extent, rotation, eps=1e-6):
+    """Boolean mask of N points inside an oriented box (row-vector convention)."""
+    points = np.asarray(points, dtype=np.float64)
+    center = np.asarray(center, dtype=np.float64)
+    extent = np.asarray(extent, dtype=np.float64)
+    rotation = np.asarray(rotation, dtype=np.float64)
+    local = (points - center) @ rotation
+    half = extent * 0.5
+    return np.all(np.abs(local) <= half + eps, axis=1)
+
+
+def obb_volume_from_points(points, min_points=4):
+    """PCA-oriented bounding box volume for Nx3 points (np.cov + eigh)."""
+    points = np.asarray(points, dtype=np.float64)
+    if points.shape[0] < min_points:
+        return 0.0
+    centered = points - points.mean(axis=0)
+    cov = np.cov(centered, rowvar=False)
+    if cov.ndim == 0 or not np.all(np.isfinite(cov)):
+        return 0.0
+    _, axes = np.linalg.eigh(cov)
+    local = centered @ axes
+    extent = local.max(axis=0) - local.min(axis=0)
+    return oriented_box_volume(extent)
+
+
 def compute_box_3d_corners_from_params(box_params, euler_order='zxy'):
     """Compute 8 corners from a 9-value box parameter list.
 

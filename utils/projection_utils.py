@@ -70,11 +70,12 @@ def backproject_depth_to_3d(depth, img_dim, intrinsic, pose=None):
         np.ndarray of shape (H*W, 3).
     """
     w, h = img_dim
-    xmap = np.tile(np.arange(w), (h, 1))
-    ymap = np.tile(np.arange(h).reshape(-1, 1), (1, w))
+    k = np.asarray(intrinsic, dtype=np.float64)
+    u, v = np.meshgrid(np.arange(w, dtype=np.float64), np.arange(h, dtype=np.float64))
+    depth = np.asarray(depth, dtype=np.float64)
 
-    pts0 = (xmap - intrinsic[0][2]) * depth / intrinsic[0][0]
-    pts1 = (ymap - intrinsic[1][2]) * depth / intrinsic[1][1]
+    pts0 = (u - k[0, 2]) * depth / k[0, 0]
+    pts1 = (v - k[1, 2]) * depth / k[1, 1]
 
     pts_cam = np.stack([pts0, pts1, depth], axis=-1)  # (H, W, 3)
 

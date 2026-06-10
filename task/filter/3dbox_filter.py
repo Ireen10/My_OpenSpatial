@@ -1,16 +1,21 @@
-import numpy as np
-from PIL import Image
-import cv2
-import open3d as o3d
-from scipy.spatial.transform import Rotation as R
-from shapely.geometry import Polygon
-from shapely.ops import unary_union
 import os
 
-from utils.box_utils import compute_box_3d_corners
-from utils.projection_utils import backproject_depth_to_3d
-from utils.image_utils import load_depth_map
+import cv2
+import numpy as np
+from PIL import Image
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+
 from task.base_task import BaseTask
+from utils.box_utils import (
+    compute_box_3d_corners_from_params,
+    obb_volume_from_points,
+    oriented_box_volume,
+    points_inside_oriented_box,
+    shrunk_oriented_box_geometry,
+)
+from utils.image_utils import load_depth_map
+from utils.projection_utils import backproject_depth_to_3d
 
 
 class ThreeDBoxFilter(BaseTask):
@@ -37,7 +42,7 @@ class ThreeDBoxFilter(BaseTask):
         Returns:
             np.ndarray of shape (8, 3).
         """
-        return compute_box_3d_corners(np.array(box[:3]), np.array(box[3:6]), box[6:])
+        return compute_box_3d_corners_from_params(box)
 
     def _is_box_valid_2d(self, corners, extrinsic_w2c, intrinsic, img_dim):
         """Check if a 3D box projects sufficiently onto the image plane.
@@ -82,41 +87,29 @@ class ThreeDBoxFilter(BaseTask):
             return False
         return int(canvas.sum()) / union_area >= self.proj_mask_threshold
 
-    def _is_box_valid_3d(self, scene_pcd, box_params, img_dim):
+    def _is_box_valid_3d(self, points_3d, box_params, img_dim):
         """Check if a 3D box contains enough scene geometry.
 
         Builds an oriented bounding box (slightly shrunk by box_scale_factor),
-        finds points inside, and validates via volume ratio and mask area.
+        finds points inside, and validates via PCA-OBB volume ratio and mask area.
 
         Returns:
             (True, mask) if valid, (False, None) otherwise.
         """
-        box = o3d.geometry.OrientedBoundingBox()
-        box.center = box_params[:3]
-        s = self.box_scale_factor
-        box.extent = [box_params[3] * s, box_params[4] * s, box_params[5] * s]
-        box.R = R.from_euler('zxy', list(box_params[6:]), degrees=False).as_matrix()
-
-        inside_idx = box.get_point_indices_within_bounding_box(scene_pcd)
-        if len(inside_idx) < self.MIN_POINTS_IN_BOX:
+        center, extent, rotation = shrunk_oriented_box_geometry(
+            box_params, self.box_scale_factor
+        )
+        inside = points_inside_oriented_box(points_3d, center, extent, rotation)
+        inside_idx = np.flatnonzero(inside)
+        if inside_idx.size < self.MIN_POINTS_IN_BOX:
             return False, None
 
-        selected_pcd = o3d.geometry.PointCloud()
-        selected_pcd.points = o3d.utility.Vector3dVector(np.array(scene_pcd)[inside_idx])
-
-        # Estimate volume via convex hull, fallback to oriented bounding box
-        try:
-            volume = selected_pcd.compute_convex_hull()[0].get_volume()
-        except Exception:
-            try:
-                volume = selected_pcd.get_oriented_bounding_box().volume()
-            except Exception:
-                return False, None
-
-        if volume / box.volume() < self.box3d_pcd_threshold:
+        selected = points_3d[inside_idx]
+        volume = obb_volume_from_points(selected)
+        query_volume = oriented_box_volume(extent)
+        if query_volume <= 0 or volume / query_volume < self.box3d_pcd_threshold:
             return False, None
 
-        # Build pixel mask from inside points
         w, h = img_dim
         mask = np.zeros((h, w), dtype=bool)
         mask.ravel()[inside_idx] = True
@@ -126,7 +119,7 @@ class ThreeDBoxFilter(BaseTask):
 
         return True, mask
 
-    def _filter_boxes(self, image, depth, boxes_3d, pose, intrinsic, img_dim):
+    def _filter_boxes(self, depth, boxes_3d, pose, intrinsic, img_dim):
         """Two-stage filtering: 2D projection validity, then 3D point cloud validity.
 
         Returns:
@@ -134,7 +127,6 @@ class ThreeDBoxFilter(BaseTask):
         """
         extrinsic_w2c = np.linalg.inv(pose)
         points_3d = backproject_depth_to_3d(depth, img_dim, intrinsic, pose=pose)
-        scene_pcd = o3d.utility.Vector3dVector(points_3d)
 
         # Stage 1: 2D projection check
         valid_2d = []
@@ -147,7 +139,7 @@ class ThreeDBoxFilter(BaseTask):
         keep_indices = []
         masks = []
         for idx in valid_2d:
-            valid, mask = self._is_box_valid_3d(scene_pcd, boxes_3d[idx], img_dim)
+            valid, mask = self._is_box_valid_3d(points_3d, boxes_3d[idx], img_dim)
             if valid:
                 keep_indices.append(idx)
                 masks.append(mask)
@@ -190,14 +182,8 @@ class ThreeDBoxFilter(BaseTask):
         if "image" not in example:
             raise ValueError("image not found in example")
 
-        image = Image.open(example["image"])
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-
         depth = load_depth_map(example["depth_map"], example["depth_scale"])
-        assert image.size == depth.shape[::-1], (
-            f"Image size {image.size} != depth size {depth.shape[::-1]}"
-        )
+        img_dim = depth.shape[::-1]  # (width, height)
 
         # Stage 0: remove background tags
         obj_tags = example["obj_tags"]
@@ -222,7 +208,7 @@ class ThreeDBoxFilter(BaseTask):
         # Stage 1+2: 2D/3D box validation
         pose = np.loadtxt(example["pose"])
         intrinsic = np.loadtxt(example["intrinsic"])
-        keep2, masks = self._filter_boxes(image, depth, boxes_3d, pose, intrinsic, image.size)
+        keep2, masks = self._filter_boxes(depth, boxes_3d, pose, intrinsic, img_dim)
         if len(keep2) == 0:
             return None, False
 
