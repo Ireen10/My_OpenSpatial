@@ -1,0 +1,52 @@
+dataset:
+  modality: image
+  dataset_name: image_base
+  data_dir: E:/GitRepo/OpenSpatial/data_root/EmbodiedScan/preprocess_output_frame_rot/per_image/data-00000.parquet
+  raw_data_root: E:/GitRepo/OpenSpatial/data_root/EmbodiedScan/data
+
+pipeline:
+  file_name: base_pipeline
+  class_name: BasePipeline
+
+  stages:
+    filter_stage:
+      -
+        file_name: 3dbox_filter
+        method: ThreeDBoxFilter
+        proj_mask_threshold: 0.1
+        box3d_pcd_threshold: 0.1
+        box_scale_factor: 0.9
+        mask_area_threshold: 0.005
+        update_keys: []
+        filter_tags: ["ceiling", "floor", "wall", "object"]
+        output_dir:
+        use_multi_processing: true
+        num_workers: 40
+
+    localization_stage:
+      -
+        file_name: sam3_refiner
+        method: Sam3Refiner
+        update_keys: ["obj_tags", "bboxes_3d_world_coords"]
+        depends_on: filter_stage/3dbox_filter
+        output_dir:
+
+        segmenter_model: facebook/sam3
+        min_coverage: 0.10
+        min_precision: 0.40
+        min_mask_pixels: 20
+
+        device: "npu:0,npu:1"
+        replicas_per_device: 2
+        use_multi_processing: true
+        num_workers: 4
+        batch_size: 4
+
+    scene_fusion_stage:
+      -
+        file_name: depth_back_projection
+        method: DepthBackProjecter
+        depends_on: localization_stage/sam3_refiner
+        output_dir:
+        use_multi_processing: true
+        num_workers: 40
