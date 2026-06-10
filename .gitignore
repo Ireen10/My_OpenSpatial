@@ -26,3 +26,5 @@ data_root/
 # ARKit sky_direction verification downloads (delete whole folder anytime)
 verification/arkit_sky_metadata/data/
 verification/arkit_sky_metadata/results/
+
+!refiner_exp/*
