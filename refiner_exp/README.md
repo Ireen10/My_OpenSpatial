@@ -51,7 +51,7 @@ python refiner_exp/scripts/summarize_runs.py \
 
 ## 可视化
 
-生成 Raw/SAM2/SAM3 并排 overlay：
+生成 Raw/SAM2/SAM3 并排 overlay 和 RGB-D mask 点云视图：
 
 ```bash
 python refiner_exp/scripts/visualize_compare.py \
@@ -59,10 +59,20 @@ python refiner_exp/scripts/visualize_compare.py \
   --sam2-run refiner_exp/outputs/sam2 \
   --sam3-run refiner_exp/outputs/sam3 \
   --output-dir refiner_exp/outputs/compare/images \
-  --max-images 20
+  --max-images 20 \
+  --pointcloud-mode both
 ```
 
-每张图会展示三条分支的 mask overlay、mask-derived 2D bbox，以及原始 3D bbox 的投影线框。旁边会输出同名 `.json`，记录该图内对象的自动指标，便于把人工判断和数值指标对应起来。
+每张图会展示三条分支的 mask overlay、mask-derived 2D bbox，以及原始 3D bbox 的投影线框。默认还会用当前分支的 mask 从 RGB + depth 反投影出彩色 object point cloud，并追加 front/top 两个正交视图缩略图。
+
+点云相关输出：
+
+- `--pointcloud-mode none`: 只生成 2D overlay。
+- `--pointcloud-mode render`: 只在 JPG 中追加点云正交视图。
+- `--pointcloud-mode ply`: 只导出可交互查看的 `.ply`。
+- `--pointcloud-mode both`: 同时生成缩略图和 `.ply`，默认值。
+
+导出的 `.ply` 位于 `refiner_exp/outputs/compare/images/pointclouds/`，可以用 CloudCompare、MeshLab、Open3D viewer 等常见点云工具打开。旁边会输出同名 `.json`，记录该图内对象的自动指标和每个分支导出的点云路径，便于把人工判断和数值指标对应起来。
 
 ## 推荐解读
 
