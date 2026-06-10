@@ -290,8 +290,12 @@ class VisualMarker:
         from .mark_spec import plan_object_marks, plan_point_marks
 
         if points is not None:
-            spec, color_name = plan_point_marks(self, points, labels=labels)
-            return spec, color_name
+            spec, point_slots = plan_point_marks(self, points, labels=labels)
+            marked_info = [
+                (f"{s.get('tag', 'point')}-({s['color_name']} point)", None)
+                for s in point_slots
+            ]
+            return spec, marked_info
         spec, marked_info = plan_object_marks(
             self, objs, mark_type=mark_type, view_idx=view_idx, labels=labels,
         )

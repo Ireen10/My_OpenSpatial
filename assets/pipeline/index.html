@@ -245,7 +245,7 @@
       runner: {
         summary: "这里的核心不是计算数据，而是决定每个 task 应该读哪里、写哪里，以及多个 stage 如何串起来。",
         flow: ["配置中的 stage/task 会按 YAML 顺序进入 task_queue；同名 task 会自动追加 dup 后缀，避免输出目录冲突。", "depends_on 解析有优先级：先认真实文件或目录，再认 task ref，最后尝试相对 output_root 的历史路径。", "如果某个 task 没有 depends_on，就默认读取前一个 task 的输出；annotation 配置里常显式指回同一个预处理 parquet，避免 annotation task 彼此串联。", "每个 task 都拿到当前 DataFrame 的 deep copy，执行 run/apply_transform 后再统一保存。"],
-        params: ["--max_samples 与 --start_from 只做调试切片，会在每次 override_data 后重新应用。", "export_stage + skip_parquet=true 时，只保留导出 bundle，不写空 parquet。"]
+        params: ["--max_samples 只做调试截断（取前 N 行），会在每次 override_data 后重新应用。", "export_stage + skip_parquet=true 时，只保留导出 bundle，不写空 parquet。"]
       },
       source: {
         summary: "源数据阶段的关键是保证后续几何计算所需的 RGB、深度、相机参数和物体 3D 框在同一行内对齐。",
