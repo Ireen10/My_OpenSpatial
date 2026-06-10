@@ -27,4 +27,4 @@ data_root/
 verification/arkit_sky_metadata/data/
 verification/arkit_sky_metadata/results/
 
-!refiner_exp/*
+!refiner_exp/scripts/
