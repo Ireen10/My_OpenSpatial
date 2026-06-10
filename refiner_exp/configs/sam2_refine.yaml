@@ -30,6 +30,13 @@ pipeline:
         update_keys: ["obj_tags", "bboxes_3d_world_coords"]
         depends_on: filter_stage/3dbox_filter
         output_dir:
+        segmenter_model: facebook/sam2-hiera-small
+        segmenter_backend: transformers
+        device: "npu:0,npu:1,npu:2,npu:3"
+        replicas_per_device: 1
+        use_multi_processing: true
+        num_workers: 4
+        batch_size: 4
 
     scene_fusion_stage:
       -
