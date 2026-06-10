@@ -215,7 +215,7 @@ class Sam2Refiner(BaseTask):
                 self.args["num_workers"] = total_replicas
         print(
             f"[Sam2Refiner] transformers backend on {','.join(devices)} | "
-            f"replicas={total_replicas} batch_size={self.args.get('batch_size', 4)} "
+            f"replicas={total_replicas} per-image inference (batch_size ignored) "
             f"min_score={self.MIN_SCORE} min_mask_pixels={self.MIN_MASK_PIXELS}",
             flush=True,
         )
@@ -350,9 +350,14 @@ class Sam2Refiner(BaseTask):
         if not valid_items:
             return [], {"samples": len(batch_items), "boxes_in": 0, "boxes_kept": 0, "samples_saved": 0}
 
-        boxes_per_image = [self._masks_to_bboxes(x[3]) for x in valid_items]
-        per_image = self._infer_transformers_batch([x[2] for x in valid_items], boxes_per_image)
-        batch_results = self._results_from_infer(per_image)
+        # Sam2Processor cannot pad input_boxes across images with different
+        # object counts; always run one forward pass per image.
+        batch_results = []
+        for _idx, _example, image, coarse in valid_items:
+            per_image = self._infer_transformers_batch(
+                [image], [self._masks_to_bboxes(coarse)]
+            )
+            batch_results.append(self._results_from_infer(per_image)[0])
         boxes_in = sum(len(x[3]) for x in valid_items)
         boxes_kept = sum(len(ki) for _, _, ki in batch_results)
 
@@ -379,7 +384,8 @@ class Sam2Refiner(BaseTask):
 
     def _run_batched(self, dataset):
         num_workers = int(self.args.get("num_workers", 4))
-        batch_size = int(self.args.get("batch_size", 4))
+        # batch_size is ignored: transformers SAM2 requires one image per processor call.
+        batch_size = 1
         examples = list(enumerate(dataset.to_dict("records")))
         batches = [examples[i : i + batch_size] for i in range(0, len(examples), batch_size)]
         window = max(num_workers * 2, num_workers + 1)
