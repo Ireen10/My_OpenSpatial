@@ -153,6 +153,19 @@ def _load_coarse_mask(path: str) -> np.ndarray:
     return m > 127
 
 
+def _obj_tags_to_text(tags):
+    """Join per-object tags for SAM3 text prompt; safe for ndarray/list."""
+    if tags is None:
+        return None
+    if isinstance(tags, np.ndarray):
+        tags = tags.tolist()
+    elif not isinstance(tags, (list, tuple)):
+        tags = [tags]
+    if len(tags) == 0:
+        return None
+    return ". ".join(str(tag) for tag in tags)
+
+
 def _post_process(processor, outputs, min_score: float, target_sizes: list):
     return processor.post_process_instance_segmentation(
         outputs,
@@ -549,7 +562,7 @@ class Sam3Refiner(BaseTask):
 
     def _refine(self, images, masks_list, tags_list):
         boxes_per_image = [self._masks_to_bboxes(m) for m in masks_list]
-        texts = [". ".join(t) if t else None for t in tags_list]
+        texts = [_obj_tags_to_text(t) for t in tags_list]
         processor, model, dev = self._replica_pool.get()
         try:
             # torch.npu.set_device is thread-local; bind the thread to the
@@ -563,7 +576,7 @@ class Sam3Refiner(BaseTask):
             return _infer_refiner(
                 processor, model, dev,
                 images, boxes_per_image,
-                texts if any(texts) else None,
+                texts if any(t is not None for t in texts) else None,
             )
         finally:
             self._replica_pool.put((processor, model, dev))
