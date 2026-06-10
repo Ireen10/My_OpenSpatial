@@ -62,9 +62,10 @@ from dataset.upstream_export import (  # noqa: E402
     resolve_shard_image,
 )
 from task.annotation.core.mark_spec import (  # noqa: E402
-    merge_mark_specs,
+    MARK_SPEC_VERSION,
+    all_slots_flat,
     render_mark,
-    view_mark_spec_slice,
+    slots_for_view,
 )
 
 try:
@@ -140,12 +141,46 @@ def convert_legacy_marks_to_natural(text: str) -> str:
     return re.sub(r"  +", " ", out).strip()
 
 
+def count_legacy_mark_tokens(text: str) -> int:
+    return len(LEGACY_MARK_SUFFIX_RE.findall(text or ""))
+
+
+def count_legacy_marks_in_pairs(pairs: List[Tuple[str, str]]) -> int:
+    return sum(
+        count_legacy_mark_tokens(q) + count_legacy_mark_tokens(a)
+        for q, a in pairs
+    )
+
+
+def slot_has_renderable_geometry(slot: dict) -> bool:
+    geom = slot.get("geometry") or {}
+    kind = str(slot.get("mark_kind") or "box").lower()
+    if kind == "point":
+        return bool(geom.get("uv"))
+    if kind == "mask":
+        return bool(geom.get("mask_ref") or geom.get("box_2d") or geom.get("uv"))
+    return bool(geom.get("box_2d") or geom.get("uv"))
+
+
+def count_renderable_slots(mark_spec: Optional[dict]) -> int:
+    if not mark_spec:
+        return 0
+    return sum(
+        1 for s in all_slots_flat(mark_spec)
+        if isinstance(s, dict) and slot_has_renderable_geometry(s)
+    )
+
+
 @dataclass
 class ConvertStats:
     total_seen: int = 0
     converted: int = 0
     skipped: int = 0
     skip_reasons: Counter = field(default_factory=Counter)
+    legacy_mark_tokens: int = 0
+    renderable_slots: int = 0
+    views_without_render: int = 0
+    mark_text_render_mismatch: int = 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -318,15 +353,28 @@ def mark_spec_for_turn(
     return sample_mark_spec
 
 
+def flat_mark_spec_for_view(
+    mark_spec: Optional[dict],
+    view_index: int,
+) -> Optional[dict]:
+    """Return a render-ready spec ``{version, mark_kinds, slots}`` for one QA image."""
+    if not mark_spec or not isinstance(mark_spec, dict):
+        return None
+    slots = slots_for_view(mark_spec, view_index)
+    if not slots:
+        return None
+    kinds = sorted({s.get("mark_kind") for s in slots if s.get("mark_kind")})
+    return {"version": MARK_SPEC_VERSION, "mark_kinds": kinds, "slots": slots}
+
+
 def combined_mark_spec_for_view(
     turn_specs: List[Optional[dict]],
     sample_mark_spec: Optional[dict],
     view_index: int,
 ) -> Optional[dict]:
-    """Union all mark slots on one view across turns (all marks on image)."""
-    slices: List[dict] = []
-    view_indices: List[int] = []
+    """Union all mark slots on one view across turns (flat spec for render_mark)."""
     seen: set = set()
+    merged_slots: List[dict] = []
 
     sources: List[dict] = []
     for ms in turn_specs:
@@ -336,25 +384,65 @@ def combined_mark_spec_for_view(
         sources.append(sample_mark_spec)
 
     for ms in sources:
-        sl = view_mark_spec_slice(ms, view_index)
-        if not sl.get("slots"):
+        flat = flat_mark_spec_for_view(ms, view_index)
+        if not flat:
             continue
-        deduped_slots = []
-        for slot in sl["slots"]:
+        for slot in flat.get("slots") or []:
             key = (slot.get("slot_id"), slot.get("tag"), slot.get("mark_kind"))
             if key in seen:
                 continue
             seen.add(key)
-            deduped_slots.append(slot)
-        if deduped_slots:
-            slices.append({**sl, "slots": deduped_slots})
-            view_indices.append(view_index)
+            merged_slots.append(slot)
 
-    if not slices:
+    if not merged_slots:
         return None
-    if len(slices) == 1:
-        return slices[0]
-    return merge_mark_specs(slices, view_indices=view_indices)
+    kinds = sorted({s.get("mark_kind") for s in merged_slots if s.get("mark_kind")})
+    return {"version": MARK_SPEC_VERSION, "mark_kinds": kinds, "slots": merged_slots}
+
+
+def count_renderable_slots_for_view(
+    turn_specs: List[Optional[dict]],
+    sample_mark_spec: Optional[dict],
+    view_index: int,
+) -> int:
+    flat = combined_mark_spec_for_view(turn_specs, sample_mark_spec, view_index)
+    if not flat:
+        return 0
+    return sum(
+        1 for s in flat.get("slots") or []
+        if isinstance(s, dict) and slot_has_renderable_geometry(s)
+    )
+
+
+def audit_sample_marks(
+    record: dict,
+    pairs: List[Tuple[str, str]],
+) -> Tuple[int, int, int, int]:
+    """
+    Returns (legacy_tokens, renderable_slots, views_without_render, mismatch_flag).
+    """
+    metadata = record.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    sample_mark_spec = metadata.get("mark_spec")
+    if sample_mark_spec is not None and not isinstance(sample_mark_spec, dict):
+        sample_mark_spec = None
+    turn_specs = turn_mark_specs(metadata)
+
+    legacy = count_legacy_marks_in_pairs(pairs)
+    refs = list(record.get("image_refs") or [])
+    renderable = 0
+    views_no_render = 0
+    for vi in range(len(refs)):
+        n = count_renderable_slots_for_view(turn_specs, sample_mark_spec, vi)
+        renderable += n
+        flat = combined_mark_spec_for_view(turn_specs, sample_mark_spec, vi)
+        spec_slots = len(flat.get("slots") or []) if flat else 0
+        if spec_slots > 0 and n == 0:
+            views_no_render += 1
+
+    mismatch = int(legacy > 0 and renderable < legacy)
+    return legacy, renderable, views_no_render, mismatch
 
 
 def apply_marked_text(text: str, _mark_spec: Optional[dict] = None) -> str:
@@ -373,8 +461,9 @@ def render_marked_image_bytes(
     from PIL import Image
 
     img = Image.open(io.BytesIO(raw_bytes))
-    if mark_spec and mark_spec.get("slots"):
-        out = render_mark(img, mark_spec, view_index=view_index)
+    flat = flat_mark_spec_for_view(mark_spec, view_index) if mark_spec else None
+    if flat and flat.get("slots"):
+        out = render_mark(img, flat, view_index=0)
         return out["bytes"]
     return encode_image_for_pangu_tar(raw_bytes)[0]
 
@@ -512,6 +601,10 @@ def _merge_stats(into: ConvertStats, other: ConvertStats) -> None:
     into.converted += other.converted
     into.skipped += other.skipped
     into.skip_reasons.update(other.skip_reasons)
+    into.legacy_mark_tokens += other.legacy_mark_tokens
+    into.renderable_slots += other.renderable_slots
+    into.views_without_render += other.views_without_render
+    into.mark_text_render_mismatch += other.mark_text_render_mismatch
 
 
 def write_shard(
@@ -581,6 +674,16 @@ def convert_one_shard(job: ShardJob) -> ConvertStats:
                 stats.skipped += 1
                 stats.skip_reasons[partial or "unknown"] += 1
                 continue
+
+            pairs = parse_qa_pairs(normalize_messages(record.get("messages")))
+            if pairs:
+                legacy, renderable, views_no, mismatch = audit_sample_marks(
+                    record, pairs,
+                )
+                stats.legacy_mark_tokens += legacy
+                stats.renderable_slots += renderable
+                stats.views_without_render += views_no
+                stats.mark_text_render_mismatch += mismatch
 
             stats.converted += 1
             if partial:
@@ -719,6 +822,20 @@ def main() -> None:
         f">>> Pangu ML export: {stats.converted} converted, "
         f"{stats.skipped} skipped (of {stats.total_seen} seen) -> {output_root}"
     )
+    if stats.converted:
+        print(
+            f">>> Mark audit: legacy_tokens={stats.legacy_mark_tokens}, "
+            f"renderable_slots={stats.renderable_slots}, "
+            f"views_without_render={stats.views_without_render}, "
+            f"text_render_mismatch_samples={stats.mark_text_render_mismatch}",
+            flush=True,
+        )
+        if stats.mark_text_render_mismatch:
+            print(
+                ">>> WARNING: some samples mention more legacy mark tokens in text "
+                "than renderable slots in mark_spec (marks missing in tar images).",
+                flush=True,
+            )
     if stats.skip_reasons:
         print(">>> Skip reasons:", dict(stats.skip_reasons))
 

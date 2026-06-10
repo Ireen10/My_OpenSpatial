@@ -97,10 +97,13 @@ def view_count(mark_spec: Optional[dict]) -> int:
 
 
 def slots_for_view(mark_spec: Optional[dict], view_index: int) -> List[dict]:
+    """All slots on ``view_index`` (merges duplicate view entries if present)."""
+    vi = int(view_index)
+    out: List[dict] = []
     for v in mark_spec_views(mark_spec):
-        if int(v.get("view_index", -1)) == int(view_index):
-            return list(v.get("slots") or [])
-    return []
+        if int(v.get("view_index", -1)) == vi:
+            out.extend(v.get("slots") or [])
+    return out
 
 
 def all_slots_flat(mark_spec: Optional[dict]) -> List[dict]:
@@ -487,7 +490,20 @@ def render_mark(
 
     by_kind: Dict[str, list] = {}
     for slot in slice_spec["slots"]:
-        by_kind.setdefault(slot["mark_kind"], []).append(slot)
+        geom = slot.get("geometry") or {}
+        kind = slot.get("mark_kind") or "box"
+        if kind == "point":
+            if not geom.get("uv"):
+                continue
+        elif kind == "mask":
+            if not (geom.get("mask_ref") or geom.get("box_2d") or geom.get("uv")):
+                continue
+        elif not (geom.get("box_2d") or geom.get("uv")):
+            continue
+        by_kind.setdefault(kind, []).append(slot)
+
+    if not by_kind:
+        return {"bytes": convert_pil_to_bytes(image)}
 
     overlay = np.array(image.convert("RGB"))
 
@@ -509,8 +525,36 @@ def render_mark(
             geometries = [s["geometry"]["uv"] for s in slots]
             overlay = draw_points_on_image(Image.fromarray(overlay), geometries, colors, labels=slot_labels)
         else:
-            geometries = [np.array(s["geometry"]["box_2d"]) for s in slots]
-            overlay = draw_boxes_on_image(Image.fromarray(overlay), geometries, colors, labels=slot_labels)
+            box_geoms = []
+            box_colors = []
+            box_labels = []
+            point_geoms = []
+            point_colors = []
+            point_labels = []
+            for i, s in enumerate(slots):
+                geom = s["geometry"]
+                if geom.get("box_2d"):
+                    box_geoms.append(np.array(geom["box_2d"]))
+                    box_colors.append(colors[i])
+                    if slot_labels:
+                        box_labels.append(slot_labels[i])
+                elif geom.get("uv"):
+                    point_geoms.append(geom["uv"])
+                    point_colors.append(colors[i])
+                    if slot_labels:
+                        point_labels.append(slot_labels[i])
+            frame = Image.fromarray(overlay)
+            if box_geoms:
+                overlay = draw_boxes_on_image(
+                    frame, box_geoms, box_colors,
+                    labels=box_labels if box_labels else None,
+                )
+                frame = Image.fromarray(overlay)
+            if point_geoms:
+                overlay = draw_points_on_image(
+                    frame, point_geoms, point_colors,
+                    labels=point_labels if point_labels else None,
+                )
 
     return {"bytes": convert_pil_to_bytes(Image.fromarray(overlay.astype(np.uint8)))}
 
