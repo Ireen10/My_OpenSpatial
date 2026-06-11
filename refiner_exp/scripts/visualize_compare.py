@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import colorsys
 import io
 import json
 import os
@@ -45,18 +46,6 @@ except ImportError:  # pragma: no cover
 
 # Overlay opacity 0–255; higher = more opaque (less transparent).
 MASK_OVERLAY_ALPHA = 180
-
-PALETTE = [
-    (255, 60, 60),
-    (60, 180, 255),
-    (60, 220, 100),
-    (255, 200, 60),
-    (200, 60, 255),
-    (60, 220, 220),
-    (255, 130, 60),
-    (160, 220, 80),
-]
-
 
 def _font(size: int = 18) -> ImageFont.ImageFont:
     """Return a TrueType font when possible (required for textbbox on Windows)."""
@@ -105,8 +94,46 @@ def _text_bbox(
         return (xy[0], xy[1], xy[0] + w, xy[1] + 18)
 
 
-def _color_for_key(key: str) -> Tuple[int, int, int]:
-    return PALETTE[abs(hash(key)) % len(PALETTE)]
+def _distinct_color(index: int) -> Tuple[int, int, int]:
+    """Golden-ratio hue stepping: distinct colors for adjacent indices."""
+    hue = (index * 0.618033988749895) % 1.0
+    red, green, blue = colorsys.hsv_to_rgb(hue, 0.72, 0.92)
+    return (int(red * 255), int(green * 255), int(blue * 255))
+
+
+def _object_keys_for_image(index: CompareIndex, image_key: str) -> List[str]:
+    branch_records = branch_records_for_image(index, image_key)
+    keys: List[str] = []
+    seen: set[str] = set()
+    for branch in ("raw", "sam2", "sam3"):
+        for rec in branch_records.get(branch, []):
+            key = rec["object_key"]
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+    keys.sort()
+    return keys
+
+
+@lru_cache(maxsize=1024)
+def _color_map_for_keys(image_key: str, keys: Tuple[str, ...]) -> Dict[str, Tuple[int, int, int]]:
+    return {key: _distinct_color(i) for i, key in enumerate(keys)}
+
+
+def build_object_color_map(index: CompareIndex, image_key: str) -> Dict[str, Tuple[int, int, int]]:
+    """Stable per-sample colors: same object_key → same color across branches."""
+    ordered = tuple(_object_keys_for_image(index, image_key))
+    return _color_map_for_keys(image_key, ordered)
+
+
+def _color_for_object(
+    rec: Dict[str, Any],
+    color_map: Optional[Dict[str, Tuple[int, int, int]]],
+) -> Tuple[int, int, int]:
+    key = rec["object_key"]
+    if color_map and key in color_map:
+        return color_map[key]
+    return _distinct_color(abs(hash(key)) % 997)
 
 
 def _sanitize_name(text: str) -> str:
@@ -114,14 +141,14 @@ def _sanitize_name(text: str) -> str:
     return clean[:140] or "sample"
 
 
-@lru_cache(maxsize=2048)
+@lru_cache(maxsize=16384)
 def _load_mask_cached(mask_path: str) -> Optional[np.ndarray]:
     if not mask_path:
         return None
     return _load_mask(mask_path)
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=512)
 def _load_pose_intrinsic(pose_path: str, intrinsic_path: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     return _load_matrix(pose_path), _load_matrix(intrinsic_path)
 
@@ -204,11 +231,12 @@ def _draw_object_panel(
     rec: Dict[str, Any],
     *,
     max_width: int,
+    color_map: Optional[Dict[str, Tuple[int, int, int]]] = None,
 ) -> Image.Image:
     """Draw one object's mask, 2D bbox, and projected 3D bbox on a fresh RGB frame."""
     canvas = base_image.convert("RGBA")
     draw = ImageDraw.Draw(canvas)
-    color = _color_for_key(rec["object_key"])
+    color = _color_for_object(rec, color_map)
     mask = _load_mask_cached(str(rec.get("mask_path") or ""))
     if mask is not None:
         if mask.shape[::-1] != canvas.size:
@@ -238,7 +266,7 @@ def _camera_points_to_viewer(pts: np.ndarray) -> np.ndarray:
     return out
 
 
-@lru_cache(maxsize=1024)
+@lru_cache(maxsize=8192)
 def _load_pcd_points(path: str, max_points: int) -> Tuple[np.ndarray, ...]:
     """Load fusion-stage per-object .pcd (camera frame, outlier-cleaned)."""
     empty = np.empty((0, 3), dtype=np.float32)
@@ -261,6 +289,8 @@ def _pack_branch_from_fusion(
     refine_records: List[Dict[str, Any]],
     fusion_by_key: Dict[str, Dict[str, Any]],
     max_points_per_object: int,
+    *,
+    color_map: Optional[Dict[str, Tuple[int, int, int]]] = None,
 ) -> Dict[str, Any]:
     """Pack per-object fusion .pcd clouds for one branch (colors match 2D overlay)."""
     objects: List[Dict[str, Any]] = []
@@ -271,7 +301,7 @@ def _pack_branch_from_fusion(
         pts = _load_pcd_points(path, max_points_per_object)[0]
         if len(pts) == 0:
             continue
-        r, g, b = _color_for_key(rec["object_key"])
+        r, g, b = _color_for_object(rec, color_map)
         objects.append({
             "tag": rec.get("tag", ""),
             "object_index": rec.get("object_index"),
@@ -447,7 +477,8 @@ def render_object_panel_image(
     image = _load_image(rec.get("image"))
     if image is None:
         return None
-    return _draw_object_panel(image, rec, max_width=max_panel_width)
+    color_map = build_object_color_map(index, image_key)
+    return _draw_object_panel(image, rec, max_width=max_panel_width, color_map=color_map)
 
 
 def sample_panels_json(index: CompareIndex, image_key: str) -> Dict[str, Any]:

@@ -10,10 +10,11 @@ import json
 import socket
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -29,6 +30,7 @@ from visualize_compare import (  # noqa: E402
     _pack_branch_from_fusion,
     branch_records_for_image,
     build_compare_index,
+    build_object_color_map,
     render_object_panel_image,
     sample_panels_json,
     sample_stats_json,
@@ -77,7 +79,7 @@ _VIEWER_HTML = """<!doctype html>
     .branch-col {{ background: #242424; border: 1px solid #333; border-radius: 6px; padding: 8px; }}
     .branch-col h3 {{ margin: 0 0 8px; font-size: 0.9rem; color: #ccc; }}
     .thumb-list {{ display: flex; flex-direction: column; gap: 8px; }}
-    .thumb-list img {{ width: 100%; border: 1px solid #444; border-radius: 4px; cursor: zoom-in; display: block; }}
+    .thumb-list img {{ width: 100%; border: 1px solid #444; border-radius: 4px; cursor: zoom-in; display: block; content-visibility: auto; contain-intrinsic-size: 360px; }}
     .thumb-list .empty {{ color: #888; font-size: 0.85rem; padding: 8px 0; }}
     .lightbox {{ position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; }}
     .lightbox.hidden {{ display: none; }}
@@ -148,6 +150,8 @@ _VIEWER_HTML = """<!doctype html>
         }}
         for (const item of items) {{
           const img = document.createElement("img");
+          img.loading = "lazy";
+          img.decoding = "async";
           img.src = panelUrl(branch, item.object_index);
           img.alt = item.label || "";
           img.title = (item.label || "") + " — 点击放大";
@@ -175,15 +179,16 @@ _VIEWER_HTML = """<!doctype html>
       const parent = canvas.parentElement;
       const w = Math.max(parent.clientWidth, 280);
       const h = Math.max(280, Math.floor(w * 0.75));
-      const renderer = new THREE.WebGLRenderer({{ canvas, antialias: true }});
-      renderer.setPixelRatio(window.devicePixelRatio || 1);
+      const renderer = new THREE.WebGLRenderer({{ canvas, antialias: false, powerPreference: "high-performance" }});
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.25));
       renderer.setSize(w, h, false);
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(0x141414);
       const camera = new THREE.PerspectiveCamera(50, w / h, 0.001, 500);
       const controls = new THREE.OrbitControls(camera, canvas);
-      controls.enableDamping = true;
-      controls.dampingFactor = 0.08;
+      controls.enableDamping = false;
+      let visible = false;
+      let framePending = false;
       const objects = (packed && packed.objects) ? packed.objects : [];
       if (!objects.length) {{
         meta.textContent = "无点云";
@@ -218,11 +223,25 @@ _VIEWER_HTML = """<!doctype html>
       camera.position.set(c[0], c[1] + extent * 0.15, c[2] + extent * 1.4);
       controls.update();
       meta.textContent = objects.length + " objects · " + totalPts.toLocaleString() + " pts";
-      (function animate() {{
-        requestAnimationFrame(animate);
+      function renderOnce() {{
         controls.update();
         renderer.render(scene, camera);
-      }})();
+      }}
+      function scheduleRender() {{
+        if (!visible || framePending) return;
+        framePending = true;
+        requestAnimationFrame(() => {{
+          framePending = false;
+          if (visible) renderOnce();
+        }});
+      }}
+      controls.addEventListener("change", scheduleRender);
+      const io = new IntersectionObserver((entries) => {{
+        visible = entries[0].isIntersecting;
+        if (visible) scheduleRender();
+      }}, {{ threshold: 0.08 }});
+      io.observe(parent);
+      renderOnce();
     }}
 
     async function loadBranch(branch, canvasId, metaId) {{
@@ -231,16 +250,32 @@ _VIEWER_HTML = """<!doctype html>
       mountViewer(canvasId, metaId, packed);
     }}
 
-    Promise.all([
-      fetch("/api/sample/" + SAMPLE + "/stats").then(r => r.json()),
-      loadBranch("raw", "view-raw", "meta-raw"),
-      loadBranch("sam2", "view-sam2", "meta-sam2"),
-      loadBranch("sam3", "view-sam3", "meta-sam3"),
-    ]).then(([stats]) => {{
+    function load3DViewers() {{
+      return Promise.all([
+        loadBranch("raw", "view-raw", "meta-raw"),
+        loadBranch("sam2", "view-sam2", "meta-sam2"),
+        loadBranch("sam3", "view-sam3", "meta-sam3"),
+      ]);
+    }}
+
+    fetch("/api/sample/" + SAMPLE + "/stats").then(r => r.json()).then((stats) => {{
       document.getElementById("stats").textContent = JSON.stringify(stats, null, 2);
     }}).catch(err => {{
       document.getElementById("stats").textContent = "加载失败: " + err;
     }});
+
+    const viewersSection = document.querySelector(".viewers");
+    const io3d = new IntersectionObserver((entries) => {{
+      if (!entries[0].isIntersecting) return;
+      io3d.disconnect();
+      load3DViewers().catch(err => {{
+        for (const id of ["meta-raw", "meta-sam2", "meta-sam3"]) {{
+          const el = document.getElementById(id);
+          if (el) el.textContent = "点云加载失败: " + err;
+        }}
+      }});
+    }}, {{ rootMargin: "120px", threshold: 0.01 }});
+    io3d.observe(viewersSection);
   </script>
 </body>
 </html>
@@ -255,13 +290,158 @@ class CompareServerState:
         cache_dir: Path,
         max_points_per_object: int,
         max_panel_width: int,
+        memory_cache_mb: int = 4096,
     ):
         self.index = index
         self.cache_dir = cache_dir
         self.max_points_per_object = max_points_per_object
         self.max_panel_width = max_panel_width
-        self._overlay_lock = threading.Lock()
+        self._mem_limit = max(memory_cache_mb, 256) * 1024 * 1024
+        self._mem_used = 0
+        self._panel_mem: Dict[str, bytes] = {}
+        self._points_mem: Dict[str, bytes] = {}
+        self._mem_lock = threading.RLock()
+        self._panel_locks: Dict[str, threading.Lock] = {}
+        self._panel_locks_guard = threading.Lock()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _panel_lock(self, key: str) -> threading.Lock:
+        with self._panel_locks_guard:
+            if key not in self._panel_locks:
+                self._panel_locks[key] = threading.Lock()
+            return self._panel_locks[key]
+
+    def _mem_store(self, store: Dict[str, bytes], key: str, data: bytes) -> None:
+        with self._mem_lock:
+            old = store.get(key)
+            if old is not None:
+                self._mem_used -= len(old)
+            while store and self._mem_used + len(data) > self._mem_limit:
+                evict_key = next(iter(store))
+                evicted = store.pop(evict_key)
+                self._mem_used -= len(evicted)
+            store[key] = data
+            self._mem_used += len(data)
+
+    def panel_bytes(
+        self,
+        name: str,
+        branch: str,
+        object_index: int,
+        *,
+        refresh: bool,
+    ) -> Optional[bytes]:
+        image_key = self.index.key_by_name.get(name)
+        if image_key is None:
+            return None
+        mem_key = f"{name}/{branch}_{object_index}"
+        if not refresh:
+            with self._mem_lock:
+                cached = self._panel_mem.get(mem_key)
+            if cached is not None:
+                return cached
+        sample_cache = self.cache_dir / name
+        sample_cache.mkdir(parents=True, exist_ok=True)
+        disk_path = sample_cache / f"{branch}_{object_index}.jpg"
+        if not refresh and disk_path.is_file():
+            data = disk_path.read_bytes()
+            self._mem_store(self._panel_mem, mem_key, data)
+            return data
+        with self._panel_lock(mem_key):
+            if not refresh:
+                with self._mem_lock:
+                    cached = self._panel_mem.get(mem_key)
+                if cached is not None:
+                    return cached
+                if disk_path.is_file():
+                    data = disk_path.read_bytes()
+                    self._mem_store(self._panel_mem, mem_key, data)
+                    return data
+            panel = render_object_panel_image(
+                self.index,
+                image_key,
+                branch,
+                object_index,
+                max_panel_width=self.max_panel_width,
+            )
+            if panel is None:
+                return None
+            buf = io.BytesIO()
+            panel.save(buf, format="JPEG", quality=90, optimize=True)
+            data = buf.getvalue()
+            disk_path.write_bytes(data)
+            self._mem_store(self._panel_mem, mem_key, data)
+            return data
+
+    def points_bytes(self, image_key: str, branch: str, *, refresh: bool = False) -> bytes:
+        mem_key = f"pts:{image_key}|{branch}"
+        if not refresh:
+            with self._mem_lock:
+                cached = self._points_mem.get(mem_key)
+            if cached is not None:
+                return cached
+        branch_records = branch_records_for_image(self.index, image_key)
+        color_map = build_object_color_map(self.index, image_key)
+        packed = _pack_branch_from_fusion(
+            branch_records[branch],
+            self.index.fusion_by_key[branch],
+            self.max_points_per_object,
+            color_map=color_map,
+        )
+        data = json.dumps(packed, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self._mem_store(self._points_mem, mem_key, data)
+        return data
+
+
+def _iter_panel_jobs(index: CompareIndex) -> List[Tuple[str, str, int]]:
+    jobs: List[Tuple[str, str, int]] = []
+    for image_key in index.image_keys:
+        name = index.name_by_key[image_key]
+        manifest = sample_panels_json(index, image_key)
+        for branch in ("raw", "sam2", "sam3"):
+            for item in manifest["branches"].get(branch, []):
+                jobs.append((name, branch, int(item["object_index"])))
+    return jobs
+
+
+def _preload_assets(state: CompareServerState, *, workers: int, preload_panels: bool, preload_points: bool) -> None:
+    panel_jobs = _iter_panel_jobs(state.index) if preload_panels else []
+    point_jobs: List[Tuple[str, str]] = []
+    if preload_points:
+        for image_key in state.index.image_keys:
+            for branch in ("raw", "sam2", "sam3"):
+                point_jobs.append((image_key, branch))
+
+    total = len(panel_jobs) + len(point_jobs)
+    if total == 0:
+        return
+    _log(f"Preloading {len(panel_jobs)} panel(s) + {len(point_jobs)} point payload(s) with {workers} workers...")
+
+    done = 0
+    lock = threading.Lock()
+
+    def _tick() -> None:
+        nonlocal done
+        with lock:
+            done += 1
+            if done % 50 == 0 or done == total:
+                _log(f"  preload {done}/{total}")
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = []
+        for name, branch, obj_idx in panel_jobs:
+            futures.append(pool.submit(state.panel_bytes, name, branch, obj_idx, refresh=False))
+        for image_key, branch in point_jobs:
+            futures.append(pool.submit(state.points_bytes, image_key, branch, refresh=False))
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as exc:
+                _log(f"  preload warning: {exc}")
+            _tick()
+    with state._mem_lock:
+        mem_mb = state._mem_used / (1024 * 1024)
+    _log(f"Preload done. Memory cache ~{mem_mb:.0f} MB (limit {state._mem_limit // (1024 * 1024)} MB).")
 
 
 def make_handler(state: CompareServerState):
@@ -269,10 +449,19 @@ def make_handler(state: CompareServerState):
         def log_message(self, fmt: str, *args) -> None:
             _log(f"[{self.address_string()}] {fmt % args}")
 
-        def _send_bytes(self, data: bytes, content_type: str, *, status: int = 200) -> None:
+        def _send_bytes(
+            self,
+            data: bytes,
+            content_type: str,
+            *,
+            status: int = 200,
+            cacheable: bool = False,
+        ) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
+            if cacheable:
+                self.send_header("Cache-Control", "public, max-age=86400")
             self.end_headers()
             self.wfile.write(data)
 
@@ -282,40 +471,6 @@ def make_handler(state: CompareServerState):
 
         def _send_html(self, text: str, *, status: int = 200) -> None:
             self._send_bytes(text.encode("utf-8"), "text/html; charset=utf-8", status=status)
-
-        def _panel_bytes(
-            self,
-            name: str,
-            branch: str,
-            object_index: int,
-            *,
-            refresh: bool,
-        ) -> Optional[bytes]:
-            image_key = state.index.key_by_name.get(name)
-            if image_key is None:
-                return None
-            sample_cache = state.cache_dir / name
-            sample_cache.mkdir(parents=True, exist_ok=True)
-            cache_path = sample_cache / f"{branch}_{object_index}.jpg"
-            if not refresh and cache_path.is_file():
-                return cache_path.read_bytes()
-            with state._overlay_lock:
-                if not refresh and cache_path.is_file():
-                    return cache_path.read_bytes()
-                panel = render_object_panel_image(
-                    state.index,
-                    image_key,
-                    branch,
-                    object_index,
-                    max_panel_width=state.max_panel_width,
-                )
-                if panel is None:
-                    return None
-                buf = io.BytesIO()
-                panel.save(buf, format="JPEG", quality=92)
-                data = buf.getvalue()
-                cache_path.write_bytes(data)
-            return data
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
@@ -373,24 +528,19 @@ def make_handler(state: CompareServerState):
                 ):
                     branch = parts[4]
                     obj_idx = int(parts[5])
-                    data = self._panel_bytes(name, branch, obj_idx, refresh=refresh)
+                    data = state.panel_bytes(name, branch, obj_idx, refresh=refresh)
                     if data is None:
                         self.send_error(HTTPStatus.NOT_FOUND)
                         return
-                    self._send_bytes(data, "image/jpeg")
+                    self._send_bytes(data, "image/jpeg", cacheable=not refresh)
                     return
                 if len(parts) == 4 and parts[3] == "stats":
                     self._send_json(sample_stats_json(state.index, image_key))
                     return
                 if len(parts) == 5 and parts[3] == "points" and parts[4] in ("raw", "sam2", "sam3"):
                     branch = parts[4]
-                    branch_records = branch_records_for_image(state.index, image_key)
-                    packed = _pack_branch_from_fusion(
-                        branch_records[branch],
-                        state.index.fusion_by_key[branch],
-                        state.max_points_per_object,
-                    )
-                    self._send_json(packed)
+                    data = state.points_bytes(image_key, branch, refresh=refresh)
+                    self._send_bytes(data, "application/json; charset=utf-8", cacheable=not refresh)
                     return
 
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -456,7 +606,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cache-dir",
         default="refiner_exp/outputs/compare/cache",
-        help="JPEG overlay cache directory.",
+        help="JPEG panel disk cache directory.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=48,
+        help="Parallel workers for startup preload (default 48).",
+    )
+    parser.add_argument(
+        "--memory-cache-mb",
+        type=int,
+        default=4096,
+        help="In-memory cache budget for panels and point payloads (default 4096 MB).",
+    )
+    parser.add_argument(
+        "--preload",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Pre-render panels and pre-pack point clouds at startup (default on).",
+    )
+    parser.add_argument(
+        "--preload-points",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include point-cloud JSON in startup preload (default on).",
     )
     return parser.parse_args()
 
@@ -471,9 +645,19 @@ def main() -> None:
         cache_dir=Path(args.cache_dir),
         max_points_per_object=args.max_points_per_object,
         max_panel_width=args.max_panel_width,
+        memory_cache_mb=args.memory_cache_mb,
     )
+    if args.preload:
+        _preload_assets(
+            state,
+            workers=max(1, args.workers),
+            preload_panels=True,
+            preload_points=args.preload_points,
+        )
     handler = make_handler(state)
     server = ThreadingHTTPServer((args.host, args.port), handler)
+    server.daemon_threads = True
+    server.request_queue_size = max(64, args.workers)
     _print_listen_urls(args.host, args.port, sample_count=len(index.image_keys))
     try:
         server.serve_forever()
