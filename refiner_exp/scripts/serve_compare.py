@@ -303,7 +303,29 @@ class CompareServerState:
         self._mem_lock = threading.RLock()
         self._panel_locks: Dict[str, threading.Lock] = {}
         self._panel_locks_guard = threading.Lock()
+        self.preload_total = 0
+        self.preload_done = 0
+        self.preload_phase = "idle"
+        self._preload_progress_lock = threading.Lock()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def preload_status(self) -> Dict[str, Any]:
+        with self._preload_progress_lock:
+            total = self.preload_total
+            done = self.preload_done
+            phase = self.preload_phase
+        pct = round(100.0 * done / total, 1) if total else 100.0
+        return {
+            "phase": phase,
+            "done": done,
+            "total": total,
+            "percent": pct,
+            "memory_cache_mb": round(self._mem_used / (1024 * 1024), 1),
+        }
+
+    def _preload_tick(self, n: int = 1) -> None:
+        with self._preload_progress_lock:
+            self.preload_done += n
 
     def _panel_lock(self, key: str) -> threading.Lock:
         with self._panel_locks_guard:
@@ -393,55 +415,164 @@ class CompareServerState:
         return data
 
 
-def _iter_panel_jobs(index: CompareIndex) -> List[Tuple[str, str, int]]:
-    jobs: List[Tuple[str, str, int]] = []
-    for image_key in index.image_keys:
-        name = index.name_by_key[image_key]
+def _jobs_for_sample(
+    index: CompareIndex,
+    image_key: str,
+    *,
+    preload_panels: bool,
+    preload_points: bool,
+) -> Tuple[List[Tuple[str, str, int]], List[Tuple[str, str]]]:
+    name = index.name_by_key[image_key]
+    panel_jobs: List[Tuple[str, str, int]] = []
+    point_jobs: List[Tuple[str, str]] = []
+    if preload_panels:
         manifest = sample_panels_json(index, image_key)
         for branch in ("raw", "sam2", "sam3"):
             for item in manifest["branches"].get(branch, []):
-                jobs.append((name, branch, int(item["object_index"])))
-    return jobs
-
-
-def _preload_assets(state: CompareServerState, *, workers: int, preload_panels: bool, preload_points: bool) -> None:
-    panel_jobs = _iter_panel_jobs(state.index) if preload_panels else []
-    point_jobs: List[Tuple[str, str]] = []
+                panel_jobs.append((name, branch, int(item["object_index"])))
     if preload_points:
-        for image_key in state.index.image_keys:
-            for branch in ("raw", "sam2", "sam3"):
-                point_jobs.append((image_key, branch))
+        for branch in ("raw", "sam2", "sam3"):
+            point_jobs.append((image_key, branch))
+    return panel_jobs, point_jobs
 
+
+def _run_preload_jobs(
+    state: CompareServerState,
+    panel_jobs: List[Tuple[str, str, int]],
+    point_jobs: List[Tuple[str, str]],
+    *,
+    workers: int,
+    quiet: bool,
+) -> None:
     total = len(panel_jobs) + len(point_jobs)
     if total == 0:
         return
-    _log(f"Preloading {len(panel_jobs)} panel(s) + {len(point_jobs)} point payload(s) with {workers} workers...")
-
-    done = 0
+    done_local = 0
     lock = threading.Lock()
 
     def _tick() -> None:
-        nonlocal done
+        nonlocal done_local
+        state._preload_tick()
+        if quiet:
+            return
         with lock:
-            done += 1
-            if done % 50 == 0 or done == total:
-                _log(f"  preload {done}/{total}")
+            done_local += 1
+            if done_local % 50 == 0 or done_local == total:
+                _log(f"  preload {done_local}/{total}")
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = []
-        for name, branch, obj_idx in panel_jobs:
-            futures.append(pool.submit(state.panel_bytes, name, branch, obj_idx, refresh=False))
-        for image_key, branch in point_jobs:
-            futures.append(pool.submit(state.points_bytes, image_key, branch, refresh=False))
+        futures = [
+            pool.submit(state.panel_bytes, name, branch, obj_idx, refresh=False)
+            for name, branch, obj_idx in panel_jobs
+        ]
+        futures.extend(
+            pool.submit(state.points_bytes, image_key, branch, refresh=False)
+            for image_key, branch in point_jobs
+        )
         for fut in as_completed(futures):
             try:
                 fut.result()
             except Exception as exc:
-                _log(f"  preload warning: {exc}")
+                if not quiet:
+                    _log(f"  preload warning: {exc}")
             _tick()
-    with state._mem_lock:
-        mem_mb = state._mem_used / (1024 * 1024)
-    _log(f"Preload done. Memory cache ~{mem_mb:.0f} MB (limit {state._mem_limit // (1024 * 1024)} MB).")
+
+
+def _start_background_preload(
+    state: CompareServerState,
+    panel_jobs: List[Tuple[str, str, int]],
+    point_jobs: List[Tuple[str, str]],
+    *,
+    workers: int,
+) -> None:
+    total = len(panel_jobs) + len(point_jobs)
+    if total == 0:
+        with state._preload_progress_lock:
+            if state.preload_phase == "blocking":
+                state.preload_phase = "done"
+        return
+
+    def _worker() -> None:
+        with state._preload_progress_lock:
+            state.preload_phase = "background"
+        try:
+            _run_preload_jobs(
+                state, panel_jobs, point_jobs, workers=workers, quiet=True,
+            )
+        except Exception as exc:
+            _log(f"Background preload error: {exc}")
+        finally:
+            with state._preload_progress_lock:
+                state.preload_phase = "done"
+            with state._mem_lock:
+                mem_mb = state._mem_used / (1024 * 1024)
+            _log(
+                f"Background preload finished. "
+                f"Cache ~{mem_mb:.0f} MB / {state._mem_limit // (1024 * 1024)} MB limit."
+            )
+
+    threading.Thread(target=_worker, name="preload-background", daemon=True).start()
+
+
+def _schedule_preload(
+    state: CompareServerState,
+    *,
+    workers: int,
+    preload_panels: bool,
+    preload_points: bool,
+    first_samples: int,
+) -> None:
+    """Preload first N samples before serving; rest continues in background."""
+    blocking_panel: List[Tuple[str, str, int]] = []
+    blocking_point: List[Tuple[str, str]] = []
+    bg_panel: List[Tuple[str, str, int]] = []
+    bg_point: List[Tuple[str, str]] = []
+
+    for i, image_key in enumerate(state.index.image_keys):
+        p_jobs, pt_jobs = _jobs_for_sample(
+            state.index, image_key,
+            preload_panels=preload_panels, preload_points=preload_points,
+        )
+        if first_samples <= 0 or i < first_samples:
+            blocking_panel.extend(p_jobs)
+            blocking_point.extend(pt_jobs)
+        else:
+            bg_panel.extend(p_jobs)
+            bg_point.extend(pt_jobs)
+
+    total = (
+        len(blocking_panel) + len(blocking_point)
+        + len(bg_panel) + len(bg_point)
+    )
+    if total == 0:
+        return
+
+    with state._preload_progress_lock:
+        state.preload_total = total
+        state.preload_done = 0
+        state.preload_phase = "blocking"
+
+    n_block = len(blocking_panel) + len(blocking_point)
+    n_bg = len(bg_panel) + len(bg_point)
+    _log(
+        f"Preload plan: {n_block} job(s) before server opens, "
+        f"{n_bg} job(s) in background ({workers} workers)."
+    )
+
+    if n_block:
+        _run_preload_jobs(
+            state, blocking_panel, blocking_point, workers=workers, quiet=False,
+        )
+
+    if n_bg:
+        _log(f"Server ready — background preload continues ({n_bg} jobs remaining).")
+        _start_background_preload(state, bg_panel, bg_point, workers=workers)
+    else:
+        with state._preload_progress_lock:
+            state.preload_phase = "done"
+        with state._mem_lock:
+            mem_mb = state._mem_used / (1024 * 1024)
+        _log(f"Preload done. Memory cache ~{mem_mb:.0f} MB.")
 
 
 def make_handler(state: CompareServerState):
@@ -507,6 +638,10 @@ def make_handler(state: CompareServerState):
                     {"name": state.index.name_by_key[k], "image_key": k}
                     for k in state.index.image_keys
                 ])
+                return
+
+            if path == "/api/preload/status":
+                self._send_json(state.preload_status())
                 return
 
             parts = path.strip("/").split("/")
@@ -624,13 +759,19 @@ def parse_args() -> argparse.Namespace:
         "--preload",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Pre-render panels and pre-pack point clouds at startup (default on).",
+        help="Enable preload (default on). Use --no-preload to load only on demand.",
+    )
+    parser.add_argument(
+        "--preload-first-samples",
+        type=int,
+        default=5,
+        help="Fully preload this many samples before opening the server; 0 = open immediately.",
     )
     parser.add_argument(
         "--preload-points",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Include point-cloud JSON in startup preload (default on).",
+        help="Include point-cloud JSON in preload (default on).",
     )
     return parser.parse_args()
 
@@ -648,11 +789,12 @@ def main() -> None:
         memory_cache_mb=args.memory_cache_mb,
     )
     if args.preload:
-        _preload_assets(
+        _schedule_preload(
             state,
             workers=max(1, args.workers),
             preload_panels=True,
             preload_points=args.preload_points,
+            first_samples=max(0, args.preload_first_samples),
         )
     handler = make_handler(state)
     server = ThreadingHTTPServer((args.host, args.port), handler)
