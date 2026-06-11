@@ -133,13 +133,26 @@ def _target_sizes(inputs) -> list:
     return sizes.tolist() if hasattr(sizes, "tolist") else list(sizes)
 
 
+_SEG_LOGGED = False
+
+
 def _post_process(processor, outputs, min_score: float, target_sizes: list):
-    return processor.post_process_instance_segmentation(
+    global _SEG_LOGGED
+    result = processor.post_process_instance_segmentation(
         outputs,
         threshold=min_score,
         mask_threshold=0.5,
         target_sizes=target_sizes,
     )
+    if not _SEG_LOGGED:
+        _SEG_LOGGED = True
+        d = result[0] if isinstance(result, list) and result else result
+        print(f"[Sam3Refiner] post_process -> {type(result).__name__}", flush=True)
+        if isinstance(d, dict):
+            for k, v in d.items():
+                extra = f" {tuple(v.shape)} {v.dtype}" if hasattr(v, "shape") else ""
+                print(f"  {k}: {type(v).__name__}{extra}", flush=True)
+    return result
 
 
 def _load_coarse_mask(path: str) -> np.ndarray:
