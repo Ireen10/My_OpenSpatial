@@ -1,44 +1,23 @@
+import os
 import queue
 import threading
 import warnings
 
-# Suppress SyntaxWarnings from Ascend CANN internal libraries (invalid escape
-# sequences in tbe/dsl/unify_schedule/**).  These are third-party issues that
-# do not affect correctness and would otherwise pollute every worker's log.
-warnings.filterwarnings(
-    "ignore",
-    category=SyntaxWarning,
-    module=r"tbe\..*",
-)
+# Suppress SyntaxWarnings from Ascend CANN internal libraries.
+warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"tbe\..*")
 
 import numpy as np
-import torch
-from PIL import Image
-import os
-import tqdm
 import pandas as pd
+import torch
+import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from PIL import Image
 
 from task.base_task import BaseTask
 
 
 def _try_patch_roi_align_for_npu() -> bool:
-    """Replace torchvision.ops.roi_align with torch_npu.npu_roi_align.
-
-    npu_roi_align API (confirmed from CANN docs + example):
-      npu_roi_align(features, rois, spatial_scale, pooled_h, pooled_w,
-                    sample_num, roi_end_mode)
-      features : [1, C, H, W]  — single image only
-      rois     : [N, 5]        — [batch_idx, x0, y0, x1, y1]
-                 batch_idx is always 0 since features is single-image
-
-    torchvision roi_align passes boxes in two formats:
-      a) tuple/list of per-image tensors, each [K_i, 4] (no batch_idx)
-      b) concatenated [N, 5] tensor with batch_idx in column 0
-
-    Both cases are handled by looping over images and calling npu_roi_align
-    once per image with features=[1,C,H,W] and rois=[K_i,5] (batch_idx=0).
-    """
+    """Replace torchvision.ops.roi_align with torch_npu.npu_roi_align on NPU."""
     try:
         import torchvision.ops as _tvops
         import torch_npu  # noqa: F401
@@ -57,14 +36,12 @@ def _try_patch_roi_align_for_npu() -> bool:
             pooled_h = pooled_w = int(output_size)
         else:
             pooled_h, pooled_w = int(output_size[0]), int(output_size[1])
-        roi_end_mode   = 1 if aligned else 0
-        npu_sample_num = max(0, sampling_ratio)   # torchvision -1 → CANN 0
+        roi_end_mode = 1 if aligned else 0
+        npu_sample_num = max(0, sampling_ratio)
 
         if isinstance(boxes, (list, tuple)):
-            # Format (a): per-image [K_i, 4] tensors, no batch_idx
             per_image_boxes = boxes
         else:
-            # Format (b): concatenated [N, 5] with batch_idx in col 0
             if boxes.shape[0] == 0:
                 return input.new_zeros((0, input.shape[1], pooled_h, pooled_w))
             per_image_boxes = [
@@ -75,10 +52,7 @@ def _try_patch_roi_align_for_npu() -> bool:
         for i, b in enumerate(per_image_boxes):
             if b.shape[0] == 0:
                 continue
-            # npu_roi_align: features=[1,C,H,W], rois=[K,5] with batch_idx=0
-            rois_i = torch.cat(
-                [b.new_zeros((b.shape[0], 1)), b.float()], dim=1
-            )
+            rois_i = torch.cat([b.new_zeros((b.shape[0], 1)), b.float()], dim=1)
             results.append(_npu_fn(
                 input[i : i + 1], rois_i,
                 spatial_scale, pooled_h, pooled_w, npu_sample_num, roi_end_mode,
@@ -99,25 +73,38 @@ def _try_patch_roi_align_for_npu() -> bool:
     return True
 
 
-_NPU_ROI_ALIGN_PATCHED = _try_patch_roi_align_for_npu()
+_try_patch_roi_align_for_npu()
 
 
-def _validate_model_path(model_name_or_path: str) -> None:
-    is_local = (
-        os.path.isabs(model_name_or_path)
-        or model_name_or_path.startswith("./")
-        or model_name_or_path.startswith("../")
-    )
-    if is_local and not os.path.isdir(model_name_or_path):
-        raise FileNotFoundError(
-            f"SAM3 weights directory not found: {model_name_or_path!r}\n"
-            "Check 'segmenter_model' in your YAML — absolute path or Hub id 'facebook/sam3'."
-        )
+def _parse_devices(device_raw) -> list[str]:
+    if isinstance(device_raw, (list, tuple)):
+        return [str(d).strip() for d in device_raw if str(d).strip()]
+    return [d.strip() for d in str(device_raw).split(",") if d.strip()]
+
+
+def _set_npu_device(device: str) -> None:
+    if not str(device).startswith("npu"):
+        return
+    try:
+        dev_id = int(str(device).split(":")[-1]) if ":" in str(device) else 0
+        torch.npu.set_device(dev_id)
+    except AttributeError:
+        pass
 
 
 def _load_sam3_replica(segmenter_model: str, load_kwargs: dict, device: str):
     """Load Sam3Processor + Sam3Model. Requires transformers>=5.0.0."""
-    _validate_model_path(segmenter_model)
+    is_local = (
+        os.path.isabs(segmenter_model)
+        or segmenter_model.startswith("./")
+        or segmenter_model.startswith("../")
+    )
+    if is_local and not os.path.isdir(segmenter_model):
+        raise FileNotFoundError(
+            f"SAM3 weights directory not found: {segmenter_model!r}\n"
+            "Check 'segmenter_model' in your YAML — absolute path or Hub id 'facebook/sam3'."
+        )
+
     try:
         from transformers import Sam3Processor, Sam3Model
     except ImportError as e:
@@ -146,6 +133,15 @@ def _target_sizes(inputs) -> list:
     return sizes.tolist() if hasattr(sizes, "tolist") else list(sizes)
 
 
+def _post_process(processor, outputs, min_score: float, target_sizes: list):
+    return processor.post_process_instance_segmentation(
+        outputs,
+        threshold=min_score,
+        mask_threshold=0.5,
+        target_sizes=target_sizes,
+    )
+
+
 def _load_coarse_mask(path: str) -> np.ndarray:
     m = np.array(Image.open(path))
     if m.ndim == 3:
@@ -154,7 +150,6 @@ def _load_coarse_mask(path: str) -> np.ndarray:
 
 
 def _tags_per_box(tags, n_boxes: int) -> list[str]:
-    """One SAM3 text prompt per box, aligned with obj_tags indices."""
     if n_boxes <= 0:
         return []
     if tags is None:
@@ -165,159 +160,27 @@ def _tags_per_box(tags, n_boxes: int) -> list[str]:
         tags = [tags]
     out: list[str] = []
     for i in range(n_boxes):
-        if i < len(tags) and tags[i] is not None and str(tags[i]).strip():
-            out.append(str(tags[i]).strip())
+        tag = tags[i] if i < len(tags) else None
+        if tag is not None and str(tag).strip():
+            out.append(str(tag).strip())
         else:
             out.append("object")
     return out
 
 
-def _post_process(processor, outputs, min_score: float, target_sizes: list):
-    return processor.post_process_instance_segmentation(
-        outputs,
-        threshold=min_score,
-        mask_threshold=0.5,
-        target_sizes=target_sizes,
-    )
-
-
-# Running keep/drop statistics (logged every SCORE_LOG_INTERVAL images).
-_score_log_state: dict = {
-    "images": 0, "boxes_in": 0, "boxes_kept": 0,
-}
-SCORE_LOG_INTERVAL = 500
-
-
-def _log_score_stats(scores_np: np.ndarray, min_score: float) -> None:
-    """Accumulate and periodically print keep/drop statistics."""
-    s = _score_log_state
-    s["images"] += 1
-    s["boxes_in"] += len(scores_np)
-    s["boxes_kept"] += int((scores_np >= min_score).sum())
-
-    if s["images"] % SCORE_LOG_INTERVAL == 0:
-        total_in = s["boxes_in"]
-        total_kept = s["boxes_kept"]
-        pct = 100.0 * total_kept / total_in if total_in else 0.0
-        print(
-            f"[Sam3Refiner] after {s['images']} images | "
-            f"boxes_in={total_in}  "
-            f"kept={total_kept} ({pct:.1f}%)  "
-            f"dropped={total_in - total_kept} ({100.0 - pct:.1f}%)",
-            flush=True,
-        )
-
-
-def _mask_to_numpy(m) -> np.ndarray:
-    if hasattr(m, "float"):
-        m = m.float()
-    if hasattr(m, "cpu"):
-        m = m.cpu().numpy()
-    elif hasattr(m, "numpy"):
-        m = m.numpy()
-    else:
-        m = np.asarray(m)
-    if m.ndim == 3:
-        m = m[0]
-    return m
-
-
-def _best_mask_score_from_seg(seg_item) -> tuple[np.ndarray, float]:
-    """Top-scoring mask from one post_process_instance_segmentation row."""
-    scores = seg_item.get("scores")
-    masks = seg_item.get("masks")
+def _best_mask_from_seg(seg_item) -> tuple[np.ndarray, float]:
+    scores, masks = seg_item.get("scores"), seg_item.get("masks")
     if scores is None or masks is None or len(scores) == 0:
         return np.zeros((1, 1), dtype=np.float32), 0.0
-    if hasattr(scores, "cpu"):
-        scores_np = scores.float().cpu().numpy()
-    else:
-        scores_np = np.asarray(scores, dtype=np.float32)
+    scores_np = scores.float().cpu().numpy() if hasattr(scores, "cpu") else np.asarray(scores)
     best = int(scores_np.argmax())
-    return _mask_to_numpy(masks[best]), float(scores_np[best])
-
-
-def _normalize_boxes_array(boxes) -> np.ndarray:
-    b = np.asarray(boxes, dtype=np.float32)
-    if b.ndim == 1:
-        b = b.reshape(1, 4) if b.size == 4 else b.reshape(-1, 4)
-    return b
-
-
-def _build_hybrid_queries(images, boxes_per_image, tags_per_image) -> list[dict]:
-    """Flatten M pipeline images into independent (text + positive box) prompts.
-
-    Each query is one HF SAM3 concept prompt: e.g. text=\"monitor\" with a
-    positive coarse box localises \"monitor near this region\" on that image.
-    """
-    queries: list[dict] = []
-    for img_idx, image in enumerate(images):
-        boxes = _normalize_boxes_array(boxes_per_image[img_idx])
-        if boxes.shape[0] == 0:
-            continue
-        tags = _tags_per_box(
-            tags_per_image[img_idx] if tags_per_image else None,
-            boxes.shape[0],
-        )
-        for obj_idx, (box, tag) in enumerate(zip(boxes, tags)):
-            queries.append(
-                {
-                    "img_idx": img_idx,
-                    "obj_idx": obj_idx,
-                    "image": image,
-                    "text": tag,
-                    "box": box,
-                }
-            )
-    return queries
-
-
-def _init_per_image_slots(images, boxes_per_image) -> list[tuple[list, list]]:
-    per_image: list[tuple[list, list]] = []
-    for img_idx in range(len(images)):
-        boxes = _normalize_boxes_array(boxes_per_image[img_idx])
-        n = boxes.shape[0]
-        if n == 0:
-            per_image.append(([], []))
-        else:
-            per_image.append(
-                (
-                    [np.zeros((1, 1), dtype=np.float32)] * n,
-                    [0.0] * n,
-                )
-            )
-    return per_image
-
-
-def _store_hybrid_result(
-    per_image: list,
-    img_idx: int,
-    obj_idx: int,
-    mask: np.ndarray,
-    score: float,
-) -> None:
-    masks, scores = per_image[img_idx]
-    masks[obj_idx] = mask
-    scores[obj_idx] = score
-
-
-def _forward_hybrid_chunk(processor, model, device, chunk: list[dict], post_threshold: float):
-    """Batched SAM3 forward: one row per (image, text, positive box)."""
-    inputs = processor(
-        images=[q["image"] for q in chunk],
-        text=[q["text"] for q in chunk],
-        input_boxes=[[q["box"].tolist()] for q in chunk],
-        input_boxes_labels=[[1] for _ in chunk],
-        return_tensors="pt",
-    ).to(device)
-    target_sizes = _target_sizes(inputs)
-    with torch.no_grad():
-        outputs = model(**inputs)
-    return _post_process(processor, outputs, post_threshold, target_sizes)
-
-
-def _apply_seg_to_query(per_image, query: dict, seg_item) -> None:
-    mask, score = _best_mask_score_from_seg(seg_item)
-    _store_hybrid_result(per_image, query["img_idx"], query["obj_idx"], mask, score)
+    mask = masks[best]
+    if hasattr(mask, "float"):
+        mask = mask.float()
+    mask = mask.cpu().numpy() if hasattr(mask, "cpu") else np.asarray(mask)
+    if mask.ndim == 3:
+        mask = mask[0]
+    return mask, float(scores_np[best])
 
 
 def _infer_refiner(
@@ -328,32 +191,48 @@ def _infer_refiner(
     boxes_per_image,
     tags_per_image,
     prompt_batch_size: int = 32,
-    post_threshold: float = 0.0,
 ):
-    """Hybrid text+positive-box refinement for a pipeline batch of M images.
+    """Batched text+positive-box refinement: one SAM3 row per (image, tag, box)."""
+    per_image: list[tuple[list, list]] = []
+    queries: list[dict] = []
 
-    Pipeline ``batch_size`` = M images per ``_refine()`` call. All (text, box)
-    prompts are flattened and run in SAM3 chunks of ``prompt_batch_size`` rows.
-    This follows the HF/Meta batched-independent-prompt pattern (image repeated
-    per row) and keeps the NPU busy on wide batches.
+    for img_idx, image in enumerate(images):
+        boxes = np.asarray(boxes_per_image[img_idx], dtype=np.float32).reshape(-1, 4)
+        n = len(boxes)
+        if n == 0:
+            per_image.append(([], []))
+            continue
+        tags = _tags_per_box(
+            tags_per_image[img_idx] if tags_per_image else None, n,
+        )
+        per_image.append(([np.zeros((1, 1), dtype=np.float32)] * n, [0.0] * n))
+        for obj_idx, (box, tag) in enumerate(zip(boxes, tags)):
+            queries.append({
+                "img_idx": img_idx, "obj_idx": obj_idx,
+                "image": image, "text": tag, "box": box,
+            })
 
-    Each row is the combined-prompt pattern from the SAM3 docs: one obj_tag as
-    ``text`` plus one positive coarse box — e.g. text=\"monitor\" with a monitor
-    ROI box segments the monitor near that region.
-    """
-    per_image = _init_per_image_slots(images, boxes_per_image)
-    queries = _build_hybrid_queries(images, boxes_per_image, tags_per_image)
     if not queries:
         return per_image
 
-    prompt_batch_size = max(1, int(prompt_batch_size))
-    for start in range(0, len(queries), prompt_batch_size):
-        chunk = queries[start : start + prompt_batch_size]
-        seg_list = _forward_hybrid_chunk(
-            processor, model, device, chunk, post_threshold,
-        )
-        for seg_item, q in zip(seg_list, chunk):
-            _apply_seg_to_query(per_image, q, seg_item)
+    batch_size = max(1, int(prompt_batch_size))
+    for start in range(0, len(queries), batch_size):
+        chunk = queries[start : start + batch_size]
+        inputs = processor(
+            images=[q["image"] for q in chunk],
+            text=[q["text"] for q in chunk],
+            input_boxes=[[q["box"].tolist()] for q in chunk],
+            input_boxes_labels=[[1] for _ in chunk],
+            return_tensors="pt",
+        ).to(device)
+        with torch.no_grad():
+            outputs = model(**inputs)
+        seg_list = _post_process(processor, outputs, 0.0, _target_sizes(inputs))
+        for seg, q in zip(seg_list, chunk):
+            mask, score = _best_mask_from_seg(seg)
+            masks, scores = per_image[q["img_idx"]]
+            masks[q["obj_idx"]] = mask
+            scores[q["obj_idx"]] = score
 
     return per_image
 
@@ -367,35 +246,19 @@ class Sam3Refiner(BaseTask):
     def __init__(self, args, device=None):
         super().__init__(args)
         segmenter_model = args.get("segmenter_model", "facebook/sam3")
-        device_raw = args.get("device") or device or (
-            "cuda" if torch.cuda.is_available() else "cpu"
+        devices = _parse_devices(
+            args.get("device") or device or ("cuda" if torch.cuda.is_available() else "cpu")
         )
-        if isinstance(device_raw, (list, tuple)):
-            devices = [str(d).strip() for d in device_raw]
-        else:
-            devices = [d.strip() for d in str(device_raw).split(",")]
         self.device = devices[0]
-
         self.min_score = float(args.get("min_score", self.MIN_SCORE))
         self.min_mask_pixels = int(args.get("min_mask_pixels", self.MIN_MASK_PIXELS))
         self.prompt_batch_size = int(args.get("prompt_batch_size", 32))
 
         replicas_per_device = int(args.get("replicas_per_device", 1))
         self._replica_pool: queue.Queue = queue.Queue()
-        logged = False
         for dev in devices:
             for _ in range(replicas_per_device):
                 proc, model = _load_sam3_replica(segmenter_model, {}, dev)
-                if not logged:
-                    print(
-                        f"[Sam3Refiner] Sam3Model on {dev} | "
-                        f"prompt_batch_size={self.prompt_batch_size} "
-                        f"pipeline_batch_size={args.get('batch_size', 4)} "
-                        f"min_score={self.min_score:.2f} "
-                        f"min_mask_pixels={self.min_mask_pixels}",
-                        flush=True,
-                    )
-                    logged = True
                 model.eval()
                 self._replica_pool.put((proc, model, dev))
 
@@ -404,6 +267,14 @@ class Sam3Refiner(BaseTask):
             self.use_multi_processing = True
             if not args.get("num_workers"):
                 args["num_workers"] = total_replicas
+
+        print(
+            f"[Sam3Refiner] Sam3Model on {','.join(devices)} | "
+            f"replicas={total_replicas} prompt_batch_size={self.prompt_batch_size} "
+            f"pipeline_batch_size={args.get('batch_size', 4)} "
+            f"min_score={self.min_score:.2f} min_mask_pixels={self.min_mask_pixels}",
+            flush=True,
+        )
 
         assert "update_keys" in args, "update_keys must be specified in args."
         self.output_dir = os.path.join(self.args.get("output_dir"), self.args.get("file_name"))
@@ -423,52 +294,55 @@ class Sam3Refiner(BaseTask):
         boxes_per_image = [self._masks_to_bboxes(m) for m in masks_list]
         processor, model, dev = self._replica_pool.get()
         try:
-            # torch.npu.set_device is thread-local; bind the thread to the
-            # correct device before any CANN call so the device context is
-            # correct regardless of which thread in the pool picks this task.
-            try:
-                dev_id = int(dev.split(":")[-1]) if ":" in dev else 0
-                torch.npu.set_device(dev_id)
-            except AttributeError:
-                pass  # non-NPU environment
+            _set_npu_device(dev)
             return _infer_refiner(
                 processor, model, dev,
                 images, boxes_per_image, tags_list,
                 prompt_batch_size=self.prompt_batch_size,
-                post_threshold=0.0,
             )
         finally:
             self._replica_pool.put((processor, model, dev))
 
-    def _results_from_infer(self, per_image):
-        out = []
-        for pred_masks, scores in per_image:
-            _log_score_stats(np.asarray(scores, dtype=np.float32), self.min_score)
-            refined, keep_indices = [], []
-            for i, arr in enumerate(pred_masks):
-                score = float(scores[i]) if i < len(scores) else 0.0
-                if score < self.min_score:
-                    continue
-                arr = np.asarray(arr) > 0
-                if np.sum(arr) > self.min_mask_pixels:
-                    refined.append(arr)
-                    keep_indices.append(i)
-            if keep_indices:
-                bboxes = self._masks_to_bboxes([m.astype(bool) for m in refined]).tolist()
-                out.append((refined, bboxes, keep_indices))
-            else:
-                out.append(([], [], []))
-        return out
+    def _filter_masks(self, pred_masks, scores):
+        refined, keep_indices = [], []
+        for i, arr in enumerate(pred_masks):
+            if float(scores[i]) < self.min_score:
+                continue
+            arr = np.asarray(arr) > 0
+            if np.sum(arr) > self.min_mask_pixels:
+                refined.append(arr)
+                keep_indices.append(i)
+        if not keep_indices:
+            return [], [], []
+        bboxes = self._masks_to_bboxes([m.astype(bool) for m in refined]).tolist()
+        return refined, bboxes, keep_indices
+
+    def _load_example(self, example):
+        image = Image.open(example["image"])
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        coarse = [_load_coarse_mask(p) for p in example["masks"]]
+        return image, coarse
+
+    def _save_example(self, example, idx, refined, bboxes_2d, keep_indices):
+        self._filter_by_keep_indices(example, keep_indices)
+        mask_files = self._save_masks(
+            refined, os.path.join(self.output_dir, "masks"), str(idx),
+        )
+        if len(mask_files) != len(example["obj_tags"]):
+            return None
+        if len(mask_files) != len(example["bboxes_3d_world_coords"]):
+            return None
+        example["masks"] = mask_files
+        example["bboxes_2d"] = bboxes_2d
+        return example
 
     def _process_batch(self, batch_items):
         valid_items = []
         for idx, example in batch_items:
             try:
                 self.validate_example(example)
-                image = Image.open(example["image"])
-                if image.mode != "RGB":
-                    image = image.convert("RGB")
-                coarse = [_load_coarse_mask(p) for p in example["masks"]]
+                image, coarse = self._load_example(example)
                 valid_items.append((idx, example, image, coarse))
             except Exception:
                 pass
@@ -481,23 +355,18 @@ class Sam3Refiner(BaseTask):
             [x[3] for x in valid_items],
             [x[1].get("obj_tags") for x in valid_items],
         )
-        batch_results = self._results_from_infer(per_image)
         boxes_in = sum(len(x[3]) for x in valid_items)
-        boxes_kept = sum(len(ki) for _, _, ki in batch_results)
-
+        boxes_kept = 0
         outputs = []
-        for (idx, example, _, _), (refined, bboxes_2d, keep_indices) in zip(valid_items, batch_results):
+
+        for (idx, example, _, _), (pred_masks, scores) in zip(valid_items, per_image):
+            refined, bboxes_2d, keep_indices = self._filter_masks(pred_masks, scores)
+            boxes_kept += len(keep_indices)
             if not keep_indices:
                 continue
-            self._filter_by_keep_indices(example, keep_indices)
-            mask_files = self._save_masks(refined, os.path.join(self.output_dir, "masks"), str(idx))
-            if len(mask_files) != len(example["obj_tags"]):
-                continue
-            if len(mask_files) != len(example["bboxes_3d_world_coords"]):
-                continue
-            example["masks"] = mask_files
-            example["bboxes_2d"] = bboxes_2d
-            outputs.append(example)
+            saved = self._save_example(example, idx, refined, bboxes_2d, keep_indices)
+            if saved is not None:
+                outputs.append(saved)
 
         return outputs, {
             "samples": len(batch_items),
@@ -582,29 +451,18 @@ class Sam3Refiner(BaseTask):
             raise ValueError("obj_tags is empty")
 
     def _filter_by_keep_indices(self, example, keep_indices):
-        update_keys = self.args.get("update_keys", [])
-        if not update_keys or keep_indices is None:
-            return example
-        for key in update_keys:
+        for key in self.args.get("update_keys", []):
             example[key] = [example[key][i] for i in keep_indices]
         return example
 
     def apply_transform(self, example, idx):
         self.validate_example(example)
-        image = Image.open(example["image"])
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-        coarse = [_load_coarse_mask(p) for p in example["masks"]]
-        refined, bboxes_2d, keep_indices = self._results_from_infer(
-            self._refine([image], [coarse], [example.get("obj_tags")])
-        )[0]
+        image, coarse = self._load_example(example)
+        pred_masks, scores = self._refine([image], [coarse], [example.get("obj_tags")])[0]
+        refined, bboxes_2d, keep_indices = self._filter_masks(pred_masks, scores)
         if not keep_indices:
             return None, False
 
-        self._filter_by_keep_indices(example, keep_indices)
-        mask_files = self._save_masks(refined, os.path.join(self.output_dir, "masks"), str(idx))
-        assert len(mask_files) == len(example["obj_tags"])
-        assert len(mask_files) == len(example["bboxes_3d_world_coords"])
-        example["masks"] = mask_files
-        example["bboxes_2d"] = bboxes_2d
-        return example, True
+        saved = self._save_example(example, idx, refined, bboxes_2d, keep_indices)
+        assert saved is not None
+        return saved, True
