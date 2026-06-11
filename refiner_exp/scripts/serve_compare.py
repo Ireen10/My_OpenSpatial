@@ -382,7 +382,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-run", default="refiner_exp/outputs/raw")
     parser.add_argument("--sam2-run", default="refiner_exp/outputs/sam2")
     parser.add_argument("--sam3-run", default="refiner_exp/outputs/sam3")
-    parser.add_argument("--max-images", type=int, default=20)
+    parser.add_argument("--max-images", type=int, default=0)
     parser.add_argument("--max-panel-width", type=int, default=640)
     parser.add_argument(
         "--max-points-per-object",
