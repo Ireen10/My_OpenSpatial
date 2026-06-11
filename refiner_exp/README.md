@@ -64,9 +64,9 @@ python refiner_exp/scripts/summarize_runs.py \
 - `summary.md`: 便于快速查看的文字摘要。
 - `object_metrics.csv`: 对象粒度的 mask、bbox、pointcloud 指标（每行一个 object × stage）。
 
-### Web 可视化（推荐）
+### Web 可视化
 
-启动本地服务后，用浏览器打开（默认 `127.0.0.1:8848`）：
+启动本地服务后，用浏览器打开（默认绑定 `0.0.0.0:8848`，控制台会打印本机与局域网 URL）：
 
 ```bash
 python refiner_exp/scripts/serve_compare.py \
@@ -81,9 +81,9 @@ python refiner_exp/scripts/serve_compare.py \
 | 路径 | 内容 |
 |------|------|
 | `/` | 样本列表 |
-| `/view/{name}` | 单样本页：2D overlay + RAW/SAM2/SAM3 三列可旋转点云 |
+| `/view/{name}` | 单样本页：2D 对照（每物体单独一张）+ RAW/SAM2/SAM3 三列可旋转点云 |
 
-交互操作：左键拖拽旋转、滚轮缩放、右键平移。
+交互操作：左键拖拽旋转、滚轮缩放、右键平移；**点击 2D 对照图放大**（Esc 关闭）。
 
 **数据加载方式**（按需，非预生成大 HTML）：
 
@@ -93,22 +93,9 @@ python refiner_exp/scripts/serve_compare.py \
 
 重跑 pipeline 后**重启服务**即可看到新数据；2D 缓存可加 `?refresh=1` 强制重绘。
 
+2D 对照图布局：RAW / SAM2 / SAM3 三列，每列按物体纵向排列（每张图仅绘制该物体的 mask、2D 框、3D 线框，避免重叠）。
+
 常用参数：`--max-images`、`--max-points-per-object`（默认 8000）、`--host` / `--port`。
-
-### 可选：批量导出静态 JPG
-
-仅需离线 2D 对照图时：
-
-```bash
-python refiner_exp/scripts/visualize_compare.py \
-  --raw-run refiner_exp/outputs/raw \
-  --sam2-run refiner_exp/outputs/sam2 \
-  --sam3-run refiner_exp/outputs/sam3 \
-  --output-dir refiner_exp/outputs/compare/images \
-  --max-images 20
-```
-
-每张图含三列 mask overlay、2D bbox、3D 线框（同色）。已存在 JPG/JSON 时默认跳过，加 `--force` 重生成。
 
 ---
 

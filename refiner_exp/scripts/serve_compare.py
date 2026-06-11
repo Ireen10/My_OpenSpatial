@@ -73,7 +73,11 @@ _VIEWER_HTML = """<!doctype html>
     header p {{ margin: 0; font-size: 0.85rem; color: #aaa; }}
     a {{ color: #7eb8ff; }}
     .overlay-wrap {{ padding: 12px 16px; background: #111; text-align: center; }}
-    .overlay-wrap img {{ max-width: 100%; border: 1px solid #333; border-radius: 4px; }}
+    .overlay-wrap img {{ max-width: 100%; border: 1px solid #333; border-radius: 4px; cursor: zoom-in; }}
+    .lightbox {{ position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; }}
+    .lightbox.hidden {{ display: none; }}
+    .lightbox-backdrop {{ position: absolute; inset: 0; background: rgba(0,0,0,0.88); }}
+    #lightbox-img {{ position: relative; max-width: 96vw; max-height: 96vh; object-fit: contain; border-radius: 4px; cursor: zoom-out; }}
     .viewers {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 12px 16px 20px; }}
     .panel {{ background: #242424; border: 1px solid #333; border-radius: 6px; min-height: 320px; display: flex; flex-direction: column; }}
     .panel h2 {{ margin: 0; padding: 8px 10px; font-size: 0.9rem; background: #2e2e2e; }}
@@ -86,11 +90,15 @@ _VIEWER_HTML = """<!doctype html>
 <body>
   <header>
     <h1>{title}</h1>
-    <p>拖拽旋转 · 滚轮缩放 · 右键平移</p>
+    <p>拖拽旋转 · 滚轮缩放 · 右键平移 · <span style="color:#ccc">点击图片放大</span></p>
     <p><a href="/">← 样本列表</a> · <a href="/api/sample/{name}/overlay?refresh=1">刷新 2D 图</a></p>
   </header>
   <div class="overlay-wrap">
-    <img src="/api/sample/{name}/overlay" alt="2D overlay" id="overlay-img">
+    <img src="/api/sample/{name}/overlay" alt="2D overlay" id="overlay-img" title="点击放大">
+  </div>
+  <div id="lightbox" class="lightbox hidden">
+    <div class="lightbox-backdrop"></div>
+    <img id="lightbox-img" alt="放大查看">
   </div>
   <div class="viewers">
     <div class="panel"><h2>RAW</h2><div class="meta" id="meta-raw">加载中…</div><canvas id="view-raw"></canvas></div>
@@ -102,6 +110,17 @@ _VIEWER_HTML = """<!doctype html>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
   <script>
     const SAMPLE = {name_json};
+    const overlayImg = document.getElementById("overlay-img");
+    const lightbox = document.getElementById("lightbox");
+    const lightboxImg = document.getElementById("lightbox-img");
+    overlayImg.addEventListener("click", () => {{
+      lightboxImg.src = overlayImg.src;
+      lightbox.classList.remove("hidden");
+    }});
+    lightbox.addEventListener("click", () => lightbox.classList.add("hidden"));
+    document.addEventListener("keydown", (e) => {{
+      if (e.key === "Escape") lightbox.classList.add("hidden");
+    }});
 
     function b64ToBytes(b64) {{
       const bin = atob(b64);
@@ -156,7 +175,7 @@ _VIEWER_HTML = """<!doctype html>
       }}
       const c = packed.centroid;
       controls.target.set(c[0], c[1], c[2]);
-      camera.position.set(c[0], c[1] - extent * 0.15, c[2] + extent * 1.4);
+      camera.position.set(c[0], c[1] + extent * 0.15, c[2] + extent * 1.4);
       controls.update();
       meta.textContent = objects.length + " objects · " + totalPts.toLocaleString() + " pts";
       (function animate() {{

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Create side-by-side Raw/SAM2/SAM3 refiner comparison images."""
+"""Rendering helpers for Raw/SAM2/SAM3 refiner comparison (used by serve_compare)."""
 
 from __future__ import annotations
 
-import argparse
 import base64
 import io
 import json
@@ -16,7 +15,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
-import tqdm
 from PIL import Image, ImageDraw, ImageFont
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -44,6 +42,8 @@ try:
 except ImportError:  # pragma: no cover
     o3d = None
 
+
+MASK_OVERLAY_ALPHA = 55
 
 PALETTE = [
     (255, 60, 60),
@@ -191,45 +191,79 @@ def _project_box_edges(rec: Dict[str, Any]) -> List[Tuple[Tuple[float, float], T
     return edges
 
 
-def _draw_branch_panel(
+def _resize_panel(panel: Image.Image, max_width: int) -> Image.Image:
+    if panel.width <= max_width:
+        return panel
+    scale = max_width / float(panel.width)
+    return panel.resize((max_width, int(panel.height * scale)), resample=Image.BILINEAR)
+
+
+def _draw_object_panel(
+    base_image: Image.Image,
+    rec: Dict[str, Any],
+    *,
+    max_width: int,
+) -> Image.Image:
+    """Draw one object's mask, 2D bbox, and projected 3D bbox on a fresh RGB frame."""
+    canvas = base_image.convert("RGBA")
+    draw = ImageDraw.Draw(canvas)
+    color = _color_for_key(rec["object_key"])
+    mask = _load_mask_cached(str(rec.get("mask_path") or ""))
+    if mask is not None:
+        if mask.shape[::-1] != canvas.size:
+            mask_img = Image.fromarray((mask > 0).astype(np.uint8) * 255, mode="L")
+            mask_img = mask_img.resize(canvas.size, resample=Image.NEAREST)
+            mask = np.array(mask_img) > 0
+        alpha = Image.fromarray((mask.astype(np.uint8) * MASK_OVERLAY_ALPHA), mode="L")
+        fill = Image.new("RGBA", canvas.size, (*color, MASK_OVERLAY_ALPHA))
+        overlay = Image.new("RGBA", canvas.size, (*color, 0))
+        overlay.paste(fill, mask=alpha)
+        canvas = Image.alpha_composite(canvas, overlay)
+        draw = ImageDraw.Draw(canvas)
+        bbox = _mask_bbox(mask)
+        if bbox:
+            draw.rectangle(bbox, outline=color, width=3)
+    for p1, p2 in _project_box_edges(rec):
+        draw.line([p1, p2], fill=(*color, 230), width=3)
+    label = f"{rec.get('object_index', '?')}:{rec.get('tag', '')}"
+    _draw_label(draw, (8, 8), label, color)
+    return _resize_panel(canvas.convert("RGB"), max_width)
+
+
+def _branch_header(branch: str, count: int, width: int) -> Image.Image:
+    header = Image.new("RGB", (width, 34), (45, 45, 45))
+    draw = ImageDraw.Draw(header)
+    draw.text((8, 8), f"{branch.upper()} · {count} obj", fill=(220, 220, 220), font=_font(14))
+    return header
+
+
+def _empty_object_panel(width: int) -> Image.Image:
+    panel = Image.new("RGB", (width, 100), (55, 55, 55))
+    draw = ImageDraw.Draw(panel)
+    draw.text((8, 40), "无物体", fill=(170, 170, 170), font=_font(14))
+    return panel
+
+
+def _draw_branch_column(
     base_image: Image.Image,
     branch: str,
     records: List[Dict[str, Any]],
     max_width: int,
 ) -> Image.Image:
-    canvas = base_image.convert("RGBA")
-    draw = ImageDraw.Draw(canvas)
-    for rec in records:
-        color = _color_for_key(rec["object_key"])
-        mask = _load_mask_cached(str(rec.get("mask_path") or ""))
-        if mask is not None:
-            if mask.shape[::-1] != canvas.size:
-                mask_img = Image.fromarray((mask > 0).astype(np.uint8) * 255, mode="L")
-                mask_img = mask_img.resize(canvas.size, resample=Image.NEAREST)
-                mask = np.array(mask_img) > 0
-            overlay = Image.new("RGBA", canvas.size, (*color, 0))
-            alpha = Image.fromarray((mask.astype(np.uint8) * 120), mode="L")
-            fill = Image.new("RGBA", canvas.size, (*color, 120))
-            overlay.paste(fill, mask=alpha)
-            canvas = Image.alpha_composite(canvas, overlay)
-            draw = ImageDraw.Draw(canvas)
-            bbox = _mask_bbox(mask)
-            if bbox:
-                draw.rectangle(bbox, outline=color, width=4)
-                _draw_label(draw, (bbox[0], max(0, bbox[1] - 20)), f"{rec['object_index']}:{rec['tag']}", color)
+    """Stack per-object panels vertically for one branch."""
+    if records:
+        obj_panels = [_draw_object_panel(base_image, rec, max_width=max_width) for rec in records]
+    else:
+        obj_panels = [_empty_object_panel(max_width)]
+    header = _branch_header(branch, len(records), obj_panels[0].width)
+    return _vstack([header, *obj_panels])
 
-        # Project the original object-level 3D bbox onto RGB.  Use the same
-        # object color as the mask so bbox quality can be checked visually.
-        for p1, p2 in _project_box_edges(rec):
-            draw.line([p1, p2], fill=(*color, 230), width=3)
 
-    title = f"{branch.upper()} objects={len(records)}"
-    _draw_label(draw, (8, 8), title, (30, 30, 30))
-    panel = canvas.convert("RGB")
-    if panel.width > max_width:
-        scale = max_width / float(panel.width)
-        panel = panel.resize((max_width, int(panel.height * scale)), resample=Image.BILINEAR)
-    return panel
+def _camera_points_to_viewer(pts: np.ndarray) -> np.ndarray:
+    """OpenCV camera (x right, y down, z forward) → Three.js Y-up viewer."""
+    out = np.asarray(pts, dtype=np.float32)
+    out[:, 1] *= -1.0
+    return out
 
 
 @lru_cache(maxsize=1024)
@@ -248,7 +282,7 @@ def _load_pcd_points(path: str, max_points: int) -> Tuple[np.ndarray, ...]:
         rng = np.random.default_rng(0)
         keep = rng.choice(len(pts), size=max_points, replace=False)
         pts = pts[keep]
-    return (pts,)
+    return (_camera_points_to_viewer(pts),)
 
 
 def _pack_branch_from_fusion(
@@ -332,6 +366,19 @@ def _fmt(value: Any) -> str:
         return f"{float(value):.2f}"
     except Exception:
         return str(value)
+
+
+def _vstack(panels: List[Image.Image], gap: int = 6, bg: Tuple[int, int, int] = (35, 35, 35)) -> Image.Image:
+    if not panels:
+        return Image.new("RGB", (1, 1), bg)
+    width = max(p.width for p in panels)
+    height = sum(p.height for p in panels) + gap * (len(panels) - 1)
+    out = Image.new("RGB", (width, height), bg)
+    y = 0
+    for panel in panels:
+        out.paste(panel, (0, y))
+        y += panel.height + gap
+    return out
 
 
 def _hstack(panels: List[Image.Image], gap: int = 8) -> Image.Image:
@@ -480,12 +527,12 @@ def render_combined_image(
     if image is None:
         return None
     _enrich_image_records_for_stats(branch_records, index.raw_by_key)
-    panels = [
-        _draw_branch_panel(image, branch, branch_records[branch], max_panel_width)
+    columns = [
+        _draw_branch_column(image, branch, branch_records[branch], max_panel_width)
         for branch in ("raw", "sam2", "sam3")
     ]
-    stats = _stats_panel(image_key, branch_records, index.fusion_by_key, max(p.height for p in panels))
-    return _hstack(panels + [stats])
+    stats = _stats_panel(image_key, branch_records, index.fusion_by_key, max(c.height for c in columns))
+    return _hstack(columns + [stats])
 
 
 def sample_stats_json(index: CompareIndex, image_key: str) -> Dict[str, Any]:
@@ -513,59 +560,3 @@ def sample_stats_json(index: CompareIndex, image_key: str) -> Dict[str, Any]:
     }
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--raw-run", default="refiner_exp/outputs/raw")
-    parser.add_argument("--sam2-run", default="refiner_exp/outputs/sam2")
-    parser.add_argument("--sam3-run", default="refiner_exp/outputs/sam3")
-    parser.add_argument("--output-dir", default="refiner_exp/outputs/compare/images")
-    parser.add_argument("--max-images", type=int, default=20)
-    parser.add_argument("--max-panel-width", type=int, default=640)
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Regenerate JPG/JSON even when outputs already exist.",
-    )
-    return parser.parse_args()
-
-
-def _image_outputs_exist(output_dir: Path, name: str) -> bool:
-    return (output_dir / f"{name}.jpg").is_file() and (output_dir / f"{name}.json").is_file()
-
-
-def main() -> None:
-    args = parse_args()
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    index = build_compare_index(
-        args.raw_run, args.sam2_run, args.sam3_run, max_images=args.max_images,
-    )
-    _log(f"Exporting {len(index.image_keys)} overlay JPG(s) to {output_dir}")
-
-    written = 0
-    skipped = 0
-    for image_key in tqdm.tqdm(index.image_keys, desc="export"):
-        name = index.name_by_key[image_key]
-        if not args.force and _image_outputs_exist(output_dir, name):
-            skipped += 1
-            continue
-        combined = render_combined_image(index, image_key, max_panel_width=args.max_panel_width)
-        if combined is None:
-            continue
-        combined.save(output_dir / f"{name}.jpg", quality=92)
-        (output_dir / f"{name}.json").write_text(
-            json.dumps(sample_stats_json(index, image_key), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        written += 1
-
-    msg = f"Wrote {written} comparison image(s) to {output_dir}"
-    if skipped:
-        msg += f" (skipped {skipped} existing; use --force to refresh)"
-    msg += " — for interactive 3D viewing run: python refiner_exp/scripts/serve_compare.py"
-    print(msg)
-
-
-if __name__ == "__main__":
-    main()
