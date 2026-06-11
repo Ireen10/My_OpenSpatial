@@ -7,12 +7,13 @@ import argparse
 import html as html_module
 import io
 import json
+import socket
 import sys
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -40,12 +41,12 @@ _INDEX_HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Refiner Compare</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 24px; background: #111; color: #eee; }
-    h1 { font-size: 1.2rem; }
-    a { color: #7eb8ff; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    li { margin: 6px 0; }
-    .hint { color: #888; font-size: 0.9rem; }
+    body {{ font-family: system-ui, sans-serif; margin: 24px; background: #111; color: #eee; }}
+    h1 {{ font-size: 1.2rem; }}
+    a {{ color: #7eb8ff; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    li {{ margin: 6px 0; }}
+    .hint {{ color: #888; font-size: 0.9rem; }}
   </style>
 </head>
 <body>
@@ -315,9 +316,49 @@ def make_handler(state: CompareServerState):
     return Handler
 
 
+def _lan_urls(port: int) -> List[str]:
+    seen: set[str] = set()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                seen.add(ip)
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127."):
+                seen.add(ip)
+    except OSError:
+        pass
+    return [f"http://{ip}:{port}/" for ip in sorted(seen)]
+
+
+def _print_listen_urls(host: str, port: int, *, sample_count: int) -> None:
+    _log(f"Serving {sample_count} sample(s)")
+    _log(f"  Local:   http://127.0.0.1:{port}/")
+    _log(f"  Local:   http://localhost:{port}/")
+    if host in ("0.0.0.0", "::"):
+        lan = _lan_urls(port)
+        if lan:
+            for url in lan:
+                _log(f"  Network: {url}")
+        else:
+            _log(f"  Network: http://<this-machine-ip>:{port}/")
+    else:
+        _log(f"  Bind:    http://{host}:{port}/")
+    _log("Press Ctrl+C to stop.")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Bind address (default 0.0.0.0 = all interfaces)",
+    )
     parser.add_argument("--port", type=int, default=8848)
     parser.add_argument("--raw-run", default="refiner_exp/outputs/raw")
     parser.add_argument("--sam2-run", default="refiner_exp/outputs/sam2")
@@ -351,9 +392,7 @@ def main() -> None:
     )
     handler = make_handler(state)
     server = ThreadingHTTPServer((args.host, args.port), handler)
-    url = f"http://{args.host}:{args.port}/"
-    _log(f"Serving {len(index.image_keys)} sample(s) at {url}")
-    _log("Press Ctrl+C to stop.")
+    _print_listen_urls(args.host, args.port, sample_count=len(index.image_keys))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

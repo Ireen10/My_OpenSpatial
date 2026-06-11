@@ -7,6 +7,7 @@ import argparse
 import base64
 import io
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -57,12 +58,50 @@ PALETTE = [
 
 
 def _font(size: int = 18) -> ImageFont.ImageFont:
-    for name in ("arial.ttf", "DejaVuSans.ttf"):
+    """Return a TrueType font when possible (required for textbbox on Windows)."""
+    candidates: List[Path] = []
+    if os.name == "nt":
+        fonts_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        for fname in ("arial.ttf", "Arial.ttf", "segoeui.ttf", "calibri.ttf", "msyh.ttc"):
+            candidates.append(fonts_dir / fname)
+    for path in (
+        *candidates,
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+        Path("DejaVuSans.ttf"),
+        Path("arial.ttf"),
+    ):
+        if not path.is_file():
+            continue
         try:
-            return ImageFont.truetype(name, size)
+            return ImageFont.truetype(str(path), size)
         except OSError:
             continue
+    try:
+        # Pillow >= 10.1: bundled Aileron (FreeType), supports textbbox.
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        pass
     return ImageFont.load_default()
+
+
+def _text_bbox(
+    draw: ImageDraw.ImageDraw,
+    xy: Tuple[int, int],
+    text: str,
+    font: ImageFont.ImageFont,
+) -> Tuple[int, int, int, int]:
+    if hasattr(font, "getbbox"):
+        try:
+            left, top, right, bottom = font.getbbox(text)
+            return (xy[0] + left, xy[1] + top, xy[0] + right, xy[1] + bottom)
+        except (KeyError, OSError, ValueError, AttributeError):
+            pass
+    try:
+        return draw.textbbox(xy, text, font=font)
+    except (AttributeError, KeyError, OSError, ValueError):
+        w = max(len(text) * 8, 8)
+        return (xy[0], xy[1], xy[0] + w, xy[1] + 18)
 
 
 def _color_for_key(key: str) -> Tuple[int, int, int]:
@@ -116,10 +155,7 @@ def _load_image(image_ref: Any) -> Optional[Image.Image]:
 
 def _draw_label(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], text: str, color: Tuple[int, int, int]) -> None:
     font = _font(16)
-    try:
-        box = draw.textbbox(xy, text, font=font)
-    except AttributeError:
-        box = (xy[0], xy[1], xy[0] + len(text) * 8, xy[1] + 18)
+    box = _text_bbox(draw, xy, text, font)
     draw.rectangle(box, fill=color)
     draw.text(xy, text, fill=(255, 255, 255), font=font)
 
