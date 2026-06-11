@@ -29,7 +29,8 @@ from visualize_compare import (  # noqa: E402
     _pack_branch_from_fusion,
     branch_records_for_image,
     build_compare_index,
-    render_combined_image,
+    render_object_panel_image,
+    sample_panels_json,
     sample_stats_json,
 )
 
@@ -72,8 +73,12 @@ _VIEWER_HTML = """<!doctype html>
     header h1 {{ margin: 0 0 6px; font-size: 1.05rem; }}
     header p {{ margin: 0; font-size: 0.85rem; color: #aaa; }}
     a {{ color: #7eb8ff; }}
-    .overlay-wrap {{ padding: 12px 16px; background: #111; text-align: center; }}
-    .overlay-wrap img {{ max-width: 100%; border: 1px solid #333; border-radius: 4px; cursor: zoom-in; }}
+    .panels-2d {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 12px 16px; background: #111; }}
+    .branch-col {{ background: #242424; border: 1px solid #333; border-radius: 6px; padding: 8px; }}
+    .branch-col h3 {{ margin: 0 0 8px; font-size: 0.9rem; color: #ccc; }}
+    .thumb-list {{ display: flex; flex-direction: column; gap: 8px; }}
+    .thumb-list img {{ width: 100%; border: 1px solid #444; border-radius: 4px; cursor: zoom-in; display: block; }}
+    .thumb-list .empty {{ color: #888; font-size: 0.85rem; padding: 8px 0; }}
     .lightbox {{ position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; }}
     .lightbox.hidden {{ display: none; }}
     .lightbox-backdrop {{ position: absolute; inset: 0; background: rgba(0,0,0,0.88); }}
@@ -84,17 +89,22 @@ _VIEWER_HTML = """<!doctype html>
     .panel .meta {{ padding: 6px 10px; font-size: 0.78rem; color: #aaa; }}
     .panel canvas {{ flex: 1; width: 100%; min-height: 280px; cursor: grab; }}
     .stats {{ padding: 12px 16px; font-size: 0.8rem; color: #aaa; max-height: 200px; overflow: auto; }}
-    @media (max-width: 960px) {{ .viewers {{ grid-template-columns: 1fr; }} }}
+    @media (max-width: 960px) {{
+      .panels-2d {{ grid-template-columns: 1fr; }}
+      .viewers {{ grid-template-columns: 1fr; }}
+    }}
   </style>
 </head>
 <body>
   <header>
     <h1>{title}</h1>
     <p>拖拽旋转 · 滚轮缩放 · 右键平移 · <span style="color:#ccc">点击图片放大</span></p>
-    <p><a href="/">← 样本列表</a> · <a href="/api/sample/{name}/overlay?refresh=1">刷新 2D 图</a></p>
+    <p><a href="/">← 样本列表</a> · <a href="?refresh=1">刷新 2D 图</a></p>
   </header>
-  <div class="overlay-wrap">
-    <img src="/api/sample/{name}/overlay" alt="2D overlay" id="overlay-img" title="点击放大">
+  <div class="panels-2d">
+    <div class="branch-col"><h3>RAW</h3><div class="thumb-list" id="panels-raw"></div></div>
+    <div class="branch-col"><h3>SAM2</h3><div class="thumb-list" id="panels-sam2"></div></div>
+    <div class="branch-col"><h3>SAM3</h3><div class="thumb-list" id="panels-sam3"></div></div>
   </div>
   <div id="lightbox" class="lightbox hidden">
     <div class="lightbox-backdrop"></div>
@@ -110,16 +120,46 @@ _VIEWER_HTML = """<!doctype html>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
   <script>
     const SAMPLE = {name_json};
-    const overlayImg = document.getElementById("overlay-img");
+    const REFRESH = new URLSearchParams(location.search).has("refresh");
     const lightbox = document.getElementById("lightbox");
     const lightboxImg = document.getElementById("lightbox-img");
-    overlayImg.addEventListener("click", () => {{
-      lightboxImg.src = overlayImg.src;
+    function openLightbox(src) {{
+      lightboxImg.src = src;
       lightbox.classList.remove("hidden");
-    }});
+    }}
     lightbox.addEventListener("click", () => lightbox.classList.add("hidden"));
     document.addEventListener("keydown", (e) => {{
       if (e.key === "Escape") lightbox.classList.add("hidden");
+    }});
+
+    function panelUrl(branch, objectIndex) {{
+      let url = "/api/sample/" + SAMPLE + "/panel/" + branch + "/" + objectIndex;
+      if (REFRESH) url += "?refresh=1";
+      return url;
+    }}
+
+    fetch("/api/sample/" + SAMPLE + "/panels").then(r => r.json()).then((data) => {{
+      for (const branch of ["raw", "sam2", "sam3"]) {{
+        const list = document.getElementById("panels-" + branch);
+        const items = (data.branches && data.branches[branch]) || [];
+        if (!items.length) {{
+          list.innerHTML = '<div class="empty">无物体</div>';
+          continue;
+        }}
+        for (const item of items) {{
+          const img = document.createElement("img");
+          img.src = panelUrl(branch, item.object_index);
+          img.alt = item.label || "";
+          img.title = (item.label || "") + " — 点击放大";
+          img.addEventListener("click", () => openLightbox(img.src));
+          list.appendChild(img);
+        }}
+      }}
+    }}).catch(err => {{
+      for (const branch of ["raw", "sam2", "sam3"]) {{
+        const list = document.getElementById("panels-" + branch);
+        if (list) list.innerHTML = '<div class="empty">加载失败: ' + err + '</div>';
+      }}
     }});
 
     function b64ToBytes(b64) {{
@@ -243,23 +283,36 @@ def make_handler(state: CompareServerState):
         def _send_html(self, text: str, *, status: int = 200) -> None:
             self._send_bytes(text.encode("utf-8"), "text/html; charset=utf-8", status=status)
 
-        def _overlay_bytes(self, name: str, *, refresh: bool) -> Optional[bytes]:
+        def _panel_bytes(
+            self,
+            name: str,
+            branch: str,
+            object_index: int,
+            *,
+            refresh: bool,
+        ) -> Optional[bytes]:
             image_key = state.index.key_by_name.get(name)
             if image_key is None:
                 return None
-            cache_path = state.cache_dir / f"{name}.jpg"
+            sample_cache = state.cache_dir / name
+            sample_cache.mkdir(parents=True, exist_ok=True)
+            cache_path = sample_cache / f"{branch}_{object_index}.jpg"
             if not refresh and cache_path.is_file():
                 return cache_path.read_bytes()
             with state._overlay_lock:
                 if not refresh and cache_path.is_file():
                     return cache_path.read_bytes()
-                combined = render_combined_image(
-                    state.index, image_key, max_panel_width=state.max_panel_width,
+                panel = render_object_panel_image(
+                    state.index,
+                    image_key,
+                    branch,
+                    object_index,
+                    max_panel_width=state.max_panel_width,
                 )
-                if combined is None:
+                if panel is None:
                     return None
                 buf = io.BytesIO()
-                combined.save(buf, format="JPEG", quality=92)
+                panel.save(buf, format="JPEG", quality=92)
                 data = buf.getvalue()
                 cache_path.write_bytes(data)
             return data
@@ -302,15 +355,25 @@ def make_handler(state: CompareServerState):
                 return
 
             parts = path.strip("/").split("/")
-            # /api/sample/{name}/overlay | stats | points/{branch}
+            # /api/sample/{name}/panels | panel/{branch}/{idx} | stats | points/{branch}
             if len(parts) >= 3 and parts[0] == "api" and parts[1] == "sample":
                 name = parts[2]
                 image_key = state.index.key_by_name.get(name)
                 if image_key is None:
                     self._send_json({"error": "not found"}, status=404)
                     return
-                if len(parts) == 4 and parts[3] == "overlay":
-                    data = self._overlay_bytes(name, refresh=refresh)
+                if len(parts) == 4 and parts[3] == "panels":
+                    self._send_json(sample_panels_json(state.index, image_key))
+                    return
+                if (
+                    len(parts) == 6
+                    and parts[3] == "panel"
+                    and parts[4] in ("raw", "sam2", "sam3")
+                    and parts[5].isdigit()
+                ):
+                    branch = parts[4]
+                    obj_idx = int(parts[5])
+                    data = self._panel_bytes(name, branch, obj_idx, refresh=refresh)
                     if data is None:
                         self.send_error(HTTPStatus.NOT_FOUND)
                         return

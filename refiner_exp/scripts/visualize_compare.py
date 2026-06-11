@@ -43,7 +43,8 @@ except ImportError:  # pragma: no cover
     o3d = None
 
 
-MASK_OVERLAY_ALPHA = 55
+# Overlay opacity 0–255; higher = more opaque (less transparent).
+MASK_OVERLAY_ALPHA = 180
 
 PALETTE = [
     (255, 60, 60),
@@ -230,35 +231,6 @@ def _draw_object_panel(
     return _resize_panel(canvas.convert("RGB"), max_width)
 
 
-def _branch_header(branch: str, count: int, width: int) -> Image.Image:
-    header = Image.new("RGB", (width, 34), (45, 45, 45))
-    draw = ImageDraw.Draw(header)
-    draw.text((8, 8), f"{branch.upper()} · {count} obj", fill=(220, 220, 220), font=_font(14))
-    return header
-
-
-def _empty_object_panel(width: int) -> Image.Image:
-    panel = Image.new("RGB", (width, 100), (55, 55, 55))
-    draw = ImageDraw.Draw(panel)
-    draw.text((8, 40), "无物体", fill=(170, 170, 170), font=_font(14))
-    return panel
-
-
-def _draw_branch_column(
-    base_image: Image.Image,
-    branch: str,
-    records: List[Dict[str, Any]],
-    max_width: int,
-) -> Image.Image:
-    """Stack per-object panels vertically for one branch."""
-    if records:
-        obj_panels = [_draw_object_panel(base_image, rec, max_width=max_width) for rec in records]
-    else:
-        obj_panels = [_empty_object_panel(max_width)]
-    header = _branch_header(branch, len(records), obj_panels[0].width)
-    return _vstack([header, *obj_panels])
-
-
 def _camera_points_to_viewer(pts: np.ndarray) -> np.ndarray:
     """OpenCV camera (x right, y down, z forward) → Three.js Y-up viewer."""
     out = np.asarray(pts, dtype=np.float32)
@@ -320,76 +292,6 @@ def _pack_branch_from_fusion(
         "centroid": centroid.astype(float).tolist(),
         "extent": max(extent, 1e-3),
     }
-
-
-def _stats_panel(
-    image_key: str,
-    branch_records: Dict[str, List[Dict[str, Any]]],
-    fusion_records: Dict[str, Dict[str, Dict[str, Any]]],
-    height: int,
-) -> Image.Image:
-    panel = Image.new("RGB", (440, height), (245, 245, 245))
-    draw = ImageDraw.Draw(panel)
-    font = _font(15)
-    y = 10
-    draw.text((10, y), image_key, fill=(20, 20, 20), font=_font(16))
-    y += 30
-    for branch in ("raw", "sam2", "sam3"):
-        records = branch_records.get(branch, [])
-        draw.text((10, y), f"{branch.upper()} refine objects: {len(records)}", fill=(0, 0, 0), font=font)
-        y += 22
-        for rec in records[:8]:
-            color = _color_for_key(rec["object_key"])
-            fusion = fusion_records.get(branch, {}).get(rec["object_key"], {})
-            pcd_path = fusion.get("pointcloud_path") if fusion else None
-            point_count = _pcd_vertex_count(pcd_path)
-            inside = fusion.get("pointcloud_inside_box_ratio") if fusion else None
-            mask_iou = rec.get("mask_iou_with_raw")
-            text = (
-                f"{rec['object_index']} {rec['tag']}: "
-                f"area={rec.get('mask_area')} "
-                f"IoUraw={_fmt(mask_iou)} "
-                f"pts={point_count if point_count is not None else 'n/a'} "
-                f"in3d={_fmt(inside)}"
-            )
-            draw.rectangle((10, y + 4, 20, y + 14), fill=color)
-            draw.text((26, y), text[:54], fill=(20, 20, 20), font=font)
-            y += 20
-        y += 10
-    return panel
-
-
-def _fmt(value: Any) -> str:
-    if value is None:
-        return "n/a"
-    try:
-        return f"{float(value):.2f}"
-    except Exception:
-        return str(value)
-
-
-def _vstack(panels: List[Image.Image], gap: int = 6, bg: Tuple[int, int, int] = (35, 35, 35)) -> Image.Image:
-    if not panels:
-        return Image.new("RGB", (1, 1), bg)
-    width = max(p.width for p in panels)
-    height = sum(p.height for p in panels) + gap * (len(panels) - 1)
-    out = Image.new("RGB", (width, height), bg)
-    y = 0
-    for panel in panels:
-        out.paste(panel, (0, y))
-        y += panel.height + gap
-    return out
-
-
-def _hstack(panels: List[Image.Image], gap: int = 8) -> Image.Image:
-    height = max(p.height for p in panels)
-    width = sum(p.width for p in panels) + gap * (len(panels) - 1)
-    out = Image.new("RGB", (width, height), (35, 35, 35))
-    x = 0
-    for panel in panels:
-        out.paste(panel, (x, 0))
-        x += panel.width + gap
-    return out
 
 
 def _records_by_image(records: Iterable[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -513,26 +415,58 @@ def branch_records_for_image(index: CompareIndex, image_key: str) -> Dict[str, L
     }
 
 
-def render_combined_image(
+def _record_for_panel(
+    branch_records: Dict[str, List[Dict[str, Any]]],
+    branch: str,
+    object_index: int,
+) -> Optional[Dict[str, Any]]:
+    records = branch_records.get(branch, [])
+    for rec in records:
+        if rec.get("object_index") == object_index:
+            return rec
+    if 0 <= object_index < len(records):
+        return records[object_index]
+    return None
+
+
+def render_object_panel_image(
     index: CompareIndex,
     image_key: str,
+    branch: str,
+    object_index: int,
     *,
     max_panel_width: int = 640,
 ) -> Optional[Image.Image]:
-    branch_records = branch_records_for_image(index, image_key)
-    seed_record = next((records[0] for records in branch_records.values() if records), None)
-    if seed_record is None:
+    """Render a single per-object 2D panel (mask + 2D bbox + 3D wireframe)."""
+    if branch not in ("raw", "sam2", "sam3"):
         return None
-    image = _load_image(seed_record.get("image"))
+    branch_records = branch_records_for_image(index, image_key)
+    rec = _record_for_panel(branch_records, branch, object_index)
+    if rec is None:
+        return None
+    image = _load_image(rec.get("image"))
     if image is None:
         return None
-    _enrich_image_records_for_stats(branch_records, index.raw_by_key)
-    columns = [
-        _draw_branch_column(image, branch, branch_records[branch], max_panel_width)
-        for branch in ("raw", "sam2", "sam3")
-    ]
-    stats = _stats_panel(image_key, branch_records, index.fusion_by_key, max(c.height for c in columns))
-    return _hstack(columns + [stats])
+    return _draw_object_panel(image, rec, max_width=max_panel_width)
+
+
+def sample_panels_json(index: CompareIndex, image_key: str) -> Dict[str, Any]:
+    branch_records = branch_records_for_image(index, image_key)
+    return {
+        "image_key": image_key,
+        "name": index.name_by_key[image_key],
+        "branches": {
+            branch: [
+                {
+                    "object_index": rec.get("object_index"),
+                    "tag": rec.get("tag"),
+                    "label": f"{rec.get('object_index', '?')}:{rec.get('tag', '')}",
+                }
+                for rec in branch_records.get(branch, [])
+            ]
+            for branch in ("raw", "sam2", "sam3")
+        },
+    }
 
 
 def sample_stats_json(index: CompareIndex, image_key: str) -> Dict[str, Any]:
