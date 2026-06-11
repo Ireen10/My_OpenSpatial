@@ -43,12 +43,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from task.localization.sam3_refiner import (
     Sam3Refiner,
-    _build_hybrid_queries,
-    _forward_hybrid_chunk,
     _load_coarse_mask,
     _load_sam3_replica,
-    _normalize_masks_from_seg,
-    _normalize_scores_from_seg,
+    _match_proposals_to_boxes,
+    _post_process,
+    _proposals_to_numpy,
+    _target_sizes,
 )
 import torch
 
@@ -209,8 +209,8 @@ def _side_by_side(*panels: Image.Image, gap: int = 6) -> Image.Image:
 def diagnose_sample(row: dict, data_root: Path | None,
                     processor, model, device: str,
                     output_dir: Path, rank: int,
-                    min_score: float = 0.6,
-                    min_mask_pixels: int = 20) -> dict:
+                    min_coverage: float = 0.10,
+                    min_precision: float = 0.40) -> dict:
     """
     Run one sample through the full refiner chain and save a 3-panel image:
       [original + coarse masks + bboxes] | [SAM3 output masks] | [score table]
@@ -284,18 +284,27 @@ def diagnose_sample(row: dict, data_root: Path | None,
         title=f"coarse masks + derived boxes  ({W}x{H})"
     )
 
-    # ── Run SAM3 (one row per object: single-word text + box, same as refiner) ─
+    # ── Run SAM3 ─────────────────────────────────────────────────────────────
+    text = ". ".join(str(t) for t in tags) if tags else None
+    proc_kwargs = dict(
+        images=image,
+        input_boxes=[boxes.tolist()],
+        input_boxes_labels=[[1] * len(boxes)],
+        return_tensors="pt",
+    )
+    if text:
+        proc_kwargs["text"] = text
+
     try:
-        queries = _build_hybrid_queries([image], [boxes], [tags])
-        seg_list = _forward_hybrid_chunk(processor, model, device, queries)
-        sam3_masks_np = []
-        sam3_scores = []
-        for seg in seg_list:
-            masks_np = _normalize_masks_from_seg(seg, 1)
-            scores_np = _normalize_scores_from_seg(seg, 1)
-            sam3_masks_np.append(masks_np[0] if len(masks_np) else np.zeros((H, W)))
-            sam3_scores.append(float(scores_np[0]) if len(scores_np) else 0.0)
-        sam3_masks_np = np.stack(sam3_masks_np) if sam3_masks_np else np.empty((0, H, W))
+        inputs = processor(**proc_kwargs).to(device)
+        target_sizes = _target_sizes(inputs)
+        h_px, w_px = int(target_sizes[0][0]), int(target_sizes[0][1])
+        with torch.no_grad():
+            outputs = model(**inputs)
+        seg_list = _post_process(processor, outputs, 0.0, target_sizes)
+        seg = seg_list[0]
+        seg_masks_raw = seg.get("masks")
+        n_proposals = len(seg_masks_raw) if seg_masks_raw is not None else 0
     except Exception as exc:
         print(f"  ERROR: SAM3 inference failed — {type(exc).__name__}: {exc}")
         return {
@@ -305,19 +314,30 @@ def diagnose_sample(row: dict, data_root: Path | None,
             "error": str(exc),
         }
 
-    print(f"  SAM3 returned {len(sam3_masks_np)} masks for {len(boxes)} boxes")
+    print(f"  SAM3 returned {n_proposals} proposals for {len(boxes)} boxes")
+    print(f"  (SAM3 is DETR-style: always ~200 proposals; matching by ROI coverage)")
 
-    refined_boxes = Sam3Refiner._masks_to_bboxes([(m > 0) for m in sam3_masks_np])
+    # Batch-convert all proposals (one CPU transfer) then match by coverage.
+    # min_coverage=0.0 here so we always display the best match regardless of
+    # threshold — the summary table shows how many would survive the real gate.
+    prop_np = _proposals_to_numpy(seg_masks_raw)
+    sam3_masks_np, sam3_scores, sam3_precisions = _match_proposals_to_boxes(
+        prop_np, boxes, h_px, w_px, min_coverage=0.0
+    )
+    refined_boxes = Sam3Refiner._masks_to_bboxes([(m > 0.5) for m in sam3_masks_np])
 
-    for k, (m, score) in enumerate(zip(sam3_masks_np, sam3_scores)):
-        px = int((np.asarray(m) > 0).sum())
+    for k, (m, cov, prec) in enumerate(zip(sam3_masks_np, sam3_scores, sam3_precisions)):
+        px = int((m > 0.5).sum())
         tag = tags[k] if k < len(tags) else "?"
-        keeps = score >= min_score and px > min_mask_pixels
+        box = boxes[k]
+        box_area = max(int((box[2] - box[0]) * (box[3] - box[1])), 1)
+        keeps = cov >= min_coverage and prec >= min_precision and px > 20
         verdict = "KEEP" if keeps else "DROP"
-        print(f"    [{k}] {tag:20s}  score={score:.3f}  "
-              f"mask_pixels={px}  [{verdict}]")
+        print(f"    [{k}] {tag:20s}  coverage={cov:.3f} "
+              f"({int(cov*box_area)}/{box_area}px)  "
+              f"precision={prec:.3f}  mask_pixels={px}  [{verdict}]")
 
-    # ── Panel 2: SAM3 output ─────────────────────────────────────────────────
+    # ── Panel 2: SAM3 output (coverage-matched) ──────────────────────────────
     panel_sam3 = _draw_sam3_masks(
         image, sam3_masks_np, sam3_scores, tags,
         coarse_boxes=boxes,
@@ -339,7 +359,9 @@ def diagnose_sample(row: dict, data_root: Path | None,
         "sample_id": sample_id,
         "status": "ok",
         "n_boxes": len(boxes),
-        "scores": sam3_scores,
+        "n_proposals": n_proposals,
+        "coverages": sam3_scores,
+        "precisions": sam3_precisions,
     }
 
 
@@ -366,12 +388,15 @@ def parse_args():
     p.add_argument("--seed", type=int, default=None,
                    help="if set, sample randomly instead of sequentially")
     p.add_argument(
-        "--min_score", type=float, default=0.6,
-        help="Confidence gate (mirrors Sam3Refiner.MIN_SCORE).",
+        "--min_coverage", type=float, default=0.10,
+        help="Recall gate: matched mask must cover ≥ this fraction of the box "
+             "area (mirrors Sam3Refiner.MIN_COVERAGE). Set 0.0 to show all.",
     )
     p.add_argument(
-        "--min_mask_pixels", type=int, default=20,
-        help="Minimum mask area in pixels (mirrors Sam3Refiner.MIN_MASK_PIXELS).",
+        "--min_precision", type=float, default=0.40,
+        help="Purity gate: at least this fraction of the matched mask must lie "
+             "inside the box (mirrors Sam3Refiner.MIN_PRECISION). "
+             "Rejects masks that drift far outside the box region.",
     )
     return p.parse_args()
 
@@ -409,8 +434,8 @@ def main():
         print(f"\n[{rank+1}/{len(indices)}] row={row_idx}")
         r = diagnose_sample(row, args.data_root, processor, model, device,
                             args.output_dir, rank,
-                            min_score=args.min_score,
-                            min_mask_pixels=args.min_mask_pixels)
+                            min_coverage=args.min_coverage,
+                            min_precision=args.min_precision)
         results.append(r)
 
     # ── Summary ───────────────────────────────────────────────────────────────
@@ -419,16 +444,31 @@ def main():
     print("=" * 60)
     ok = [r for r in results if r["status"] == "ok"]
     if ok:
-        all_scores = [s for r in ok for s in r["scores"]]
+        all_cov = [s for r in ok for s in r["coverages"]]
+        total_proposals = sum(r.get("n_proposals", 0) for r in ok)
         print(f"  Samples OK          : {len(ok)}/{len(results)}")
         print(f"  Total boxes         : {sum(r['n_boxes'] for r in ok)}")
-        if all_scores:
-            score_thr = args.min_score
-            kept = sum(1 for s in all_scores if s >= score_thr)
-            print(f"  min_score used      : {score_thr:.2f}")
-            print(f"  Score range         : {min(all_scores):.3f} – {max(all_scores):.3f}")
-            print(f"  Would keep (score)  : {kept}/{len(all_scores)}")
-            print(f"  Drop (score<{score_thr:.0%}) : {len(all_scores) - kept}/{len(all_scores)}")
+        print(f"  Total SAM3 proposals: {total_proposals}")
+        if all_cov:
+            all_prec = [p for r in ok for p in r.get("precisions", [])]
+            cov_thr  = args.min_coverage
+            prec_thr = args.min_precision
+            kept = sum(
+                1 for c, p in zip(all_cov, all_prec)
+                if c >= cov_thr and p >= prec_thr
+            )
+            drop_cov  = sum(1 for c in all_cov if c < cov_thr)
+            drop_prec = sum(
+                1 for c, p in zip(all_cov, all_prec)
+                if c >= cov_thr and p < prec_thr
+            )
+            print(f"  min_coverage used   : {cov_thr:.2f}")
+            print(f"  min_precision used  : {prec_thr:.2f}")
+            print(f"  Coverage  range     : {min(all_cov):.3f} – {max(all_cov):.3f}")
+            print(f"  Precision range     : {min(all_prec):.3f} – {max(all_prec):.3f}  (if any)")
+            print(f"  Would keep (both)   : {kept}/{len(all_cov)}")
+            print(f"  Drop (cov<{cov_thr:.0%})    : {drop_cov}/{len(all_cov)}")
+            print(f"  Drop (prec<{prec_thr:.0%})  : {drop_prec}/{len(all_cov)}")
     print(f"  Outputs saved to    : {args.output_dir.resolve()}")
     print("=" * 60)
     return 0

@@ -1,5 +1,3 @@
-from collections import defaultdict
-
 import numpy as np
 import torch
 from PIL import Image
@@ -78,30 +76,6 @@ def _load_coarse_mask(path: str) -> np.ndarray:
     return mask > 127
 
 
-def _load_sam2_predictor(config_yaml: str, checkpoint_pt: str, device: str):
-    """Local yaml + local .pt → SAM2ImagePredictor."""
-    from hydra import initialize_config_dir
-    from hydra.core.global_hydra import GlobalHydra
-    from sam2.build_sam import build_sam2
-    from sam2.sam2_image_predictor import SAM2ImagePredictor
-
-    config_yaml = os.path.abspath(config_yaml)
-    checkpoint_pt = os.path.abspath(checkpoint_pt)
-    if not os.path.isfile(config_yaml):
-        raise FileNotFoundError(f"segmenter_config not found: {config_yaml}")
-    if not os.path.isfile(checkpoint_pt):
-        raise FileNotFoundError(f"segmenter_checkpoint not found: {checkpoint_pt}")
-
-    config_dir = os.path.dirname(config_yaml)
-    config_name = os.path.splitext(os.path.basename(config_yaml))[0]
-
-    gh = GlobalHydra.instance()
-    gh.clear()
-    initialize_config_dir(config_dir=config_dir, version_base="1.2")
-    sam_model = build_sam2(config_name, checkpoint_pt, device=device)
-    return SAM2ImagePredictor(sam_model)
-
-
 def _load_transformers_replica(segmenter_model: str, load_kwargs: dict, device: str):
     _set_npu_device(device)
     try:
@@ -145,12 +119,18 @@ def _normalize_scores_for_image(scores, image_idx: int, expected_count: int) -> 
     return arr.reshape(-1)[:expected_count]
 
 
-def _infer_transformers_forward(processor, model, device, images, boxes_list):
-    """One SAM2 forward for a sub-batch with uniform boxes-per-image."""
+def _infer_transformers_refiner(processor, model, device, images, boxes_per_image):
+    valid_indices = [i for i, boxes in enumerate(boxes_per_image) if len(boxes) > 0]
+    per_image = [([], []) for _ in images]
+    if not valid_indices:
+        return per_image
+
     _set_npu_device(device)
+    valid_images = [images[i] for i in valid_indices]
+    valid_boxes = [boxes_per_image[i].astype(float).tolist() for i in valid_indices]
     inputs = processor(
-        images=images,
-        input_boxes=boxes_list,
+        images=valid_images,
+        input_boxes=valid_boxes,
         return_tensors="pt",
     ).to(device)
 
@@ -162,40 +142,11 @@ def _infer_transformers_forward(processor, model, device, images, boxes_list):
         original_sizes = original_sizes.cpu()
     all_masks = processor.post_process_masks(outputs.pred_masks.cpu(), original_sizes)
 
-    results = []
-    for out_idx in range(len(images)):
-        expected_count = len(boxes_list[out_idx])
+    for out_idx, orig_idx in enumerate(valid_indices):
+        expected_count = len(boxes_per_image[orig_idx])
         masks_np = _normalize_masks_for_image(all_masks[out_idx], expected_count)
         scores_np = _normalize_scores_for_image(outputs.iou_scores, out_idx, expected_count)
-        results.append((list(masks_np), scores_np.tolist()))
-    return results
-
-
-def _infer_transformers_refiner(processor, model, device, images, boxes_per_image):
-    """Run SAM2 transformers inference; batch only images with the same box count.
-
-    Unlike the official ``sam2`` predictor, ``Sam2Processor`` / ``Sam2Model`` in
-    transformers require every image in one forward to have the same number of
-    box prompts. Images are grouped by box count so we still batch when counts
-    align (e.g. four images each with 3 boxes).
-    """
-    valid_indices = [i for i, boxes in enumerate(boxes_per_image) if len(boxes) > 0]
-    per_image = [([], []) for _ in images]
-    if not valid_indices:
-        return per_image
-
-    buckets: dict[int, list[int]] = defaultdict(list)
-    for i in valid_indices:
-        buckets[len(boxes_per_image[i])].append(i)
-
-    for bucket_indices in buckets.values():
-        bucket_images = [images[i] for i in bucket_indices]
-        bucket_boxes = [boxes_per_image[i].astype(float).tolist() for i in bucket_indices]
-        bucket_results = _infer_transformers_forward(
-            processor, model, device, bucket_images, bucket_boxes
-        )
-        for orig_idx, result in zip(bucket_indices, bucket_results):
-            per_image[orig_idx] = result
+        per_image[orig_idx] = (list(masks_np), scores_np.tolist())
     return per_image
 
 
@@ -213,12 +164,12 @@ class Sam2Refiner(BaseTask):
         self.device = devices[0]
         self.segmenter_backend = args.get("segmenter_backend", args.get("backend", "auto"))
         if self.segmenter_backend == "auto":
-            self.segmenter_backend = "sam2"
+            self.segmenter_backend = "transformers" if _is_npu_device(self.device) else "sam2"
 
         if self.segmenter_backend == "transformers":
             self._init_transformers_backend(segmenter_model, devices)
         elif self.segmenter_backend == "sam2":
-            self._init_sam2_backend()
+            self._init_sam2_backend(segmenter_model)
         else:
             raise ValueError(
                 "segmenter_backend must be one of: auto, sam2, transformers"
@@ -227,16 +178,17 @@ class Sam2Refiner(BaseTask):
         assert "update_keys" in args, "update_keys must be specified in args."
         self.output_dir = os.path.join(self.args.get("output_dir"), self.args.get("file_name"))
 
-    def _init_sam2_backend(self):
-        config_file = self.args.get("segmenter_config")
-        ckpt_path = self.args.get("segmenter_checkpoint")
-        if not config_file or not ckpt_path:
+    def _init_sam2_backend(self, segmenter_model):
+        if _is_npu_device(self.device):
             raise ValueError(
-                "segmenter_backend=sam2 requires segmenter_config (.yaml) "
-                "and segmenter_checkpoint (.pt)."
+                "The official sam2 backend is not NPU-safe in this project. "
+                "Use segmenter_backend: transformers for NPU."
             )
-        _set_npu_device(self.device)
-        self.sam2_model = _load_sam2_predictor(config_file, ckpt_path, self.device)
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+        self.sam2_model = SAM2ImagePredictor.from_pretrained(
+            segmenter_model, trust_remote_code=True, device=self.device
+        )
 
     def _init_transformers_backend(self, segmenter_model, devices):
         load_kwargs = {}
@@ -261,10 +213,9 @@ class Sam2Refiner(BaseTask):
             self.use_multi_processing = True
             if not self.args.get("num_workers"):
                 self.args["num_workers"] = total_replicas
-        self.pipeline_batch_size = int(self.args.get("batch_size", 4))
         print(
             f"[Sam2Refiner] transformers backend on {','.join(devices)} | "
-            f"replicas={total_replicas} pipeline_batch_size={self.pipeline_batch_size} "
+            f"replicas={total_replicas} per-image inference (batch_size ignored) "
             f"min_score={self.MIN_SCORE} min_mask_pixels={self.MIN_MASK_PIXELS}",
             flush=True,
         )
@@ -308,7 +259,6 @@ class Sam2Refiner(BaseTask):
         if self.segmenter_backend == "transformers":
             return self._refine_masks_transformers(image, masks)
 
-        _set_npu_device(self.device)
         self.sam2_model.set_image(image)
         input_boxes = self._masks_to_bboxes(masks)
 
@@ -400,10 +350,14 @@ class Sam2Refiner(BaseTask):
         if not valid_items:
             return [], {"samples": len(batch_items), "boxes_in": 0, "boxes_kept": 0, "samples_saved": 0}
 
-        images = [image for _, _, image, _ in valid_items]
-        boxes_per_image = [self._masks_to_bboxes(coarse) for _, _, _, coarse in valid_items]
-        per_image = self._infer_transformers_batch(images, boxes_per_image)
-        batch_results = self._results_from_infer(per_image)
+        # Sam2Processor cannot pad input_boxes across images with different
+        # object counts; always run one forward pass per image.
+        batch_results = []
+        for _idx, _example, image, coarse in valid_items:
+            per_image = self._infer_transformers_batch(
+                [image], [self._masks_to_bboxes(coarse)]
+            )
+            batch_results.append(self._results_from_infer(per_image)[0])
         boxes_in = sum(len(x[3]) for x in valid_items)
         boxes_kept = sum(len(ki) for _, _, ki in batch_results)
 
@@ -430,7 +384,8 @@ class Sam2Refiner(BaseTask):
 
     def _run_batched(self, dataset):
         num_workers = int(self.args.get("num_workers", 4))
-        batch_size = int(self.args.get("batch_size", 4))
+        # batch_size is ignored: transformers SAM2 requires one image per processor call.
+        batch_size = 1
         examples = list(enumerate(dataset.to_dict("records")))
         batches = [examples[i : i + batch_size] for i in range(0, len(examples), batch_size)]
         window = max(num_workers * 2, num_workers + 1)
