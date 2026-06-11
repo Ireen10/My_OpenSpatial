@@ -295,7 +295,13 @@ def collect_records(
     branch: str,
     stage_label: str,
     run_root: Path,
+    include_assets: bool = True,
 ) -> List[Dict[str, Any]]:
+    """Expand parquet rows to per-object records.
+
+    include_assets=False skips loading masks and point clouds (fast path for
+    visualize_compare); geometry metrics are left None.
+    """
     records: List[Dict[str, Any]] = []
     for row_idx, row_obj in df.iterrows():
         row = row_obj.to_dict()
@@ -304,13 +310,11 @@ def collect_records(
         boxes = _as_list(row.get("bboxes_3d_world_coords"))
         pcds = _as_list(row.get("pointclouds"))
         n = max(len(tags), len(masks), len(boxes), len(pcds))
+        img_k = image_key(row)
         for obj_idx in range(n):
             tag = tags[obj_idx] if obj_idx < len(tags) else ""
             mask_ref = masks[obj_idx] if obj_idx < len(masks) else None
             box = boxes[obj_idx] if obj_idx < len(boxes) else None
-            mask = _load_mask(mask_ref, run_root)
-            stats = mask_stats(mask)
-            proj_bbox = _projected_bbox_from_3d(box, row.get("pose"), row.get("intrinsic"))
             pcd = pcds[obj_idx] if obj_idx < len(pcds) else None
             rec: Dict[str, Any] = {
                 "branch": branch,
@@ -323,23 +327,45 @@ def collect_records(
                 "depth_scale": row.get("depth_scale"),
                 "pose": _safe_str(row.get("pose")),
                 "intrinsic": _safe_str(row.get("intrinsic")),
-                "image_key": image_key(row),
+                "image_key": img_k,
                 "object_index": obj_idx,
                 "object_key": object_key(row, tag, box, obj_idx),
                 "tag": _safe_str(tag),
                 "mask_path": _safe_str(mask_ref),
                 "box_3d": _as_list(box),
                 "box_3d_signature": _box_signature(box),
-                "projected_3d_bbox": proj_bbox,
+                "pointcloud_path": _safe_str(pcd) if isinstance(pcd, str) else None,
             }
-            rec.update(stats)
-            rec["bbox_projected_iou"] = bbox_iou(stats["mask_bbox"], proj_bbox)
-            inter = _bbox_intersection(stats["mask_bbox"], proj_bbox)
-            proj_area = _bbox_area(proj_bbox)
-            bbox_area = _bbox_area(stats["mask_bbox"])
-            rec["bbox_projected_coverage"] = float(inter / proj_area) if proj_area > 0 else None
-            rec["bbox_inside_projected_ratio"] = float(inter / bbox_area) if bbox_area > 0 else None
-            rec.update(_read_pcd_stats(pcd, box, row.get("pose")))
+            if include_assets:
+                mask = _load_mask(mask_ref, run_root)
+                stats = mask_stats(mask)
+                proj_bbox = _projected_bbox_from_3d(box, row.get("pose"), row.get("intrinsic"))
+                rec["projected_3d_bbox"] = proj_bbox
+                rec.update(stats)
+                rec["bbox_projected_iou"] = bbox_iou(stats["mask_bbox"], proj_bbox)
+                inter = _bbox_intersection(stats["mask_bbox"], proj_bbox)
+                proj_area = _bbox_area(proj_bbox)
+                bbox_area = _bbox_area(stats["mask_bbox"])
+                rec["bbox_projected_coverage"] = float(inter / proj_area) if proj_area > 0 else None
+                rec["bbox_inside_projected_ratio"] = float(inter / bbox_area) if bbox_area > 0 else None
+                rec.update(_read_pcd_stats(pcd, box, row.get("pose")))
+            else:
+                rec["projected_3d_bbox"] = None
+                rec.update({
+                    "mask_area": None,
+                    "mask_bbox": None,
+                    "mask_bbox_area": None,
+                    "mask_bbox_fill_ratio": None,
+                    "mask_components": None,
+                    "mask_max_component_ratio": None,
+                    "bbox_projected_iou": None,
+                    "bbox_projected_coverage": None,
+                    "bbox_inside_projected_ratio": None,
+                    "point_count": None,
+                    "pointcloud_aabb_volume": None,
+                    "pointcloud_center_distance_to_box": None,
+                    "pointcloud_inside_box_ratio": None,
+                })
             records.append(rec)
     return records
 
@@ -348,11 +374,17 @@ def _records_by_key(records: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, An
     return {rec["object_key"]: rec for rec in records}
 
 
-def enrich_against_raw(records: List[Dict[str, Any]], raw_records: List[Dict[str, Any]]) -> None:
+def enrich_against_raw(
+    records: List[Dict[str, Any]],
+    raw_records: List[Dict[str, Any]],
+    *,
+    include_assets: bool = True,
+) -> None:
     raw_by_key = _records_by_key(raw_records)
     raw_masks: Dict[str, Optional[np.ndarray]] = {}
-    for raw in raw_records:
-        raw_masks[raw["object_key"]] = _load_mask(raw.get("mask_path"))
+    if include_assets:
+        for raw in raw_records:
+            raw_masks[raw["object_key"]] = _load_mask(raw.get("mask_path"))
 
     for rec in records:
         raw = raw_by_key.get(rec["object_key"])
@@ -363,6 +395,11 @@ def enrich_against_raw(records: List[Dict[str, Any]], raw_records: List[Dict[str
             rec["bbox_center_shift_vs_raw"] = None
             continue
         rec["present_in_raw"] = True
+        if not include_assets:
+            rec["mask_iou_with_raw"] = None
+            rec["mask_area_ratio_vs_raw"] = None
+            rec["bbox_center_shift_vs_raw"] = None
+            continue
         mask = _load_mask(rec.get("mask_path"))
         rec["mask_iou_with_raw"] = mask_iou(mask, raw_masks.get(rec["object_key"]))
         raw_area = raw.get("mask_area") or 0

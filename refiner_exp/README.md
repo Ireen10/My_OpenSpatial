@@ -32,12 +32,11 @@ device: "npu:0,npu:1,npu:2,npu:3"
 replicas_per_device: 1
 use_multi_processing: true
 num_workers: 4
-batch_size: 4
 ```
 
 transformers 后端按官方 SAM2 文档对齐调用：`processor(images=..., input_boxes=..., return_tensors="pt").to(device)`，模型调用传 `multimask_output=False`，再用 `processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"])` 还原到原图尺寸。这样和原 `SAM2ImagePredictor.predict(..., multimask_output=False)` 保持同一输入口径：每个 coarse mask 先转成 `[x_min, y_min, x_max, y_max]` box prompt，每个 prompt 只取一个 best mask，并用 `outputs.iou_scores` 对齐原来的 score 过滤逻辑。
 
-NPU 并行策略是四张卡每张卡一个 `Sam2Model` 实例，避免同一张 NPU 卡部署多个实例触发 AICPU 错误。每个 worker 会一次处理一批图片和每张图片内的多个 box prompt。该路径需要环境中安装支持 SAM2 的新版 `transformers`，以及 Ascend 运行所需的 `torch_npu`。
+NPU 并行策略是四张卡每张卡一个 `Sam2Model` 实例，避免同一张 NPU 卡部署多个实例触发 AICPU 错误。transformers 路径对每张图单独做一次 forward（`Sam2Processor` 无法对不同 object 数量的多图 batch 做 box padding）。并行仍由 `num_workers` 与多卡 replica 提供。该路径需要环境中安装支持 SAM2 的新版 `transformers`，以及 Ascend 运行所需的 `torch_npu`。
 
 ## IO 适配结论
 
@@ -47,7 +46,7 @@ raw/no-refine 分支不需要额外的数据适配器阶段。
 
 raw 分支不会产生 `bboxes_2d`，但这不影响 scene fusion。本实验在汇总和可视化阶段统一从 mask 动态计算 2D bbox，避免为了实验侵入式修改 `filter` 或 `scene_fusion`。如果后续要把 raw 分支直接接入严格依赖 `bboxes_2d` 的 annotation/group 流程，再新增一个独立适配器阶段更合适。
 
-## 汇总指标
+## 汇总与可视化
 
 运行三条分支后生成汇总：
 
@@ -63,16 +62,7 @@ python refiner_exp/scripts/summarize_runs.py \
 
 - `summary.json`: 机器可读的分支级指标。
 - `summary.md`: 便于快速查看的文字摘要。
-- `object_metrics.csv`: 对齐到对象粒度的 mask、bbox、pointcloud 指标。
-
-评估分四层：
-
-- 样本级：filter/refine/fusion 后的样本数。
-- 物体级：filter/refine/fusion 后的物体数、refiner 保留率、fusion 保留率。
-- Mask 质量：面积、连通域数量、最大连通域占比、mask/bbox fill ratio、相对 raw coarse mask 的 IoU 和面积变化率。
-- BBox/3D 质量：mask-derived 2D bbox 面积、中心偏移、与 3D box 投影 bbox 的 IoU/coverage、点云点数、点云落在原 3D bbox 内的比例。
-
-## 可视化
+- `object_metrics.csv`: 对象粒度的 mask、bbox、pointcloud 指标（每行一个 object × stage）。
 
 生成 Raw/SAM2/SAM3 并排 overlay 和 RGB-D mask 点云视图：
 
@@ -83,22 +73,223 @@ python refiner_exp/scripts/visualize_compare.py \
   --sam3-run refiner_exp/outputs/sam3 \
   --output-dir refiner_exp/outputs/compare/images \
   --max-images 20 \
-  --pointcloud-mode both
+  --pointcloud-mode interactive
 ```
 
-每张图会展示三条分支的 mask overlay、mask-derived 2D bbox，以及每个 object 的原始 `bboxes_3d_world_coords` 投影到 RGB 后的 3D bbox 线框。mask、2D bbox 和 3D bbox 线框使用同一个 object 颜色，便于直观看出 3D bbox 是否贴合当前视角中的物体。默认还会用当前分支的 mask 从 RGB + depth 反投影出彩色 object point cloud，并追加 front/top 两个正交视图缩略图。
+每张图会展示三条分支的 mask overlay、mask-derived 2D bbox，以及每个 object 的原始 `bboxes_3d_world_coords` 投影到 RGB 后的 3D bbox 线框。mask、2D bbox 和 3D bbox 线框使用同一个 object 颜色，便于直观看出 3D bbox 是否贴合当前视角中的物体。
 
-点云相关输出：
+启动后会立即打印进度（索引 parquet → 逐图渲染）；默认不再在启动阶段批量读取全部 mask / 点云。
 
-- `--pointcloud-mode none`: 只生成 2D overlay。
-- `--pointcloud-mode render`: 只在 JPG 中追加点云正交视图。
-- `--pointcloud-mode ply`: 只导出可交互查看的 `.ply`。
-- `--pointcloud-mode both`: 同时生成缩略图和 `.ply`，默认值。
+### 交互式点云页面（推荐）
 
-导出的 `.ply` 位于 `refiner_exp/outputs/compare/images/pointclouds/`，可以用 CloudCompare、MeshLab、Open3D viewer 等常见点云工具打开。旁边会输出同名 `.json`，记录该图内对象的自动指标和每个分支导出的点云路径，便于把人工判断和数值指标对应起来。
+默认 `--pointcloud-mode interactive` 会为每个样本生成 `{name}.html`，并汇总到 `index.html`：
+
+```text
+refiner_exp/outputs/compare/images/index.html   ← 样本列表入口
+refiner_exp/outputs/compare/images/{name}.html  ← 单样本交互页
+refiner_exp/outputs/compare/images/{name}.jpg   ← 2D 对照图（嵌在 HTML 顶部）
+```
+
+打开 `index.html` 后进入各样本页，页面内 RAW / SAM2 / SAM3 三列 **WebGL 点云** 支持：
+
+- **左键拖拽**：旋转（OrbitControls）
+- **滚轮**：缩放
+- **右键拖拽**：平移
+
+点云数据以内嵌 base64 方式写入 HTML（默认每分支最多 `--max-interactive-points 20000` 点），无需再开外部查看器。首次打开需能访问 Three.js CDN（`cdn.jsdelivr.net`）；若离线环境可改用本地 HTTP 服务打开目录。
+
+点云相关 `--pointcloud-mode` 选项（**默认 `interactive`**）：
+
+| 模式 | 输出 |
+|------|------|
+| `interactive` | JPG + 交互 HTML（**默认，最快**） |
+| `none` | 仅 2D overlay JPG |
+| `render` | JPG + 静态正交缩略图 |
+| `ply` | JPG + `.ply` 文件 |
+| `both` | JPG + 正交缩略图 + `.ply` |
+| `all` | 以上全部 + 交互 HTML（最慢，含 ASCII 级大文件） |
+
+导出的 `.ply` 位于 `refiner_exp/outputs/compare/images/pointclouds/`，可用 CloudCompare、MeshLab 等打开。同名 `.json` 记录对象指标与点云路径。
+
+---
+
+## 对照试验：阶段与对齐方式
+
+汇总脚本从各分支 parquet 中读取三个阶段的数据：
+
+| 阶段标签 | raw 分支数据来源 | sam2 / sam3 分支数据来源 |
+|----------|------------------|--------------------------|
+| `filter` | `filter_stage/3dbox_filter` | 同上 |
+| `refine` | `filter_stage/3dbox_filter`（无 refine，与 filter 相同） | `localization_stage/sam2_refiner` 或 `sam3_refiner` |
+| `fusion` | `scene_fusion_stage/depth_back_projection` | 同上 |
+
+
+**相对 raw 的基线**：`enrich_against_raw` 使用 **raw 分支 filter 阶段** 的 object 记录作为 coarse mask 基线（不是 sam2/sam3 各自的 filter 输出）。
+
+---
+
+## 指标含义与计算公式
+
+以下符号约定：
+
+- \(M\)：二值 mask（`mask > 0`），像素数记为 \(|M|\)
+- \(B_{\text{mask}}\)：由 mask 外接得到的 axis-aligned 2D bbox，格式 `[x1, y1, x2, y2]`（含边界像素）
+- \(B_{\text{proj}}\)：将 `bboxes_3d_world_coords` 的 8 个角点经 `pose⁻¹` 与 `intrinsic` 投影到图像后取 min/max 得到的 2D bbox
+- \(\text{area}(\cdot)\)：2D bbox 面积，**含端点**：\((x_2 - x_1 + 1)(y_2 - y_1 + 1)\)
+- \(\text{inter}(A, B)\)：两 bbox 交集面积（同样含端点）
+
+### 一、样本级 / 物体级计数
+
+| 指标 | 含义 | 计算 |
+|------|------|------|
+| `samples` | 该阶段 parquet 行数 | `len(df)` |
+| `objects` | 该阶段展开后的物体记录总数 | 各行 `max(len(tags), len(masks), len(boxes), len(pcds))` 之和 |
+| `mean_objects_per_sample` | 平均每图物体数 | `objects / samples` |
+
+### 二、保留率（retention）
+
+在**同一分支内**比较各阶段物体数量（按 object 记录条数，不是 sample 数）：
+
+| 指标 | 含义 | 公式 |
+|------|------|------|
+| `refine_vs_filter` | refine 相对 filter 保留了多少物体 | \(N_{\text{refine}} / N_{\text{filter}}\) |
+| `fusion_vs_filter` | fusion 相对 filter 保留了多少物体 | \(N_{\text{fusion}} / N_{\text{filter}}\) |
+| `fusion_vs_refine` | fusion 相对 refine 保留了多少物体 | \(N_{\text{fusion}} / N_{\text{refine}}\) |
+
+- 值为 `1.0` 表示该阶段没有因 refine 门控或 fusion 空点云等原因丢失物体。
+- 值 `< 1` 表示有物体在中途被丢弃（SAM2 score 过低、SAM3 coverage/precision 不达标、点云为空等）。
+- raw 分支的 `refine_vs_filter` 恒为 `1.0`（refine 即 filter）。
+
+### 三、Mask 几何指标（单 object，单 stage）
+
+| 字段 | 含义 | 公式 |
+|------|------|------|
+| `mask_area` | mask 前景像素数 | \(\|M\| = \sum_{p} M(p)\) |
+| `mask_bbox` | mask 轴对齐外接框 | \(x_1=\min x,\; y_1=\min y,\; x_2=\max x,\; y_2=\max y\)（对 \(M(p)>0\) 的像素） |
+| `mask_bbox_area` | 外接框面积 | \(\text{area}(B_{\text{mask}})\) |
+| `mask_bbox_fill_ratio` | mask 在外接框内的填充率 | \(\|M\| / \text{area}(B_{\text{mask}})\) |
+| `mask_components` | 8-连通域个数 | `scipy.ndimage.label`（无 scipy 时退化为 1） |
+| `mask_max_component_ratio` | 最大连通域占 mask 面积比例 | \(A_{\max} / \|M\|\)，其中 \(A_{\max}\) 为最大连通域像素数 |
+
+**解读**：
+
+- `mask_bbox_fill_ratio` 低 → mask 碎、空洞多，或形状很细长。
+- `mask_max_component_ratio` 低 → 多个离散碎片，refine 可能把背景或邻物并进来。
+- `mask_components` 很大 → 噪声点或过分割。
+
+### 四、Mask 与 3D box 投影的一致性
+
+| 字段 | 含义 | 公式 |
+|------|------|------|
+| `projected_3d_bbox` | 3D 标注框投影到像素的 2D 外接框 \(B_{\text{proj}}\) | 8 角点世界坐标 → 相机系（\(z>10^{-3}\)）→ 针孔投影 → min/max |
+| `bbox_projected_iou` | mask 外接框与 3D 投影框的 IoU | \(\text{inter}(B_{\text{mask}}, B_{\text{proj}}) / \text{area}(B_{\text{mask}} \cup B_{\text{proj}})\) |
+| `bbox_projected_coverage` | 3D 投影框被 mask 外接框覆盖的比例（召回式） | \(\text{inter}(B_{\text{mask}}, B_{\text{proj}}) / \text{area}(B_{\text{proj}})\) |
+| `bbox_inside_projected_ratio` | mask 外接框落在 3D 投影框内的比例（精确式） | \(\text{inter}(B_{\text{mask}}, B_{\text{proj}}) / \text{area}(B_{\text{mask}})\) |
+
+**解读**：
+
+- `bbox_projected_iou` 综合衡量 2D mask 与 3D 标注框在当前视角下的空间一致性。
+- `bbox_projected_coverage` 低 → mask 没盖住 3D 框应有的图像区域（欠分割或框偏大）。
+- `bbox_inside_projected_ratio` 低 → mask 大量伸出 3D 框外（过分割或漂到背景）。
+
+### 五、相对 raw coarse mask 的变化（refine / fusion 阶段）
+
+仅对能在 raw filter 基线中找到相同 `object_key` 的物体计算：
+
+| 字段 | 含义 | 公式 |
+|------|------|------|
+| `present_in_raw` | 该 object 是否存在于 raw filter 基线 | 布尔值 |
+| `mask_iou_with_raw` | 当前 mask 与 raw coarse mask 的 IoU | \(\|M \cap M_{\text{raw}}\| / \|M \cup M_{\text{raw}}\|\) |
+| `mask_area_ratio_vs_raw` | 面积相对 raw 的变化倍率 | \(\|M\| / \|M_{\text{raw}}\|\) |
+| `bbox_center_shift_vs_raw` | mask 外接框中心位移（像素） | \(\sqrt{(c_x - c_x^{\text{raw}})^2 + (c_y - c_y^{\text{raw}})^2}\)，其中 \(c\) 为 bbox 中心 |
+
+**解读**：
+
+- `mask_iou_with_raw` 高且 `mask_area_ratio_vs_raw` 接近 1 → refine 轻微修边，语义稳定。
+- `mask_iou_with_raw` 低但 `mask_area_ratio_vs_raw` 很大 → 可能扩到邻物或背景（SAM2 常见）。
+- `mask_area_ratio_vs_raw` 很小 → 可能过删（SAM3 coverage/precision 门控常见）。
+- `bbox_center_shift_vs_raw` 大 → mask 整体平移，即使 IoU 尚可也可能存在对齐问题。
+
+`summary.md` 中 **Quality Versus Raw** 表对上述三列取 refine 阶段所有有效 object 的算术平均。
+
+### 六、点云指标（fusion 阶段）
+
+从 `depth_back_projection` 写出的 `.pcd` 读取（相机坐标系点云）：
+
+| 字段 | 含义 | 公式 |
+|------|------|------|
+| `point_count` | 点云点数 | \(N\) |
+| `pointcloud_aabb_volume` | 点云轴对齐包围盒体积 | \(\prod_d (\max x_d - \min x_d)\) |
+| `pointcloud_inside_box_ratio` | 点落在**相机系** 3D 标注框内的比例 | 将 `bboxes_3d_world_coords` 变到相机系后，点 \(p\) 满足 \(\|(p-c)R\|_\infty \le \text{extent}/2\) 的比例 |
+| `pointcloud_center_distance_to_box` | 点云质心到 3D 框中心的欧氏距离 | \(\|\bar{p} - c\|_2\) |
+
+**解读**：
+
+- `point_count` 相对 raw 骤降 → mask 收缩或 fusion 空点云剔除。
+- `pointcloud_inside_box_ratio` 低 → 反投影点大量落在标注 3D 框外，mask 与 3D 约束不一致。
+- `pointcloud_aabb_volume` 结合 `point_count` 可看点的空间分散程度（稀疏 vs 紧凑）。
+
+### 七、分支级汇总（`summary.json` / `summary.md`）
+
+各 stage 的 `_stage_summary` 对 object 级字段取算术平均：
+
+| 汇总字段 | 来源字段 |
+|----------|----------|
+| `mean_mask_area` | `mask_area` |
+| `mean_mask_fill_ratio` | `mask_bbox_fill_ratio` |
+| `mean_bbox_projected_iou` | `bbox_projected_iou` |
+| `mean_point_count` | `point_count` |
+| `mean_pointcloud_inside_box_ratio` | `pointcloud_inside_box_ratio` |
+
+`quality_vs_raw` 块：
+
+| 汇总字段 | 来源字段 |
+|----------|----------|
+| `mean_mask_iou_with_raw` | `mask_iou_with_raw`（refine 阶段） |
+| `mean_mask_area_ratio_vs_raw` | `mask_area_ratio_vs_raw`（refine 阶段） |
+| `mean_bbox_center_shift_vs_raw` | `bbox_center_shift_vs_raw`（refine 阶段） |
+
+---
+
+## `object_metrics.csv` 列说明速查
+
+每行对应一个 `(branch, stage, object_key)` 记录。常用列：
+
+| 列名 | 类型 | 说明 |
+|------|------|------|
+| `branch` | str | `raw` / `sam2` / `sam3` |
+| `stage` | str | `filter` / `refine` / `fusion` |
+| `image_key` | str | 图像对齐键 |
+| `object_key` | str | 跨分支物体对齐键 |
+| `object_index` | int | 该行内 list 下标（**仅分支内有效**） |
+| `tag` | str | 物体类别标签 |
+| `mask_path` | str | mask PNG 路径 |
+| `box_3d` | list | 9 维世界系 3D box |
+| `mask_area` … `mask_max_component_ratio` | 见第三节 |
+| `bbox_projected_iou` … `bbox_inside_projected_ratio` | 见第四节 |
+| `present_in_raw` … `bbox_center_shift_vs_raw` | 见第五节 |
+| `point_count` … `pointcloud_inside_box_ratio` | 见第六节 |
+
+---
 
 ## 推荐解读
 
-好的 refine 应该让 mask 更贴合可见物体，同时不让点云数量异常下降，也不让 bbox 中心大幅偏离原 3D box 投影。可疑结果通常表现为 mask 面积剧烈膨胀或收缩、最大连通域占比偏低、bbox 明显漂移到背景、fusion 后物体大量丢失。
+好的 refine 应该让 mask 更贴合可见物体，同时不让点云数量异常下降，也不让 bbox 中心大幅偏离原 3D box 投影。可疑结果通常表现为：
 
-SAM3 需要特别关注 coverage/precision 门控带来的误删；SAM2 需要特别关注 score 通过但 mask 扩到邻近物体或背景的情况。
+| 现象 | 可能原因 | 关注指标 |
+|------|----------|----------|
+| 物体大量丢失 | refine 门控过严 | `refine_vs_filter` ↓ |
+| fusion 后进一步丢失 | 空点云 / 离群点剔除 | `fusion_vs_refine` ↓，`point_count` ↓ |
+| mask 扩到背景/邻物 | SAM2 过分割 | `mask_area_ratio_vs_raw` ↑，`mask_iou_with_raw` ↓，`bbox_inside_projected_ratio` ↓ |
+| mask 被削掉大半 | SAM3 coverage/precision 门控 | `mask_area_ratio_vs_raw` ↓，`mask_iou_with_raw` ↓ |
+| 3D 框与 2D mask 脱节 | 标注框本身偏差或视角问题 | `bbox_projected_iou` ↓ |
+| 点云与 3D 框不一致 | mask 错但反投影仍有点 | `pointcloud_inside_box_ratio` ↓ |
+
+**SAM3** 需特别关注 coverage/precision 门控带来的误删；**SAM2** 需特别关注 score 通过但 mask 扩到邻近物体或背景的情况。
+
+**横向对比建议顺序**：
+
+1. 先看 `retention`：refine/fusion 是否过度丢物体。
+2. 再看 `mean_mask_iou_with_raw` 与 `mean_mask_area_ratio_vs_raw`：相对 coarse mask 是「修边」还是「重画」。
+3. 结合 `mean_bbox_projected_iou` 与可视化中的 3D 线框：判断 2D mask 是否仍被 3D 标注约束。
+4. 最后看 `mean_point_count` 与 `mean_pointcloud_inside_box_ratio`：下游 fusion 是否仍产出合理几何。
