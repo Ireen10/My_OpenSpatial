@@ -78,22 +78,27 @@ def _load_coarse_mask(path: str) -> np.ndarray:
     return mask > 127
 
 
-def _load_sam2_predictor(config_file: str, ckpt_path: str, device: str):
+def _load_sam2_predictor(config_yaml: str, checkpoint_pt: str, device: str):
+    """Local yaml + local .pt → SAM2ImagePredictor."""
+    from hydra import initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
     from sam2.build_sam import build_sam2
     from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-    config_file = os.path.abspath(config_file)
-    ckpt_path = os.path.abspath(ckpt_path)
-    if not os.path.isfile(config_file):
-        raise FileNotFoundError(f"SAM2 config not found: {config_file}")
-    if not os.path.isfile(ckpt_path):
-        raise FileNotFoundError(f"SAM2 checkpoint not found: {ckpt_path}")
+    config_yaml = os.path.abspath(config_yaml)
+    checkpoint_pt = os.path.abspath(checkpoint_pt)
+    if not os.path.isfile(config_yaml):
+        raise FileNotFoundError(f"segmenter_config not found: {config_yaml}")
+    if not os.path.isfile(checkpoint_pt):
+        raise FileNotFoundError(f"segmenter_checkpoint not found: {checkpoint_pt}")
 
-    sam_model = build_sam2(
-        config_file=config_file,
-        ckpt_path=ckpt_path,
-        device=device,
-    )
+    config_dir = os.path.dirname(config_yaml)
+    config_name = os.path.splitext(os.path.basename(config_yaml))[0]
+
+    gh = GlobalHydra.instance()
+    gh.clear()
+    initialize_config_dir(config_dir=config_dir, version_base="1.2")
+    sam_model = build_sam2(config_name, checkpoint_pt, device=device)
     return SAM2ImagePredictor(sam_model)
 
 
@@ -227,8 +232,8 @@ class Sam2Refiner(BaseTask):
         ckpt_path = self.args.get("segmenter_checkpoint")
         if not config_file or not ckpt_path:
             raise ValueError(
-                "segmenter_backend=sam2 requires segmenter_config (hydra yaml) "
-                "and segmenter_checkpoint (.pt), both local paths."
+                "segmenter_backend=sam2 requires segmenter_config (.yaml) "
+                "and segmenter_checkpoint (.pt)."
             )
         _set_npu_device(self.device)
         self.sam2_model = _load_sam2_predictor(config_file, ckpt_path, self.device)
