@@ -78,6 +78,25 @@ def _load_coarse_mask(path: str) -> np.ndarray:
     return mask > 127
 
 
+def _load_sam2_predictor(config_file: str, ckpt_path: str, device: str):
+    from sam2.build_sam import build_sam2
+    from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+    config_file = os.path.abspath(config_file)
+    ckpt_path = os.path.abspath(ckpt_path)
+    if not os.path.isfile(config_file):
+        raise FileNotFoundError(f"SAM2 config not found: {config_file}")
+    if not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(f"SAM2 checkpoint not found: {ckpt_path}")
+
+    sam_model = build_sam2(
+        config_file=config_file,
+        ckpt_path=ckpt_path,
+        device=device,
+    )
+    return SAM2ImagePredictor(sam_model)
+
+
 def _load_transformers_replica(segmenter_model: str, load_kwargs: dict, device: str):
     _set_npu_device(device)
     try:
@@ -194,7 +213,7 @@ class Sam2Refiner(BaseTask):
         if self.segmenter_backend == "transformers":
             self._init_transformers_backend(segmenter_model, devices)
         elif self.segmenter_backend == "sam2":
-            self._init_sam2_backend(segmenter_model)
+            self._init_sam2_backend()
         else:
             raise ValueError(
                 "segmenter_backend must be one of: auto, sam2, transformers"
@@ -203,13 +222,16 @@ class Sam2Refiner(BaseTask):
         assert "update_keys" in args, "update_keys must be specified in args."
         self.output_dir = os.path.join(self.args.get("output_dir"), self.args.get("file_name"))
 
-    def _init_sam2_backend(self, segmenter_model):
+    def _init_sam2_backend(self):
+        config_file = self.args.get("segmenter_config")
+        ckpt_path = self.args.get("segmenter_checkpoint")
+        if not config_file or not ckpt_path:
+            raise ValueError(
+                "segmenter_backend=sam2 requires segmenter_config (hydra yaml) "
+                "and segmenter_checkpoint (.pt), both local paths."
+            )
         _set_npu_device(self.device)
-        from sam2.sam2_image_predictor import SAM2ImagePredictor
-
-        self.sam2_model = SAM2ImagePredictor.from_pretrained(
-            segmenter_model, trust_remote_code=True, device=self.device
-        )
+        self.sam2_model = _load_sam2_predictor(config_file, ckpt_path, self.device)
 
     def _init_transformers_backend(self, segmenter_model, devices):
         load_kwargs = {}
