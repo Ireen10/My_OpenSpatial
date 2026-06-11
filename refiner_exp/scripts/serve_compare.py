@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import colorsys
-import hashlib
 import html as html_module
 import io
 import json
@@ -54,7 +52,21 @@ except ImportError:  # pragma: no cover
 
 
 # Bump when panel rendering / coloring / 3D coords change (invalidates disk cache).
-PANEL_RENDER_VERSION = "v3"
+PANEL_RENDER_VERSION = "v5"
+
+# Ten high-contrast colors; object_index % 10 picks one (per branch, not cross-column).
+OBJECT_COLORS: Tuple[Tuple[int, int, int], ...] = (
+    (230, 25, 75),    # red
+    (60, 180, 75),    # green
+    (0, 130, 200),    # blue
+    (255, 165, 0),    # orange
+    (145, 30, 180),   # purple
+    (0, 200, 200),    # cyan
+    (255, 0, 180),    # magenta
+    (210, 220, 0),    # yellow-green
+    (120, 60, 30),    # brown
+    (255, 105, 180),  # pink
+)
 
 # Overlay opacity 0–255; higher = more opaque (less transparent).
 MASK_OVERLAY_ALPHA = 180
@@ -110,14 +122,9 @@ def _text_bbox(
         return (xy[0], xy[1], xy[0] + w, xy[1] + 18)
 
 
-def _object_color(object_key: str) -> Tuple[int, int, int]:
-    """Deterministic RGB from object_key (same key → same color in 2D and 3D)."""
-    digest = hashlib.sha256(object_key.encode("utf-8")).digest()
-    hue = int.from_bytes(digest[0:2], "big") / 65535.0
-    saturation = 0.68 + (digest[2] / 255.0) * 0.22
-    value = 0.84 + (digest[3] / 255.0) * 0.14
-    red, green, blue = colorsys.hsv_to_rgb(hue, saturation, value)
-    return (int(red * 255), int(green * 255), int(blue * 255))
+def _index_color(object_index: int) -> Tuple[int, int, int]:
+    """Palette color by object_index; 2D and 3D in the same column use the same index."""
+    return OBJECT_COLORS[int(object_index) % len(OBJECT_COLORS)]
 
 
 def _sanitize_name(text: str) -> str:
@@ -215,7 +222,7 @@ def _draw_object_panel(
     """Draw one object's mask, 2D bbox, and projected 3D bbox on a fresh RGB frame."""
     canvas = base_image.convert("RGBA")
     draw = ImageDraw.Draw(canvas)
-    color = _object_color(rec["object_key"])
+    color = _index_color(int(rec.get("object_index", 0)))
     mask = _load_mask_cached(str(rec.get("mask_path") or ""))
     if mask is not None:
         if mask.shape[::-1] != canvas.size:
@@ -239,10 +246,9 @@ def _draw_object_panel(
 
 
 def _camera_points_to_viewer(pts: np.ndarray) -> np.ndarray:
-    """OpenCV camera frame → Three.js scene (right-handed, Y-up, camera looks -Z)."""
+    """OpenCV camera frame → viewer: keep +Z depth, flip Y so image is not upside-down."""
     out = np.asarray(pts, dtype=np.float32).copy()
     out[:, 1] *= -1.0
-    out[:, 2] *= -1.0
     return out
 
 
@@ -267,19 +273,17 @@ def _load_pcd_points(path: str, max_points: int) -> Tuple[np.ndarray, ...]:
 
 def _pack_branch_from_fusion(
     refine_records: List[Dict[str, Any]],
-    fusion_by_key: Dict[str, Dict[str, Any]],
     max_points_per_object: int,
 ) -> Dict[str, Any]:
     """Pack per-object fusion .pcd clouds for one branch (colors match 2D overlay)."""
     objects: List[Dict[str, Any]] = []
     chunks: List[np.ndarray] = []
     for rec in refine_records:
-        fusion = fusion_by_key.get(rec["object_key"], {})
-        path = str(fusion.get("pointcloud_path") or "")
+        path = str(rec.get("pointcloud_path") or "")
         pts = _load_pcd_points(path, max_points_per_object)[0]
         if len(pts) == 0:
             continue
-        r, g, b = _object_color(rec["object_key"])
+        r, g, b = _index_color(int(rec.get("object_index", 0)))
         objects.append({
             "tag": rec.get("tag", ""),
             "object_index": rec.get("object_index"),
@@ -314,6 +318,31 @@ def _records_by_key(records: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, An
     return {rec["object_key"]: rec for rec in records}
 
 
+def _records_by_image_object(
+    records: Iterable[Dict[str, Any]],
+) -> Dict[Tuple[str, int], Dict[str, Any]]:
+    return {(rec["image_key"], int(rec["object_index"])): rec for rec in records}
+
+
+def _merge_fusion_fields(
+    refine_records: List[Dict[str, Any]],
+    fusion_records: List[Dict[str, Any]],
+) -> None:
+    """Overlay scene_fusion outputs (refined 3D box, .pcd path) onto refine-stage records."""
+    fusion_lut = _records_by_image_object(fusion_records)
+    for rec in refine_records:
+        fusion = fusion_lut.get((rec["image_key"], int(rec["object_index"])))
+        if fusion is None:
+            continue
+        box = fusion.get("box_3d")
+        if box:
+            rec["box_3d"] = box
+            rec["box_3d_signature"] = fusion.get("box_3d_signature")
+        pcd = fusion.get("pointcloud_path")
+        if pcd:
+            rec["pointcloud_path"] = pcd
+
+
 def load_branch_records(
     branch: str,
     run_root: Path,
@@ -332,6 +361,7 @@ def load_branch_records(
         fusion_df, branch=branch, stage_label="fusion", run_root=run_root, include_assets=False,
     )
     enrich_against_raw(refine_records, raw_filter_records, include_assets=False)
+    _merge_fusion_fields(refine_records, fusion_records)
     return refine_records, fusion_records
 
 
@@ -365,7 +395,6 @@ class CompareIndex:
     name_by_key: Dict[str, str]
     key_by_name: Dict[str, str]
     by_image: Dict[str, Dict[str, List[Dict[str, Any]]]]
-    fusion_by_key: Dict[str, Dict[str, Dict[str, Any]]]
     raw_by_key: Dict[str, Dict[str, Any]]
 
 
@@ -392,15 +421,14 @@ def build_compare_index(
     raw_by_key = _records_by_key(raw_filter_records)
 
     refine_by_branch: Dict[str, List[Dict[str, Any]]] = {}
-    fusion_by_branch: Dict[str, List[Dict[str, Any]]] = {}
     for branch, root in run_roots.items():
         _log(f"  indexing branch={branch} ...")
-        refine_by_branch[branch], fusion_by_branch[branch] = load_branch_records(
+        refine_records, _fusion_records = load_branch_records(
             branch, root, raw_filter_records,
         )
+        refine_by_branch[branch] = refine_records
 
     by_image = {branch: _records_by_image(records) for branch, records in refine_by_branch.items()}
-    fusion_by_key = {branch: _records_by_key(records) for branch, records in fusion_by_branch.items()}
     image_keys = sorted(set().union(*(set(items.keys()) for items in by_image.values())))
     if max_images:
         image_keys = image_keys[:max_images]
@@ -412,7 +440,6 @@ def build_compare_index(
         name_by_key=name_by_key,
         key_by_name=key_by_name,
         by_image=by_image,
-        fusion_by_key=fusion_by_key,
         raw_by_key=raw_by_key,
     )
 
@@ -471,7 +498,7 @@ def sample_panels_json(index: CompareIndex, image_key: str) -> Dict[str, Any]:
                     "object_key": rec.get("object_key"),
                     "tag": rec.get("tag"),
                     "label": f"{rec.get('object_index', '?')}:{rec.get('tag', '')}",
-                    "color": list(_object_color(rec["object_key"])),
+                    "color": list(_index_color(int(rec.get("object_index", 0)))),
                 }
                 for rec in branch_records.get(branch, [])
             ]
@@ -494,9 +521,7 @@ def sample_stats_json(index: CompareIndex, image_key: str) -> Dict[str, Any]:
                     "object_index": rec.get("object_index"),
                     "mask_area": rec.get("mask_area"),
                     "mask_iou_with_raw": rec.get("mask_iou_with_raw"),
-                    "point_count": _pcd_vertex_count(
-                        (index.fusion_by_key.get(branch, {}).get(rec["object_key"]) or {}).get("pointcloud_path")
-                    ),
+                    "point_count": _pcd_vertex_count(rec.get("pointcloud_path")),
                 }
                 for rec in branch_records[branch]
             ]
@@ -653,6 +678,7 @@ _VIEWER_HTML = """<!doctype html>
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(0x141414);
       const camera = new THREE.PerspectiveCamera(50, w / h, 0.001, 500);
+      camera.up.set(0, -1, 0);
       const controls = new THREE.OrbitControls(camera, canvas);
       controls.enableDamping = false;
       let visible = false;
@@ -660,8 +686,8 @@ _VIEWER_HTML = """<!doctype html>
       const objects = (packed && packed.objects) ? packed.objects : [];
       if (!objects.length) {{
         meta.textContent = "无点云";
-        camera.position.set(0, 0, 2);
         controls.target.set(0, 0, 1);
+        camera.position.set(0, 0, -2);
         controls.update();
         renderer.render(scene, camera);
         return;
@@ -687,10 +713,10 @@ _VIEWER_HTML = """<!doctype html>
         }})));
       }}
       const c = packed.centroid;
-      // Points are OpenCV→Three.js (x,-y,-z): scene in front of camera has z < 0.
-      // Place camera on +Z side looking toward the cloud (same side as RGB camera).
+      // OpenCV camera at origin looks +Z; scene points have z>0 (near=small z, far=large z).
+      // Viewer uses (x,-y,z); place virtual camera on -Z side looking into the scene.
       controls.target.set(c[0], c[1], c[2]);
-      camera.position.set(c[0], c[1] + extent * 0.12, c[2] + extent * 1.35);
+      camera.position.set(c[0], c[1], c[2] - extent * 1.2);
       controls.update();
       meta.textContent = objects.length + " objects · " + totalPts.toLocaleString() + " pts";
       function renderOnce() {{
@@ -875,7 +901,6 @@ class CompareServerState:
         branch_records = branch_records_for_image(self.index, image_key)
         packed = _pack_branch_from_fusion(
             branch_records[branch],
-            self.index.fusion_by_key[branch],
             self.max_points_per_object,
         )
         data = json.dumps(packed, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

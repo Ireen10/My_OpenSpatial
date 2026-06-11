@@ -36,25 +36,15 @@ pipeline:
 
         segmenter_model: facebook/sam3
 
-        # Quality gates — all three must pass simultaneously.
-        # min_coverage : intersection/box_area ≥ this (recall gate).
-        #                How much of the box is covered. Default 0.10.
-        # min_precision: intersection/mask_pixels ≥ this (purity gate).
-        #                How much of the mask stays inside the box.
-        #                Rejects masks that drift outside (e.g. a wall
-        #                segment that barely clips the box corner).
-        #                Default 0.40.
-        # min_mask_pixels: absolute lower bound. Default 20.
-        min_coverage: 0.10
-        min_precision: 0.40
+        # Quality gates (same as Sam2Refiner): confidence + minimum mask area.
+        min_score: 0.6
         min_mask_pixels: 20
 
         device: "npu:0,npu:1"
         replicas_per_device: 1
         use_multi_processing: true
         num_workers: 2
-        batch_size: 4                # pipeline images per _refine() call
-        prompt_batch_size: 32        # SAM3 hybrid-prompt rows per NPU forward
+        batch_size: 4                # images per SAM3 forward (nested boxes/text per image)
 
     scene_fusion_stage:
       -

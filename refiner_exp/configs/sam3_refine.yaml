@@ -32,8 +32,7 @@ pipeline:
         output_dir:
 
         segmenter_model: facebook/sam3
-        min_coverage: 0.10
-        min_precision: 0.40
+        min_score: 0.6
         min_mask_pixels: 20
 
         device: "npu:0,npu:1"
@@ -41,7 +40,6 @@ pipeline:
         use_multi_processing: true
         num_workers: 2
         batch_size: 4
-        prompt_batch_size: 32
 
     scene_fusion_stage:
       -
