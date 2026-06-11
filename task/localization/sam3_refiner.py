@@ -188,26 +188,15 @@ _score_log_state: dict = {
 SCORE_LOG_INTERVAL = 500
 
 
-def _log_score_stats(
-    coverages_np: np.ndarray,
-    precisions_np: np.ndarray,
-    min_coverage: float,
-    min_precision: float,
-) -> None:
-    """Accumulate and periodically print keep/drop statistics.
-
-    Reports how many boxes pass both the coverage and precision gates,
-    giving a running picture of how much data the refiner is retaining.
-    """
+def _log_score_stats(scores_np: np.ndarray, min_score: float) -> None:
+    """Accumulate and periodically print keep/drop statistics."""
     s = _score_log_state
     s["images"] += 1
-    s["boxes_in"] += len(coverages_np)
-    s["boxes_kept"] += int(
-        ((coverages_np >= min_coverage) & (precisions_np >= min_precision)).sum()
-    )
+    s["boxes_in"] += len(scores_np)
+    s["boxes_kept"] += int((scores_np >= min_score).sum())
 
     if s["images"] % SCORE_LOG_INTERVAL == 0:
-        total_in   = s["boxes_in"]
+        total_in = s["boxes_in"]
         total_kept = s["boxes_kept"]
         pct = 100.0 * total_kept / total_in if total_in else 0.0
         print(
@@ -219,135 +208,32 @@ def _log_score_stats(
         )
 
 
-def _best_mask_from_seg(seg_item):
-    scores = seg_item["scores"]
-    if scores is None or len(scores) == 0:
-        return None, 0.0
-    best = int(scores.argmax())
-    m = seg_item["masks"][best]
+def _mask_to_numpy(m) -> np.ndarray:
     if hasattr(m, "float"):
         m = m.float()
     if hasattr(m, "cpu"):
         m = m.cpu().numpy()
-    if m.ndim == 3:
-        m = m[0]
-    return m, float(scores[best])
-
-
-def _extract_mask(m) -> np.ndarray:
-    """Convert a SAM3 mask tensor/array to a 2-D float32 numpy array."""
-    if hasattr(m, "float"):
-        m = m.float()
-    if hasattr(m, "cpu"):
-        m = m.cpu().numpy()
+    elif hasattr(m, "numpy"):
+        m = m.numpy()
+    else:
+        m = np.asarray(m)
     if m.ndim == 3:
         m = m[0]
     return m
 
 
-def _proposals_to_numpy(seg_masks_raw) -> np.ndarray:
-    """Batch-convert SAM3 output masks to a single (N_prop, H, W) float32 array.
-
-    SAM3 returns masks either as a stacked tensor (N, 1, H, W) or a sequence
-    of per-proposal tensors/arrays.  This function issues ONE .cpu().numpy()
-    call regardless of N, avoiding 200 individual Python→C++ round-trips that
-    would occur if each mask were converted in a loop.
-
-    Returns shape (N_prop, H, W) float32.
-    """
-    if seg_masks_raw is None or len(seg_masks_raw) == 0:
-        return np.empty((0,), dtype=np.float32)
-
-    # Case 1: already a tensor with a batch dimension → one call suffices
-    if hasattr(seg_masks_raw, "cpu"):
-        arr = seg_masks_raw.float().cpu().numpy()           # (N, [1,] H, W)
-        if arr.ndim == 4:
-            arr = arr[:, 0]                                 # (N, H, W)
-        return arr.astype(np.float32, copy=False)
-
-    # Case 2: list/tuple of tensors or arrays — one stack after batch-moving
-    parts = []
-    for m in seg_masks_raw:
-        if hasattr(m, "cpu"):
-            m = m.float().cpu().numpy()
-        elif hasattr(m, "numpy"):
-            m = m.numpy()
-        if m.ndim == 3:
-            m = m[0]
-        parts.append(m)
-    return np.stack(parts).astype(np.float32, copy=False)  # (N, H, W)
-
-
-def _match_proposals_to_boxes(
-    prop_np: np.ndarray,
-    boxes: np.ndarray,
-    h: int,
-    w: int,
-    min_coverage: float = 0.05,
-) -> tuple[list[np.ndarray], list[float], list[float]]:
-    """Match SAM3 proposals to input boxes by ROI coverage (vectorised).
-
-    SAM3 is a DETR-style video model with ~200 fixed query slots.  It always
-    returns ~200 proposals regardless of how many box prompts were given, so
-    seg_masks[k] does NOT correspond to input box k.
-
-    Parameters
-    ----------
-    prop_np : (N_prop, H, W) float32 numpy array
-        All proposals for one image, pre-converted by _proposals_to_numpy.
-        Passing a pre-stacked array avoids rebuilding it here and allows the
-        caller to share a single copy across multiple uses.
-
-    For each input box, the proposal with the highest *coverage* is selected:
-        coverage  = intersection / box_area   (recall  — how much of the box)
-        precision = intersection / mask_pixels (purity  — how much of the mask
-                                                is inside the box)
-
-    If the best coverage is below `min_coverage` (default 5 %) the box is
-    considered unmatched and receives an empty mask with zero scores.
-
-    Returns (masks_out, coverages_out, precisions_out) — all length == len(boxes).
-    """
-    n = len(boxes)
-    if prop_np.ndim < 3 or prop_np.shape[0] == 0:
-        empty = np.zeros((h, w), dtype=np.float32)
-        return [empty] * n, [0.0] * n, [0.0] * n
-
-    # Binarize once; prop_pixels computed once — reused for every box
-    prop_bin    = prop_np > 0.5                                 # (N_prop, H, W) bool
-    prop_pixels = prop_bin.sum(axis=(1, 2)).astype(np.float32)  # (N_prop,)
-
-    masks_out: list[np.ndarray] = []
-    coverages_out: list[float]  = []
-    precisions_out: list[float] = []
-
-    for box in boxes:
-        x1, y1 = max(0, int(box[0])), max(0, int(box[1]))
-        x2, y2 = min(w, int(box[2])), min(h, int(box[3]))
-        box_area = max((x2 - x1) * (y2 - y1), 1)
-
-        if x2 <= x1 or y2 <= y1:
-            masks_out.append(np.zeros((h, w), dtype=np.float32))
-            coverages_out.append(0.0)
-            precisions_out.append(0.0)
-            continue
-
-        # Vectorised over all N_prop simultaneously — no Python loop over proposals
-        roi_hits = prop_bin[:, y1:y2, x1:x2].sum(axis=(1, 2))  # (N_prop,)
-        coverage = roi_hits / box_area
-
-        best_k     = int(coverage.argmax())
-        best_cov   = float(coverage[best_k])
-        best_prec  = float(roi_hits[best_k]) / max(float(prop_pixels[best_k]), 1.0)
-
-        if best_cov < min_coverage:
-            masks_out.append(np.zeros((h, w), dtype=np.float32))
-        else:
-            masks_out.append(prop_np[best_k])               # no copy — caller owns the array
-        coverages_out.append(best_cov)
-        precisions_out.append(best_prec)
-
-    return masks_out, coverages_out, precisions_out
+def _best_mask_score_from_seg(seg_item) -> tuple[np.ndarray, float]:
+    """Top-scoring mask from one post_process_instance_segmentation row."""
+    scores = seg_item.get("scores")
+    masks = seg_item.get("masks")
+    if scores is None or masks is None or len(scores) == 0:
+        return np.zeros((1, 1), dtype=np.float32), 0.0
+    if hasattr(scores, "cpu"):
+        scores_np = scores.float().cpu().numpy()
+    else:
+        scores_np = np.asarray(scores, dtype=np.float32)
+    best = int(scores_np.argmax())
+    return _mask_to_numpy(masks[best]), float(scores_np[best])
 
 
 def _normalize_boxes_array(boxes) -> np.ndarray:
@@ -385,18 +271,17 @@ def _build_hybrid_queries(images, boxes_per_image, tags_per_image) -> list[dict]
     return queries
 
 
-def _init_per_image_slots(images, boxes_per_image) -> list[tuple[list, list, list]]:
-    per_image: list[tuple[list, list, list]] = []
+def _init_per_image_slots(images, boxes_per_image) -> list[tuple[list, list]]:
+    per_image: list[tuple[list, list]] = []
     for img_idx in range(len(images)):
         boxes = _normalize_boxes_array(boxes_per_image[img_idx])
         n = boxes.shape[0]
         if n == 0:
-            per_image.append(([], [], []))
+            per_image.append(([], []))
         else:
             per_image.append(
                 (
                     [np.zeros((1, 1), dtype=np.float32)] * n,
-                    [0.0] * n,
                     [0.0] * n,
                 )
             )
@@ -408,16 +293,14 @@ def _store_hybrid_result(
     img_idx: int,
     obj_idx: int,
     mask: np.ndarray,
-    coverage: float,
-    precision: float,
+    score: float,
 ) -> None:
-    masks, coverages, precisions = per_image[img_idx]
+    masks, scores = per_image[img_idx]
     masks[obj_idx] = mask
-    coverages[obj_idx] = coverage
-    precisions[obj_idx] = precision
+    scores[obj_idx] = score
 
 
-def _forward_hybrid_chunk(processor, model, device, chunk: list[dict]):
+def _forward_hybrid_chunk(processor, model, device, chunk: list[dict], post_threshold: float):
     """Batched SAM3 forward: one row per (image, text, positive box)."""
     inputs = processor(
         images=[q["image"] for q in chunk],
@@ -429,25 +312,12 @@ def _forward_hybrid_chunk(processor, model, device, chunk: list[dict]):
     target_sizes = _target_sizes(inputs)
     with torch.no_grad():
         outputs = model(**inputs)
-    return _post_process(processor, outputs, 0.0, target_sizes), target_sizes
+    return _post_process(processor, outputs, post_threshold, target_sizes)
 
 
-def _apply_seg_to_query(per_image, query: dict, seg_item, target_size) -> None:
-    h_px = int(target_size[0])
-    w_px = int(target_size[1])
-    single_box = query["box"].reshape(1, 4)
-    prop_np = _proposals_to_numpy(seg_item.get("masks"))
-    masks_out, coverages_out, precisions_out = _match_proposals_to_boxes(
-        prop_np, single_box, h_px, w_px
-    )
-    _store_hybrid_result(
-        per_image,
-        query["img_idx"],
-        query["obj_idx"],
-        masks_out[0],
-        coverages_out[0],
-        precisions_out[0],
-    )
+def _apply_seg_to_query(per_image, query: dict, seg_item) -> None:
+    mask, score = _best_mask_score_from_seg(seg_item)
+    _store_hybrid_result(per_image, query["img_idx"], query["obj_idx"], mask, score)
 
 
 def _infer_refiner(
@@ -458,6 +328,7 @@ def _infer_refiner(
     boxes_per_image,
     tags_per_image,
     prompt_batch_size: int = 32,
+    post_threshold: float = 0.0,
 ):
     """Hybrid text+positive-box refinement for a pipeline batch of M images.
 
@@ -478,105 +349,19 @@ def _infer_refiner(
     prompt_batch_size = max(1, int(prompt_batch_size))
     for start in range(0, len(queries), prompt_batch_size):
         chunk = queries[start : start + prompt_batch_size]
-        seg_list, target_sizes = _forward_hybrid_chunk(processor, model, device, chunk)
-        for seg_item, q, tgt in zip(seg_list, chunk, target_sizes):
-            _apply_seg_to_query(per_image, q, seg_item, tgt)
+        seg_list = _forward_hybrid_chunk(
+            processor, model, device, chunk, post_threshold,
+        )
+        for seg_item, q in zip(seg_list, chunk):
+            _apply_seg_to_query(per_image, q, seg_item)
 
     return per_image
-
-
-def _filter_by_pixels(pred_masks, min_pixels: int):
-    refined, keep_indices = [], []
-    for i, arr in enumerate(pred_masks):
-        if hasattr(arr, "float"):
-            arr = arr.float()
-        if hasattr(arr, "cpu"):
-            arr = arr.cpu().numpy()
-        elif hasattr(arr, "numpy"):
-            arr = arr.numpy()
-        if arr.ndim == 3:
-            arr = arr[0]
-        if np.sum(arr) > min_pixels:
-            refined.append(arr)
-            keep_indices.append(i)
-    return refined, keep_indices
-
-
-def _filter_by_pixels_and_coverage(
-    pred_masks,
-    coverages,
-    precisions,
-    min_pixels: int,
-    min_coverage: float,
-    min_precision: float,
-):
-    """Combined quality gate using three complementary metrics.
-
-    coverage  = intersection / box_area
-        "what fraction of the box is covered by the mask?"
-        Low  → mask too small or accidentally overlaps the wrong place.
-
-    precision = intersection / mask_pixels
-        "what fraction of the mask falls inside the box?"
-        Low  → mask has drifted far outside the box region (e.g. a wall
-        segment that barely clips the box corner can score coverage=0.09
-        but has precision=0.05 — correctly rejected here).
-
-    min_pixels
-        Absolute lower bound; prevents near-empty masks from passing
-        even with high coverage/precision ratios on tiny intersections.
-
-    All three must pass simultaneously.
-    """
-    refined, keep_indices = [], []
-    cov_arr  = np.asarray(coverages,   dtype=np.float32) if len(coverages)   else np.array([])
-    prec_arr = np.asarray(precisions,  dtype=np.float32) if len(precisions)  else np.array([])
-    for i, arr in enumerate(pred_masks):
-        if hasattr(arr, "float"):
-            arr = arr.float()
-        if hasattr(arr, "cpu"):
-            arr = arr.cpu().numpy()
-        elif hasattr(arr, "numpy"):
-            arr = arr.numpy()
-        if arr.ndim == 3:
-            arr = arr[0]
-        if np.sum(arr > 0.5) <= min_pixels:
-            continue
-        cov  = float(cov_arr[i])  if i < len(cov_arr)  else 0.0
-        prec = float(prec_arr[i]) if i < len(prec_arr) else 0.0
-        if cov >= min_coverage and prec >= min_precision:
-            refined.append(arr)
-            keep_indices.append(i)
-    return refined, keep_indices
 
 
 class Sam3Refiner(BaseTask):
     """Refine filter-stage masks with Sam3Model hybrid text+box prompts."""
 
-    # SAM3 quality gates
-    # ─────────────────────────────────────────────────────────────────────────
-    # SAM3 is a DETR-style model.  Its per-proposal classification score is
-    # systematically low (~0.04–0.11) for coarse depth-projected prompts and
-    # is NOT comparable to SAM2's IoU self-estimate.  We therefore use two
-    # geometry-derived thresholds instead of a score threshold:
-    #
-    #   MIN_COVERAGE  – the best-matched proposal must cover at least this
-    #                   fraction of the input box area.  Coarse depth-projected
-    #                   boxes tend to be tight-to-loose depending on depth
-    #                   accuracy; 0.10 (10 %) accepts partial but real matches
-    #                   while rejecting accidental overlaps.  Tune upward if
-    #                   downstream tasks complain about noisy masks.
-    #
-    #   MIN_MATCH_COVERAGE (in _match_proposals_to_boxes) – 0.05 (5 %) is the
-    #                   floor used during MATCHING to avoid returning an empty
-    #                   mask.  It is intentionally looser than MIN_COVERAGE so
-    #                   that the diagnostic coverage number is always visible
-    #                   even when the box ultimately fails MIN_COVERAGE.
-    #
-    #   MIN_MASK_PIXELS – sanity check: a mask with < 20 px is effectively
-    #                   empty regardless of coverage.
-    MIN_COVERAGE   = 0.10   # min fraction of box area covered by matched mask
-    MIN_PRECISION  = 0.40   # min fraction of matched mask that lies inside the box
+    MIN_SCORE = 0.6
     MIN_MASK_PIXELS = 20
 
     def __init__(self, args, device=None):
@@ -591,10 +376,8 @@ class Sam3Refiner(BaseTask):
             devices = [d.strip() for d in str(device_raw).split(",")]
         self.device = devices[0]
 
-        self.min_coverage    = float(args.get("min_coverage",    self.MIN_COVERAGE))
-        self.min_precision   = float(args.get("min_precision",   self.MIN_PRECISION))
-        self.min_mask_pixels = int(  args.get("min_mask_pixels", self.MIN_MASK_PIXELS))
-        # SAM3 forward batch = hybrid prompt rows per NPU call (not pipeline images).
+        self.min_score = float(args.get("min_score", self.MIN_SCORE))
+        self.min_mask_pixels = int(args.get("min_mask_pixels", self.MIN_MASK_PIXELS))
         self.prompt_batch_size = int(args.get("prompt_batch_size", 32))
 
         replicas_per_device = int(args.get("replicas_per_device", 1))
@@ -608,8 +391,7 @@ class Sam3Refiner(BaseTask):
                         f"[Sam3Refiner] Sam3Model on {dev} | "
                         f"prompt_batch_size={self.prompt_batch_size} "
                         f"pipeline_batch_size={args.get('batch_size', 4)} "
-                        f"min_coverage={self.min_coverage:.2f} "
-                        f"min_precision={self.min_precision:.2f} "
+                        f"min_score={self.min_score:.2f} "
                         f"min_mask_pixels={self.min_mask_pixels}",
                         flush=True,
                     )
@@ -653,22 +435,24 @@ class Sam3Refiner(BaseTask):
                 processor, model, dev,
                 images, boxes_per_image, tags_list,
                 prompt_batch_size=self.prompt_batch_size,
+                post_threshold=0.0,
             )
         finally:
             self._replica_pool.put((processor, model, dev))
 
     def _results_from_infer(self, per_image):
         out = []
-        for pred_masks, coverages, precisions in per_image:
-            _log_score_stats(
-                np.asarray(coverages,  dtype=np.float32),
-                np.asarray(precisions, dtype=np.float32),
-                self.min_coverage, self.min_precision,
-            )
-            refined, keep_indices = _filter_by_pixels_and_coverage(
-                pred_masks, coverages, precisions,
-                self.min_mask_pixels, self.min_coverage, self.min_precision,
-            )
+        for pred_masks, scores in per_image:
+            _log_score_stats(np.asarray(scores, dtype=np.float32), self.min_score)
+            refined, keep_indices = [], []
+            for i, arr in enumerate(pred_masks):
+                score = float(scores[i]) if i < len(scores) else 0.0
+                if score < self.min_score:
+                    continue
+                arr = np.asarray(arr) > 0
+                if np.sum(arr) > self.min_mask_pixels:
+                    refined.append(arr)
+                    keep_indices.append(i)
             if keep_indices:
                 bboxes = self._masks_to_bboxes([m.astype(bool) for m in refined]).tolist()
                 out.append((refined, bboxes, keep_indices))
