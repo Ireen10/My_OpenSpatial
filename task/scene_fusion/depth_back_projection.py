@@ -5,7 +5,11 @@ from pathlib import Path
 import open3d as o3d
 import os
 
-from utils.box_utils import convert_box_3d_camera_to_world, obb_params_from_open3d_pcd
+from utils.box_utils import (
+    all_box_corners_visible_in_image,
+    convert_box_3d_camera_to_world,
+    obb_params_from_open3d_pcd,
+)
 from utils.projection_utils import backproject_depth_to_3d
 from utils.image_utils import load_depth_map
 from task.base_task import BaseTask
@@ -113,7 +117,7 @@ class DepthBackProjecter(BaseTask):
 
         Requires: intrinsic, depth_map, depth_scale, masks, obj_tags.
         Populates: pointclouds; updates bboxes_3d_world_coords from refined clouds
-        when pose is available.
+        when pose is available and every corner of the original box is in-frame.
         """
         assert "intrinsic" in example, "intrinsic not found in example"
         if "depth_map" not in example:
@@ -137,15 +141,20 @@ class DepthBackProjecter(BaseTask):
 
         if "bboxes_3d_world_coords" in example and "pose" in example:
             pose = np.loadtxt(example["pose"])
+            img_dim = depth.shape[::-1]
             refined_boxes_world = []
             for i, cam_box in enumerate(refined_boxes_cam):
-                if cam_box is not None:
+                orig_box = example["bboxes_3d_world_coords"][i]
+                can_update = all_box_corners_visible_in_image(
+                    orig_box, pose, intrinsic, img_dim
+                )
+                if cam_box is not None and can_update:
                     world_box = convert_box_3d_camera_to_world(cam_box, pose)
                     refined_boxes_world.append(
-                        world_box if world_box is not None else example["bboxes_3d_world_coords"][i]
+                        world_box if world_box is not None else orig_box
                     )
                 else:
-                    refined_boxes_world.append(example["bboxes_3d_world_coords"][i])
+                    refined_boxes_world.append(orig_box)
             example["bboxes_3d_world_coords"] = refined_boxes_world
 
         # Require at least 2 valid point clouds

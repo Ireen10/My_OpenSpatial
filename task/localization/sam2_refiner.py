@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 import numpy as np
 import torch
 from PIL import Image
@@ -119,22 +121,12 @@ def _normalize_scores_for_image(scores, image_idx: int, expected_count: int) -> 
     return arr.reshape(-1)[:expected_count]
 
 
-def _infer_transformers_refiner(processor, model, device, images, boxes_per_image):
-    """One SAM2 forward for M images; each image may have a different box count.
-
-    Sam2Processor pads ``input_boxes`` across the batch (HF batched-objects-per-image).
-    """
-    valid_indices = [i for i, boxes in enumerate(boxes_per_image) if len(boxes) > 0]
-    per_image = [([], []) for _ in images]
-    if not valid_indices:
-        return per_image
-
+def _infer_transformers_forward(processor, model, device, images, boxes_list):
+    """One SAM2 forward for a sub-batch with uniform boxes-per-image."""
     _set_npu_device(device)
-    valid_images = [images[i] for i in valid_indices]
-    valid_boxes = [boxes_per_image[i].astype(float).tolist() for i in valid_indices]
     inputs = processor(
-        images=valid_images,
-        input_boxes=valid_boxes,
+        images=images,
+        input_boxes=boxes_list,
         return_tensors="pt",
     ).to(device)
 
@@ -146,11 +138,40 @@ def _infer_transformers_refiner(processor, model, device, images, boxes_per_imag
         original_sizes = original_sizes.cpu()
     all_masks = processor.post_process_masks(outputs.pred_masks.cpu(), original_sizes)
 
-    for out_idx, orig_idx in enumerate(valid_indices):
-        expected_count = len(boxes_per_image[orig_idx])
+    results = []
+    for out_idx in range(len(images)):
+        expected_count = len(boxes_list[out_idx])
         masks_np = _normalize_masks_for_image(all_masks[out_idx], expected_count)
         scores_np = _normalize_scores_for_image(outputs.iou_scores, out_idx, expected_count)
-        per_image[orig_idx] = (list(masks_np), scores_np.tolist())
+        results.append((list(masks_np), scores_np.tolist()))
+    return results
+
+
+def _infer_transformers_refiner(processor, model, device, images, boxes_per_image):
+    """Run SAM2 transformers inference; batch only images with the same box count.
+
+    Unlike the official ``sam2`` predictor, ``Sam2Processor`` / ``Sam2Model`` in
+    transformers require every image in one forward to have the same number of
+    box prompts. Images are grouped by box count so we still batch when counts
+    align (e.g. four images each with 3 boxes).
+    """
+    valid_indices = [i for i, boxes in enumerate(boxes_per_image) if len(boxes) > 0]
+    per_image = [([], []) for _ in images]
+    if not valid_indices:
+        return per_image
+
+    buckets: dict[int, list[int]] = defaultdict(list)
+    for i in valid_indices:
+        buckets[len(boxes_per_image[i])].append(i)
+
+    for bucket_indices in buckets.values():
+        bucket_images = [images[i] for i in bucket_indices]
+        bucket_boxes = [boxes_per_image[i].astype(float).tolist() for i in bucket_indices]
+        bucket_results = _infer_transformers_forward(
+            processor, model, device, bucket_images, bucket_boxes
+        )
+        for orig_idx, result in zip(bucket_indices, bucket_results):
+            per_image[orig_idx] = result
     return per_image
 
 
@@ -168,7 +189,7 @@ class Sam2Refiner(BaseTask):
         self.device = devices[0]
         self.segmenter_backend = args.get("segmenter_backend", args.get("backend", "auto"))
         if self.segmenter_backend == "auto":
-            self.segmenter_backend = "transformers" if _is_npu_device(self.device) else "sam2"
+            self.segmenter_backend = "sam2"
 
         if self.segmenter_backend == "transformers":
             self._init_transformers_backend(segmenter_model, devices)
@@ -183,11 +204,7 @@ class Sam2Refiner(BaseTask):
         self.output_dir = os.path.join(self.args.get("output_dir"), self.args.get("file_name"))
 
     def _init_sam2_backend(self, segmenter_model):
-        if _is_npu_device(self.device):
-            raise ValueError(
-                "The official sam2 backend is not NPU-safe in this project. "
-                "Use segmenter_backend: transformers for NPU."
-            )
+        _set_npu_device(self.device)
         from sam2.sam2_image_predictor import SAM2ImagePredictor
 
         self.sam2_model = SAM2ImagePredictor.from_pretrained(
@@ -264,6 +281,7 @@ class Sam2Refiner(BaseTask):
         if self.segmenter_backend == "transformers":
             return self._refine_masks_transformers(image, masks)
 
+        _set_npu_device(self.device)
         self.sam2_model.set_image(image)
         input_boxes = self._masks_to_bboxes(masks)
 

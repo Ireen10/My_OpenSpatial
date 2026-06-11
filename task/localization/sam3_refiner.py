@@ -154,7 +154,7 @@ def _load_coarse_mask(path: str) -> np.ndarray:
 
 
 def _tags_per_box(tags, n_boxes: int) -> list[str]:
-    """One SAM3 text prompt per box, aligned with obj_tags indices."""
+    """Per-box obj_tags aligned with input_boxes indices."""
     if n_boxes <= 0:
         return []
     if tags is None:
@@ -247,13 +247,9 @@ def _normalize_boxes_array(boxes) -> np.ndarray:
     return b
 
 
-def _prepare_hybrid_batch(images, boxes_per_image, tags_per_image):
-    """Build Sam3Processor nested batch: M images, variable boxes/text per image."""
-    valid_indices: list[int] = []
-    valid_images = []
-    valid_boxes: list[list[list[float]]] = []
-    valid_texts: list[list[str]] = []
-    valid_labels: list[list[int]] = []
+def _build_hybrid_queries(images, boxes_per_image, tags_per_image) -> list[dict]:
+    """Flatten M images into one SAM3 row per object (single word + one box)."""
+    queries: list[dict] = []
     for img_idx, image in enumerate(images):
         boxes = _normalize_boxes_array(boxes_per_image[img_idx])
         if boxes.shape[0] == 0:
@@ -262,53 +258,114 @@ def _prepare_hybrid_batch(images, boxes_per_image, tags_per_image):
             tags_per_image[img_idx] if tags_per_image else None,
             boxes.shape[0],
         )
-        valid_indices.append(img_idx)
-        valid_images.append(image)
-        valid_boxes.append(boxes.astype(float).tolist())
-        valid_texts.append(tags)
-        valid_labels.append([1] * boxes.shape[0])
-    return valid_indices, valid_images, valid_boxes, valid_texts, valid_labels
+        for obj_idx, (box, tag) in enumerate(zip(boxes, tags)):
+            queries.append(
+                {
+                    "img_idx": img_idx,
+                    "obj_idx": obj_idx,
+                    "image": image,
+                    "text": tag,
+                    "box": box,
+                }
+            )
+    return queries
 
 
-def _infer_refiner(processor, model, device, images, boxes_per_image, tags_per_image):
-    """One SAM3 forward for M images; per-box text + positive box prompts.
+def _init_per_image_slots(images, boxes_per_image) -> list[tuple[list, list]]:
+    per_image: list[tuple[list, list]] = []
+    for img_idx in range(len(images)):
+        boxes = _normalize_boxes_array(boxes_per_image[img_idx])
+        n = int(boxes.shape[0])
+        if n == 0:
+            per_image.append(([], []))
+        else:
+            per_image.append(([None] * n, [0.0] * n))
+    return per_image
 
-    ``post_process_instance_segmentation`` returns one result per image with
-    masks/boxes/scores aligned to the input prompts (same role as SAM2).
-    """
-    per_image: list = [([], []) for _ in images]
-    (
-        valid_indices,
-        valid_images,
-        valid_boxes,
-        valid_texts,
-        valid_labels,
-    ) = _prepare_hybrid_batch(images, boxes_per_image, tags_per_image)
-    if not valid_indices:
-        return per_image
 
+def _store_query_result(
+    per_image: list,
+    img_idx: int,
+    obj_idx: int,
+    mask: np.ndarray,
+    score: float,
+) -> None:
+    masks, scores = per_image[img_idx]
+    masks[obj_idx] = mask
+    scores[obj_idx] = score
+
+
+def _forward_hybrid_chunk(processor, model, device, chunk: list[dict]):
+    """Batched SAM3 forward: one row per (image, single-word text, positive box)."""
     inputs = processor(
-        images=valid_images,
-        text=valid_texts,
-        input_boxes=valid_boxes,
-        input_boxes_labels=valid_labels,
+        images=[q["image"] for q in chunk],
+        text=[q["text"] for q in chunk],
+        input_boxes=[[q["box"].tolist()] for q in chunk],
+        input_boxes_labels=[[1] for _ in chunk],
         return_tensors="pt",
     ).to(device)
     target_sizes = _target_sizes(inputs)
-
     with torch.no_grad():
         outputs = model(**inputs)
+    return _post_process(processor, outputs, 0.0, target_sizes)
 
-    seg_list = _post_process(processor, outputs, 0.0, target_sizes)
 
-    for seg_pos, orig_idx in enumerate(valid_indices):
-        expected_count = len(_normalize_boxes_array(boxes_per_image[orig_idx]))
-        seg = seg_list[seg_pos]
-        masks_np = _normalize_masks_from_seg(seg, expected_count)
-        scores_np = _normalize_scores_from_seg(seg, expected_count)
-        per_image[orig_idx] = (list(masks_np), scores_np.tolist())
+def _apply_seg_to_query(per_image: list, query: dict, seg_item) -> None:
+    masks_np = _normalize_masks_from_seg(seg_item, 1)
+    scores_np = _normalize_scores_from_seg(seg_item, 1)
+    if len(masks_np) == 0:
+        mask = np.zeros((1, 1), dtype=np.float32)
+        score = 0.0
+    else:
+        mask = masks_np[0]
+        score = float(scores_np[0]) if len(scores_np) else 0.0
+    _store_query_result(per_image, query["img_idx"], query["obj_idx"], mask, score)
 
-    return per_image
+
+def _finalize_per_image_slots(per_image: list) -> list[tuple[list, list]]:
+    out: list[tuple[list, list]] = []
+    for masks, scores in per_image:
+        if not masks:
+            out.append(([], []))
+            continue
+        masks_out, scores_out = [], []
+        for mask, score in zip(masks, scores):
+            if mask is None:
+                continue
+            masks_out.append(mask)
+            scores_out.append(score)
+        out.append((masks_out, scores_out))
+    return out
+
+
+def _infer_refiner(
+    processor,
+    model,
+    device,
+    images,
+    boxes_per_image,
+    tags_per_image,
+    prompt_batch_size: int = 32,
+):
+    """Hybrid refine: flatten objects, batch rows of (image, tag, box).
+
+    Pipeline ``batch_size`` = M images per ``_refine()`` call. Each object
+    becomes one processor row with a single-word ``text`` and one positive box.
+    Rows are forwarded in chunks of ``prompt_batch_size``.
+    """
+    per_image = _init_per_image_slots(images, boxes_per_image)
+    queries = _build_hybrid_queries(images, boxes_per_image, tags_per_image)
+    if not queries:
+        return _finalize_per_image_slots(per_image)
+
+    prompt_batch_size = max(1, int(prompt_batch_size))
+    for start in range(0, len(queries), prompt_batch_size):
+        chunk = queries[start : start + prompt_batch_size]
+        seg_list = _forward_hybrid_chunk(processor, model, device, chunk)
+        for seg_item, query in zip(seg_list, chunk):
+            _apply_seg_to_query(per_image, query, seg_item)
+
+    return _finalize_per_image_slots(per_image)
 
 
 class Sam3Refiner(BaseTask):
@@ -332,6 +389,7 @@ class Sam3Refiner(BaseTask):
         self.min_score = float(args.get("min_score", self.MIN_SCORE))
         self.min_mask_pixels = int(args.get("min_mask_pixels", self.MIN_MASK_PIXELS))
         self.pipeline_batch_size = int(args.get("batch_size", 4))
+        self.prompt_batch_size = int(args.get("prompt_batch_size", 32))
 
         replicas_per_device = int(args.get("replicas_per_device", 1))
         self._replica_pool: queue.Queue = queue.Queue()
@@ -343,6 +401,7 @@ class Sam3Refiner(BaseTask):
                     print(
                         f"[Sam3Refiner] Sam3Model on {dev} | "
                         f"pipeline_batch_size={self.pipeline_batch_size} "
+                        f"prompt_batch_size={self.prompt_batch_size} "
                         f"min_score={self.min_score} "
                         f"min_mask_pixels={self.min_mask_pixels}",
                         flush=True,
@@ -386,6 +445,7 @@ class Sam3Refiner(BaseTask):
             return _infer_refiner(
                 processor, model, dev,
                 images, boxes_per_image, tags_list,
+                prompt_batch_size=self.prompt_batch_size,
             )
         finally:
             self._replica_pool.put((processor, model, dev))

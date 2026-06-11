@@ -43,12 +43,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from task.localization.sam3_refiner import (
     Sam3Refiner,
+    _build_hybrid_queries,
+    _forward_hybrid_chunk,
     _load_coarse_mask,
     _load_sam3_replica,
     _normalize_masks_from_seg,
     _normalize_scores_from_seg,
-    _post_process,
-    _target_sizes,
 )
 import torch
 
@@ -284,25 +284,18 @@ def diagnose_sample(row: dict, data_root: Path | None,
         title=f"coarse masks + derived boxes  ({W}x{H})"
     )
 
-    # ── Run SAM3 (per-box text + box prompts, same as Sam3Refiner) ───────────
-    proc_kwargs = dict(
-        images=image,
-        text=[[str(t) for t in tags]],
-        input_boxes=[boxes.tolist()],
-        input_boxes_labels=[[1] * len(boxes)],
-        return_tensors="pt",
-    )
-
+    # ── Run SAM3 (one row per object: single-word text + box, same as refiner) ─
     try:
-        inputs = processor(**proc_kwargs).to(device)
-        target_sizes = _target_sizes(inputs)
-        with torch.no_grad():
-            outputs = model(**inputs)
-        seg_list = _post_process(processor, outputs, 0.0, target_sizes)
-        seg = seg_list[0]
-        expected_count = len(boxes)
-        sam3_masks_np = _normalize_masks_from_seg(seg, expected_count)
-        sam3_scores = _normalize_scores_from_seg(seg, expected_count).tolist()
+        queries = _build_hybrid_queries([image], [boxes], [tags])
+        seg_list = _forward_hybrid_chunk(processor, model, device, queries)
+        sam3_masks_np = []
+        sam3_scores = []
+        for seg in seg_list:
+            masks_np = _normalize_masks_from_seg(seg, 1)
+            scores_np = _normalize_scores_from_seg(seg, 1)
+            sam3_masks_np.append(masks_np[0] if len(masks_np) else np.zeros((H, W)))
+            sam3_scores.append(float(scores_np[0]) if len(scores_np) else 0.0)
+        sam3_masks_np = np.stack(sam3_masks_np) if sam3_masks_np else np.empty((0, H, W))
     except Exception as exc:
         print(f"  ERROR: SAM3 inference failed — {type(exc).__name__}: {exc}")
         return {

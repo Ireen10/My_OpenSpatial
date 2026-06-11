@@ -152,6 +152,50 @@ def compute_box_3d_corners_from_params(box_params, euler_order='zxy'):
         box_params[:3], box_params[3:6], box_params[6:9], euler_order)
 
 
+def all_box_corners_visible_in_image(
+    box_params_world,
+    pose,
+    intrinsic,
+    img_dim,
+    z_eps=1e-3,
+    euler_order=EULER_GROUNDING_ORDER,
+):
+    """Return True when all 8 world-frame box corners project inside the image.
+
+    Args:
+        box_params_world: 9-param box in world coordinates.
+        pose: 4x4 camera-to-world matrix.
+        intrinsic: 4x4 camera intrinsic matrix.
+        img_dim: (width, height) in pixels.
+        z_eps: minimum positive camera-space depth for a corner to count as visible.
+
+    Returns:
+        False if the box is invalid or any corner is behind the camera or outside
+        the image bounds; True only when every corner is fully in-frame.
+    """
+    if box_params_world is None or len(box_params_world) < 9:
+        return False
+
+    w, h = img_dim
+    corners = compute_box_3d_corners_from_params(box_params_world, euler_order)
+    pose = np.asarray(pose, dtype=np.float64)
+    intrinsic = np.asarray(intrinsic, dtype=np.float64)
+
+    corners_h = np.concatenate([corners, np.ones((corners.shape[0], 1))], axis=1)
+    cam = (np.linalg.inv(pose) @ corners_h.T).T
+    if (cam[:, 2] <= z_eps).any():
+        return False
+
+    px = (intrinsic @ cam.T).T
+    uv = px[:, :2] / px[:, 2:3]
+    return bool(
+        (uv[:, 0] >= 0).all()
+        and (uv[:, 0] < w).all()
+        and (uv[:, 1] >= 0).all()
+        and (uv[:, 1] < h).all()
+    )
+
+
 def convert_box_3d_world_to_camera(box_params, pose, euler_order='zxy'):
     """Convert a 9-param world-frame 3D box to camera frame.
 
