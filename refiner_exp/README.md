@@ -85,6 +85,8 @@ python refiner_exp/scripts/serve_compare.py \
 
 交互操作：左键拖拽旋转、滚轮缩放、右键平移；**点击 2D 对照图放大**（Esc 关闭）。
 
+**3D 点云坐标系**：fusion `.pcd` 为 OpenCV 相机系（X 右、Y 下、Z 朝前）；Web 查看器转为 Three.js 系 `(x, -y, -z)`，默认相机在 +Z 侧朝场景看，与 RGB 图像左右/上下一致（非镜像）。
+
 **数据加载方式**（按需，非预生成大 HTML）：
 
 - 2D 图：`/api/sample/{name}/overlay`（首次渲染后缓存到 `compare/cache/`）

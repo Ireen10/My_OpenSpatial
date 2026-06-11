@@ -300,7 +300,7 @@ def collect_records(
     """Expand parquet rows to per-object records.
 
     include_assets=False skips loading masks and point clouds (fast path for
-    visualize_compare); geometry metrics are left None.
+    serve_compare); geometry metrics are left None.
     """
     records: List[Dict[str, Any]] = []
     for row_idx, row_obj in df.iterrows():
