@@ -50,10 +50,11 @@ pipeline:
         min_mask_pixels: 20
 
         device: "npu:0,npu:1"
-        replicas_per_device: 2       # 2 instances/card (float32)
+        replicas_per_device: 1
         use_multi_processing: true
-        num_workers: 4               # = devices(2) × replicas_per_device(2)
-        batch_size: 4                # images per NPU forward pass (↑ NPU utilisation)
+        num_workers: 2
+        batch_size: 4                # pipeline images per _refine() call
+        prompt_batch_size: 32        # SAM3 hybrid-prompt rows per NPU forward
 
     scene_fusion_stage:
       -

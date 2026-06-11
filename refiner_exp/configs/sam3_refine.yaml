@@ -37,10 +37,11 @@ pipeline:
         min_mask_pixels: 20
 
         device: "npu:0,npu:1"
-        replicas_per_device: 2
+        replicas_per_device: 1
         use_multi_processing: true
-        num_workers: 4
+        num_workers: 2
         batch_size: 4
+        prompt_batch_size: 32
 
     scene_fusion_stage:
       -

@@ -153,17 +153,23 @@ def _load_coarse_mask(path: str) -> np.ndarray:
     return m > 127
 
 
-def _obj_tags_to_text(tags):
-    """Join per-object tags for SAM3 text prompt; safe for ndarray/list."""
+def _tags_per_box(tags, n_boxes: int) -> list[str]:
+    """One SAM3 text prompt per box, aligned with obj_tags indices."""
+    if n_boxes <= 0:
+        return []
     if tags is None:
-        return None
+        return ["object"] * n_boxes
     if isinstance(tags, np.ndarray):
         tags = tags.tolist()
     elif not isinstance(tags, (list, tuple)):
         tags = [tags]
-    if len(tags) == 0:
-        return None
-    return ". ".join(str(tag) for tag in tags)
+    out: list[str] = []
+    for i in range(n_boxes):
+        if i < len(tags) and tags[i] is not None and str(tags[i]).strip():
+            out.append(str(tags[i]).strip())
+        else:
+            out.append("object")
+    return out
 
 
 def _post_process(processor, outputs, min_score: float, target_sizes: list):
@@ -344,71 +350,137 @@ def _match_proposals_to_boxes(
     return masks_out, coverages_out, precisions_out
 
 
-def _infer_refiner(processor, model, device, images, boxes_per_image, texts_per_image):
-    """One SAM3 forward for the whole batch; proposals matched to boxes by ROI coverage.
+def _normalize_boxes_array(boxes) -> np.ndarray:
+    b = np.asarray(boxes, dtype=np.float32)
+    if b.ndim == 1:
+        b = b.reshape(1, 4) if b.size == 4 else b.reshape(-1, 4)
+    return b
 
-    SAM3 (sam3_video) is a DETR-style model with ~200 fixed query slots.
-    It ALWAYS returns ~200 proposals per image regardless of how many box
-    prompts are given, so seg_masks[k] does NOT correspond to input box k.
 
-    Strategy:
-      1. One SAM3 forward pass for all valid images in the batch.
-      2. All ~200 proposals retrieved per image (threshold=0.0).
-      3. For each input box, _match_proposals_to_boxes picks the proposal whose
-         binary mask maximally covers the box's ROI region (vectorised numpy).
-      4. Coverage ratio (0–1) is reported instead of SAM3's own IoU estimate.
+def _build_hybrid_queries(images, boxes_per_image, tags_per_image) -> list[dict]:
+    """Flatten M pipeline images into independent (text + positive box) prompts.
+
+    Each query is one HF SAM3 concept prompt: e.g. text=\"monitor\" with a
+    positive coarse box localises \"monitor near this region\" on that image.
     """
-    all_boxes: list[np.ndarray] = []
-    valid_idx: list[int] = []
-    for i, boxes in enumerate(boxes_per_image):
-        b = np.asarray(boxes, dtype=np.float32)
-        if b.ndim == 1:
-            b = b.reshape(1, 4)
-        all_boxes.append(b)
-        if b.shape[0] > 0:
-            valid_idx.append(i)
+    queries: list[dict] = []
+    for img_idx, image in enumerate(images):
+        boxes = _normalize_boxes_array(boxes_per_image[img_idx])
+        if boxes.shape[0] == 0:
+            continue
+        tags = _tags_per_box(
+            tags_per_image[img_idx] if tags_per_image else None,
+            boxes.shape[0],
+        )
+        for obj_idx, (box, tag) in enumerate(zip(boxes, tags)):
+            queries.append(
+                {
+                    "img_idx": img_idx,
+                    "obj_idx": obj_idx,
+                    "image": image,
+                    "text": tag,
+                    "box": box,
+                }
+            )
+    return queries
 
-    per_image: list = [([], [], []) for _ in images]
 
-    if not valid_idx:
-        return per_image
+def _init_per_image_slots(images, boxes_per_image) -> list[tuple[list, list, list]]:
+    per_image: list[tuple[list, list, list]] = []
+    for img_idx in range(len(images)):
+        boxes = _normalize_boxes_array(boxes_per_image[img_idx])
+        n = boxes.shape[0]
+        if n == 0:
+            per_image.append(([], [], []))
+        else:
+            per_image.append(
+                (
+                    [np.zeros((1, 1), dtype=np.float32)] * n,
+                    [0.0] * n,
+                    [0.0] * n,
+                )
+            )
+    return per_image
 
-    batch_images = [images[i] for i in valid_idx]
-    batch_boxes  = [all_boxes[i].tolist() for i in valid_idx]
-    batch_labels = [[1] * len(all_boxes[i]) for i in valid_idx]
-    batch_texts  = (
-        [texts_per_image[i] for i in valid_idx] if texts_per_image else None
-    )
 
-    proc_kwargs = dict(
-        images=batch_images,
-        input_boxes=batch_boxes,
-        input_boxes_labels=batch_labels,
+def _store_hybrid_result(
+    per_image: list,
+    img_idx: int,
+    obj_idx: int,
+    mask: np.ndarray,
+    coverage: float,
+    precision: float,
+) -> None:
+    masks, coverages, precisions = per_image[img_idx]
+    masks[obj_idx] = mask
+    coverages[obj_idx] = coverage
+    precisions[obj_idx] = precision
+
+
+def _forward_hybrid_chunk(processor, model, device, chunk: list[dict]):
+    """Batched SAM3 forward: one row per (image, text, positive box)."""
+    inputs = processor(
+        images=[q["image"] for q in chunk],
+        text=[q["text"] for q in chunk],
+        input_boxes=[[q["box"].tolist()] for q in chunk],
+        input_boxes_labels=[[1] for _ in chunk],
         return_tensors="pt",
-    )
-    if batch_texts and any(t is not None for t in batch_texts):
-        proc_kwargs["text"] = [t or "" for t in batch_texts]
-
-    inputs = processor(**proc_kwargs).to(device)
+    ).to(device)
     target_sizes = _target_sizes(inputs)
-
     with torch.no_grad():
         outputs = model(**inputs)
+    return _post_process(processor, outputs, 0.0, target_sizes), target_sizes
 
-    seg_list = _post_process(processor, outputs, 0.0, target_sizes)
 
-    for seg_pos, orig_idx in enumerate(valid_idx):
-        seg = seg_list[seg_pos]
-        seg_masks_raw = seg.get("masks")
-        h_px = int(target_sizes[seg_pos][0])
-        w_px = int(target_sizes[seg_pos][1])
-        boxes = all_boxes[orig_idx]
+def _apply_seg_to_query(per_image, query: dict, seg_item, target_size) -> None:
+    h_px = int(target_size[0])
+    w_px = int(target_size[1])
+    single_box = query["box"].reshape(1, 4)
+    prop_np = _proposals_to_numpy(seg_item.get("masks"))
+    masks_out, coverages_out, precisions_out = _match_proposals_to_boxes(
+        prop_np, single_box, h_px, w_px
+    )
+    _store_hybrid_result(
+        per_image,
+        query["img_idx"],
+        query["obj_idx"],
+        masks_out[0],
+        coverages_out[0],
+        precisions_out[0],
+    )
 
-        prop_np = _proposals_to_numpy(seg_masks_raw)
-        masks_out, coverages_out, precisions_out = _match_proposals_to_boxes(
-            prop_np, boxes, h_px, w_px
-        )
-        per_image[orig_idx] = (masks_out, coverages_out, precisions_out)
+
+def _infer_refiner(
+    processor,
+    model,
+    device,
+    images,
+    boxes_per_image,
+    tags_per_image,
+    prompt_batch_size: int = 32,
+):
+    """Hybrid text+positive-box refinement for a pipeline batch of M images.
+
+    Pipeline ``batch_size`` = M images per ``_refine()`` call. All (text, box)
+    prompts are flattened and run in SAM3 chunks of ``prompt_batch_size`` rows.
+    This follows the HF/Meta batched-independent-prompt pattern (image repeated
+    per row) and keeps the NPU busy on wide batches.
+
+    Each row is the combined-prompt pattern from the SAM3 docs: one obj_tag as
+    ``text`` plus one positive coarse box — e.g. text=\"monitor\" with a monitor
+    ROI box segments the monitor near that region.
+    """
+    per_image = _init_per_image_slots(images, boxes_per_image)
+    queries = _build_hybrid_queries(images, boxes_per_image, tags_per_image)
+    if not queries:
+        return per_image
+
+    prompt_batch_size = max(1, int(prompt_batch_size))
+    for start in range(0, len(queries), prompt_batch_size):
+        chunk = queries[start : start + prompt_batch_size]
+        seg_list, target_sizes = _forward_hybrid_chunk(processor, model, device, chunk)
+        for seg_item, q, tgt in zip(seg_list, chunk, target_sizes):
+            _apply_seg_to_query(per_image, q, seg_item, tgt)
 
     return per_image
 
@@ -479,7 +551,7 @@ def _filter_by_pixels_and_coverage(
 
 
 class Sam3Refiner(BaseTask):
-    """Refine filter-stage masks with Sam3Model box prompts (Sam2Refiner replacement)."""
+    """Refine filter-stage masks with Sam3Model hybrid text+box prompts."""
 
     # SAM3 quality gates
     # ─────────────────────────────────────────────────────────────────────────
@@ -522,6 +594,8 @@ class Sam3Refiner(BaseTask):
         self.min_coverage    = float(args.get("min_coverage",    self.MIN_COVERAGE))
         self.min_precision   = float(args.get("min_precision",   self.MIN_PRECISION))
         self.min_mask_pixels = int(  args.get("min_mask_pixels", self.MIN_MASK_PIXELS))
+        # SAM3 forward batch = hybrid prompt rows per NPU call (not pipeline images).
+        self.prompt_batch_size = int(args.get("prompt_batch_size", 32))
 
         replicas_per_device = int(args.get("replicas_per_device", 1))
         self._replica_pool: queue.Queue = queue.Queue()
@@ -532,9 +606,12 @@ class Sam3Refiner(BaseTask):
                 if not logged:
                     print(
                         f"[Sam3Refiner] Sam3Model on {dev} | "
+                        f"prompt_batch_size={self.prompt_batch_size} "
+                        f"pipeline_batch_size={args.get('batch_size', 4)} "
                         f"min_coverage={self.min_coverage:.2f} "
                         f"min_precision={self.min_precision:.2f} "
-                        f"min_mask_pixels={self.min_mask_pixels}"
+                        f"min_mask_pixels={self.min_mask_pixels}",
+                        flush=True,
                     )
                     logged = True
                 model.eval()
@@ -562,7 +639,6 @@ class Sam3Refiner(BaseTask):
 
     def _refine(self, images, masks_list, tags_list):
         boxes_per_image = [self._masks_to_bboxes(m) for m in masks_list]
-        texts = [_obj_tags_to_text(t) for t in tags_list]
         processor, model, dev = self._replica_pool.get()
         try:
             # torch.npu.set_device is thread-local; bind the thread to the
@@ -575,8 +651,8 @@ class Sam3Refiner(BaseTask):
                 pass  # non-NPU environment
             return _infer_refiner(
                 processor, model, dev,
-                images, boxes_per_image,
-                texts if any(t is not None for t in texts) else None,
+                images, boxes_per_image, tags_list,
+                prompt_batch_size=self.prompt_batch_size,
             )
         finally:
             self._replica_pool.put((processor, model, dev))

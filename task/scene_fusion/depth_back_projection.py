@@ -5,6 +5,7 @@ from pathlib import Path
 import open3d as o3d
 import os
 
+from utils.box_utils import convert_box_3d_camera_to_world, obb_params_from_open3d_pcd
 from utils.projection_utils import backproject_depth_to_3d
 from utils.image_utils import load_depth_map
 from task.base_task import BaseTask
@@ -59,7 +60,8 @@ class DepthBackProjecter(BaseTask):
             img_idx: index used for naming output files.
 
         Returns:
-            (filepaths, valid_flags): list of saved .pcd paths and per-mask validity.
+            (filepaths, valid_flags, refined_boxes_cam): saved .pcd paths, per-mask
+            validity, and camera-frame 9-param OBBs fitted to each cleaned cloud.
         """
         img_dim = depth.shape[::-1]  # (W, H)
         points_3d = backproject_depth_to_3d(depth, img_dim, intrinsic)
@@ -69,6 +71,7 @@ class DepthBackProjecter(BaseTask):
 
         filepaths = []
         valid_flags = []
+        refined_boxes_cam = []
         for idx, mask in enumerate(masks):
             masked_pts = points_3d[mask.flatten() > 0]
             pcd = o3d.geometry.PointCloud()
@@ -80,9 +83,11 @@ class DepthBackProjecter(BaseTask):
 
             if cleaned.is_empty():
                 valid_flags.append(False)
+                refined_boxes_cam.append(None)
                 continue
 
             valid_flags.append(True)
+            refined_boxes_cam.append(obb_params_from_open3d_pcd(cleaned))
             filepath = os.path.join(
                 output_dir,
                 f"pointcloud_{Path(str(img_idx)).stem}_{idx}.pcd"
@@ -90,7 +95,7 @@ class DepthBackProjecter(BaseTask):
             o3d.io.write_point_cloud(filepath, cleaned)
             filepaths.append(filepath)
 
-        return filepaths, valid_flags
+        return filepaths, valid_flags, refined_boxes_cam
 
     @staticmethod
     def _filter_by_valid_flags(example, valid_flags):
@@ -107,7 +112,8 @@ class DepthBackProjecter(BaseTask):
         """Back-project depth to per-object point clouds.
 
         Requires: intrinsic, depth_map, depth_scale, masks, obj_tags.
-        Populates: pointclouds, is_canonicalized, is_metric_depth.
+        Populates: pointclouds; updates bboxes_3d_world_coords from refined clouds
+        when pose is available.
         """
         assert "intrinsic" in example, "intrinsic not found in example"
         if "depth_map" not in example:
@@ -123,11 +129,24 @@ class DepthBackProjecter(BaseTask):
         masks = self._load_masks(example["masks"])
         masks = self._resize_masks_to_depth(masks, depth.shape)
 
-        filepaths, valid_flags = self._backproject_masks_to_pointclouds(
+        filepaths, valid_flags, refined_boxes_cam = self._backproject_masks_to_pointclouds(
             depth, intrinsic, masks, img_idx
         )
 
         example["pointclouds"] = filepaths
+
+        if "bboxes_3d_world_coords" in example and "pose" in example:
+            pose = np.loadtxt(example["pose"])
+            refined_boxes_world = []
+            for i, cam_box in enumerate(refined_boxes_cam):
+                if cam_box is not None:
+                    world_box = convert_box_3d_camera_to_world(cam_box, pose)
+                    refined_boxes_world.append(
+                        world_box if world_box is not None else example["bboxes_3d_world_coords"][i]
+                    )
+                else:
+                    refined_boxes_world.append(example["bboxes_3d_world_coords"][i])
+            example["bboxes_3d_world_coords"] = refined_boxes_world
 
         # Require at least 2 valid point clouds
         if len(filepaths) <= 1:

@@ -183,6 +183,45 @@ def convert_box_3d_world_to_camera(box_params, pose, euler_order='zxy'):
     return list(cam_center) + list(size) + cam_euler
 
 
+def obb_params_from_open3d_pcd(pcd, euler_order=EULER_GROUNDING_ORDER, min_points=4):
+    """9-param OBB [cx,cy,cz,xl,yl,zl,roll,pitch,yaw] from an open3d PointCloud."""
+    pts = np.asarray(pcd.points, dtype=np.float64)
+    if pts.shape[0] < min_points:
+        return None
+    obb = pcd.get_oriented_bounding_box()
+    center = np.asarray(obb.center, dtype=np.float64)
+    extent = np.asarray(obb.extent, dtype=np.float64)
+    rot_mat = np.asarray(obb.R, dtype=np.float64)
+    euler = normalize_euler_angles(
+        SciRotation.from_matrix(rot_mat).as_euler(euler_order, degrees=False),
+        euler_order,
+    )
+    return list(center) + list(extent) + euler
+
+
+def convert_box_3d_camera_to_world(box_params, pose, euler_order=EULER_GROUNDING_ORDER):
+    """Convert a 9-param camera-frame 3D box to world frame."""
+    if box_params is None or len(box_params) < 9:
+        return None
+    center = np.array(box_params[:3], dtype=np.float64)
+    size = np.array(box_params[3:6], dtype=np.float64)
+    rotation = box_params[6:9]
+
+    rot_mat = SciRotation.from_euler(euler_order, list(rotation), degrees=False).as_matrix()
+    transform = np.eye(4)
+    transform[:3, :3] = rot_mat
+    transform[:3, 3] = center
+
+    pose = np.asarray(pose, dtype=np.float64)
+    world_transform = pose @ transform
+    world_center = world_transform[:3, 3]
+    world_euler = normalize_euler_angles(
+        SciRotation.from_matrix(world_transform[:3, :3]).as_euler(euler_order, degrees=False),
+        euler_order,
+    )
+    return list(world_center) + list(size) + world_euler
+
+
 def check_box_2d_overlap(box1_xy, box2_xy):
     """Check if two 2D polygon projections overlap or are close.
 
