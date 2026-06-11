@@ -64,7 +64,40 @@ python refiner_exp/scripts/summarize_runs.py \
 - `summary.md`: 便于快速查看的文字摘要。
 - `object_metrics.csv`: 对象粒度的 mask、bbox、pointcloud 指标（每行一个 object × stage）。
 
-生成 Raw/SAM2/SAM3 并排 overlay 和 RGB-D mask 点云视图：
+### Web 可视化（推荐）
+
+启动本地服务后，用浏览器打开（默认 `127.0.0.1:8848`）：
+
+```bash
+python refiner_exp/scripts/serve_compare.py \
+  --raw-run refiner_exp/outputs/raw \
+  --sam2-run refiner_exp/outputs/sam2 \
+  --sam3-run refiner_exp/outputs/sam3 \
+  --port 8848
+```
+
+浏览器访问 **http://127.0.0.1:8848/**：
+
+| 路径 | 内容 |
+|------|------|
+| `/` | 样本列表 |
+| `/view/{name}` | 单样本页：2D overlay + RAW/SAM2/SAM3 三列可旋转点云 |
+
+交互操作：左键拖拽旋转、滚轮缩放、右键平移。
+
+**数据加载方式**（按需，非预生成大 HTML）：
+
+- 2D 图：`/api/sample/{name}/overlay`（首次渲染后缓存到 `compare/cache/`）
+- 点云：`/api/sample/{name}/points/{branch}`，读取 fusion 的 **per-object `.pcd`**
+- 指标：`/api/sample/{name}/stats`
+
+重跑 pipeline 后**重启服务**即可看到新数据；2D 缓存可加 `?refresh=1` 强制重绘。
+
+常用参数：`--max-images`、`--max-points-per-object`（默认 8000）、`--host` / `--port`。
+
+### 可选：批量导出静态 JPG
+
+仅需离线 2D 对照图时：
 
 ```bash
 python refiner_exp/scripts/visualize_compare.py \
@@ -72,44 +105,10 @@ python refiner_exp/scripts/visualize_compare.py \
   --sam2-run refiner_exp/outputs/sam2 \
   --sam3-run refiner_exp/outputs/sam3 \
   --output-dir refiner_exp/outputs/compare/images \
-  --max-images 20 \
-  --pointcloud-mode interactive
+  --max-images 20
 ```
 
-每张图会展示三条分支的 mask overlay、mask-derived 2D bbox，以及每个 object 的原始 `bboxes_3d_world_coords` 投影到 RGB 后的 3D bbox 线框。mask、2D bbox 和 3D bbox 线框使用同一个 object 颜色，便于直观看出 3D bbox 是否贴合当前视角中的物体。
-
-启动后会立即打印进度（索引 parquet → 逐图渲染）；默认不再在启动阶段批量读取全部 mask / 点云。
-
-### 交互式点云页面（推荐）
-
-默认 `--pointcloud-mode interactive` 会为每个样本生成 `{name}.html`，并汇总到 `index.html`：
-
-```text
-refiner_exp/outputs/compare/images/index.html   ← 样本列表入口
-refiner_exp/outputs/compare/images/{name}.html  ← 单样本交互页
-refiner_exp/outputs/compare/images/{name}.jpg   ← 2D 对照图（嵌在 HTML 顶部）
-```
-
-打开 `index.html` 后进入各样本页，页面内 RAW / SAM2 / SAM3 三列 **WebGL 点云** 支持：
-
-- **左键拖拽**：旋转（OrbitControls）
-- **滚轮**：缩放
-- **右键拖拽**：平移
-
-点云数据以内嵌 base64 方式写入 HTML（默认每分支最多 `--max-interactive-points 20000` 点），无需再开外部查看器。首次打开需能访问 Three.js CDN（`cdn.jsdelivr.net`）；若离线环境可改用本地 HTTP 服务打开目录。
-
-点云相关 `--pointcloud-mode` 选项（**默认 `interactive`**）：
-
-| 模式 | 输出 |
-|------|------|
-| `interactive` | JPG + 交互 HTML（**默认，最快**） |
-| `none` | 仅 2D overlay JPG |
-| `render` | JPG + 静态正交缩略图 |
-| `ply` | JPG + `.ply` 文件 |
-| `both` | JPG + 正交缩略图 + `.ply` |
-| `all` | 以上全部 + 交互 HTML（最慢，含 ASCII 级大文件） |
-
-导出的 `.ply` 位于 `refiner_exp/outputs/compare/images/pointclouds/`，可用 CloudCompare、MeshLab 等打开。同名 `.json` 记录对象指标与点云路径。
+每张图含三列 mask overlay、2D bbox、3D 线框（同色）。已存在 JPG/JSON 时默认跳过，加 `--force` 重生成。
 
 ---
 
