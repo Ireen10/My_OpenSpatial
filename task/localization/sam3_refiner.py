@@ -240,9 +240,10 @@ def _infer_refiner(
         ).to(device)
         with torch.no_grad():
             outputs = model(**inputs)
-        seg_list = _post_process(processor, outputs, 0.0, _target_sizes(inputs))
+        seg_list = _post_process(processor, outputs, 0.6, _target_sizes(inputs))
         for seg, q in zip(seg_list, chunk):
             mask, score = _best_mask_from_seg(seg)
+            print(f"score: {score}")
             masks, scores = per_image[q["img_idx"]]
             masks[q["obj_idx"]] = mask
             scores[q["obj_idx"]] = score
