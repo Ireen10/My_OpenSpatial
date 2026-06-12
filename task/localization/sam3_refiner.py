@@ -1,3 +1,4 @@
+import math
 import os
 import queue
 import threading
@@ -9,15 +10,67 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"tbe\..*")
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
+from scipy.optimize import linear_sum_assignment
 
 from task.base_task import BaseTask
 
 
+# ---------------------------------------------------------------------------
+# NPU helpers
+# ---------------------------------------------------------------------------
+
+def _try_import_torch_npu() -> bool:
+    try:
+        import torch_npu  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _npu_available() -> bool:
+    if not _try_import_torch_npu():
+        return False
+    return bool(hasattr(torch, "npu") and torch.npu.is_available())
+
+
+def _is_npu_device(device: str) -> bool:
+    return str(device).startswith("npu")
+
+
+_NPU_CONFIGURED = False
+
+
+def _configure_npu_once() -> None:
+    """Apply Ascend NPU runtime options (idempotent)."""
+    global _NPU_CONFIGURED
+    if _NPU_CONFIGURED or not _npu_available():
+        return
+    _NPU_CONFIGURED = True
+    import torch_npu  # noqa: F401
+
+    if hasattr(torch.npu, "set_compile_mode"):
+        torch.npu.set_compile_mode(jit_compile=False)
+    opt = {
+        "ACL_PRECISION_MODE": "must_keep_origin_dtype",
+        "ACL_OP_SELECT_IMPL_MODE": "high_precision",
+    }
+    torch_npu.npu.set_option(opt)
+    if hasattr(torch.npu, "config") and hasattr(torch.npu.config, "allow_internal_format"):
+        torch.npu.config.allow_internal_format = False
+    if hasattr(torch.npu, "conv") and hasattr(torch.npu.conv, "allow_hf32"):
+        torch.npu.conv.allow_hf32 = False
+    if hasattr(torch.npu, "matmul") and hasattr(torch.npu.matmul, "allow_hf32"):
+        torch.npu.matmul.allow_hf32 = False
+
+
 def _try_patch_roi_align_for_npu() -> bool:
     """Replace torchvision.ops.roi_align with torch_npu.npu_roi_align on NPU."""
+    if not _npu_available():
+        return False
     try:
         import torchvision.ops as _tvops
         import torch_npu  # noqa: F401
@@ -73,27 +126,236 @@ def _try_patch_roi_align_for_npu() -> bool:
     return True
 
 
-_try_patch_roi_align_for_npu()
-
-
 def _parse_devices(device_raw) -> list[str]:
     if isinstance(device_raw, (list, tuple)):
         return [str(d).strip() for d in device_raw if str(d).strip()]
     return [d.strip() for d in str(device_raw).split(",") if d.strip()]
 
 
-def _set_npu_device(device: str) -> None:
-    if not str(device).startswith("npu"):
-        return
-    try:
-        dev_id = int(str(device).split(":")[-1]) if ":" in str(device) else 0
-        torch.npu.set_device(dev_id)
-    except AttributeError:
-        pass
+def _default_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if _npu_available():
+        return "npu:0"
+    return "cpu"
 
+
+def _set_npu_device(device: str) -> None:
+    if not _is_npu_device(device):
+        return
+    if not _try_import_torch_npu():
+        raise ImportError("torch_npu is required for device='npu:*'.")
+    dev_id = int(str(device).split(":")[-1]) if ":" in str(device) else 0
+    torch.npu.set_device(dev_id)
+
+
+# ---------------------------------------------------------------------------
+# NPU-safe SAM3 vision cross-attention (explicit matmul + fp32 softmax)
+# ---------------------------------------------------------------------------
+
+class SafeSam3Attention(nn.Module):
+    """Drop-in replacement for Sam3Attention that avoids fused NPU attention ops."""
+
+    def __init__(self, attn: nn.Module, num_heads: int | None = None, head_dim: int | None = None):
+        super().__init__()
+        self.q_proj = attn.q_proj
+        self.k_proj = attn.k_proj
+        self.v_proj = attn.v_proj
+        self.o_proj = getattr(attn, "o_proj", None) or getattr(attn, "out_proj", None)
+        if self.o_proj is None:
+            raise AttributeError("Sam3Attention has no o_proj/out_proj.")
+
+        self.embed_dim = self.q_proj.out_features
+
+        if num_heads is None:
+            num_heads = (
+                getattr(attn, "num_heads", None)
+                or getattr(attn, "num_attention_heads", None)
+                or getattr(attn, "n_heads", None)
+            )
+        if head_dim is None:
+            head_dim = getattr(attn, "head_dim", None) or getattr(attn, "attention_head_size", None)
+
+        if head_dim is None:
+            scaling = getattr(attn, "scaling", None) or getattr(attn, "scale", None)
+            if scaling is not None:
+                try:
+                    head_dim = int(round(1.0 / (float(scaling) ** 2)))
+                except Exception:
+                    head_dim = None
+
+        if num_heads is None and head_dim is not None:
+            num_heads = self.embed_dim // head_dim
+
+        if num_heads is None:
+            for h in (8, 16, 4, 32):
+                if self.embed_dim % h == 0:
+                    num_heads = h
+                    break
+
+        if head_dim is None:
+            head_dim = self.embed_dim // int(num_heads)
+
+        if self.embed_dim != int(num_heads) * int(head_dim):
+            raise ValueError(
+                f"Bad heads: embed_dim={self.embed_dim}, num_heads={num_heads}, head_dim={head_dim}"
+            )
+
+        self.num_heads = int(num_heads)
+        self.head_dim = int(head_dim)
+        self.scale = 1.0 / math.sqrt(self.head_dim)
+
+    def _pick_hidden_states(self, args, kwargs):
+        for key in ("hidden_states", "query", "x"):
+            if key in kwargs and torch.is_tensor(kwargs[key]):
+                return kwargs[key]
+        for a in args:
+            if torch.is_tensor(a) and a.ndim == 3 and a.shape[-1] == self.embed_dim:
+                return a
+        for v in kwargs.values():
+            if torch.is_tensor(v) and v.ndim == 3 and v.shape[-1] == self.embed_dim:
+                return v
+        return None
+
+    def _pick_kv_states(self, hidden_states, args, kwargs):
+        for key in ("key_value_states", "encoder_hidden_states", "memory", "context"):
+            if key in kwargs and torch.is_tensor(kwargs[key]) and kwargs[key].ndim == 3:
+                return kwargs[key]
+
+        cand = []
+        lq = hidden_states.shape[1]
+        for a in args:
+            if torch.is_tensor(a) and a.ndim == 3 and a.shape[-1] == self.embed_dim:
+                cand.append((a.shape[1], a))
+        for v in kwargs.values():
+            if torch.is_tensor(v) and v.ndim == 3 and v.shape[-1] == self.embed_dim:
+                cand.append((v.shape[1], v))
+
+        cand = [(l, t) for l, t in cand if t is not hidden_states]
+        diff = [(l, t) for l, t in cand if l != lq]
+        if diff:
+            return max(diff, key=lambda x: x[0])[1]
+        return hidden_states
+
+    def _pick_attention_mask(self, batch_size, lq, lk, args, kwargs):
+        if "attention_mask" in kwargs and torch.is_tensor(kwargs["attention_mask"]):
+            return kwargs["attention_mask"]
+
+        for a in args:
+            if torch.is_tensor(a) and a.ndim in (2, 3, 4):
+                t = a
+                if t.ndim == 2 and t.shape == (batch_size, lk):
+                    return t
+                if t.ndim == 4 and t.shape[-1] == lk:
+                    return t
+                if t.ndim == 3 and t.shape[0] == batch_size and t.shape[-1] == lk:
+                    return t
+        for v in kwargs.values():
+            if torch.is_tensor(v) and v.ndim in (2, 3, 4):
+                t = v
+                if t.ndim == 2 and t.shape == (batch_size, lk):
+                    return t
+                if t.ndim == 4 and t.shape[-1] == lk:
+                    return t
+                if t.ndim == 3 and t.shape[0] == batch_size and t.shape[-1] == lk:
+                    return t
+        return None
+
+    def _apply_mask(self, scores, mask):
+        if mask is None:
+            return scores
+        batch_size, _, lq, lk = scores.shape
+        m = mask
+        if m.dtype == torch.bool:
+            try:
+                return scores.masked_fill(m, float("-inf"))
+            except Exception:
+                if m.ndim == 2:
+                    return scores.masked_fill(m[:, None, None, :], float("-inf"))
+                return scores
+
+        if m.ndim == 2 and m.shape == (batch_size, lk):
+            mm = m
+            if mm.dtype in (torch.int32, torch.int64, torch.uint8) or (mm.min() >= 0 and mm.max() <= 1.0):
+                mm = (1.0 - mm.float()) * (-1e4)
+            else:
+                mm = mm.float()
+            m4 = mm[:, None, None, :]
+        elif m.ndim == 4:
+            m4 = m.float()
+        elif m.ndim == 3:
+            if m.shape[1] == 1 and m.shape[2] == lk:
+                m4 = m[:, None, :, :].float()
+            elif m.shape[1] == lq and m.shape[2] == lk:
+                m4 = m[:, None, :, :].float()
+            else:
+                return scores
+        else:
+            return scores
+
+        try:
+            return scores + m4.to(scores.device, dtype=scores.dtype)
+        except Exception:
+            return scores
+
+    def forward(self, *args, **kwargs):
+        hidden_states = self._pick_hidden_states(args, kwargs)
+        if hidden_states is None:
+            raise TypeError("SafeSam3Attention: cannot find hidden_states/query in args/kwargs")
+
+        key_value_states = self._pick_kv_states(hidden_states, args, kwargs)
+
+        attn_bias = None
+        for key in ("attn_bias", "attention_bias", "position_bias", "rpb", "bias"):
+            if key in kwargs and torch.is_tensor(kwargs[key]) and kwargs[key].ndim == 4:
+                attn_bias = kwargs[key]
+                break
+
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(key_value_states)
+        v = self.v_proj(key_value_states)
+
+        batch_size, lq, embed_dim = q.shape
+        lk = k.shape[1]
+        num_heads, head_dim = self.num_heads, self.head_dim
+
+        q = q.view(batch_size, lq, num_heads, head_dim).transpose(1, 2).contiguous()
+        k = k.view(batch_size, lk, num_heads, head_dim).transpose(1, 2).contiguous()
+        v = v.view(batch_size, lk, num_heads, head_dim).transpose(1, 2).contiguous()
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        if attn_bias is not None:
+            scores = scores + attn_bias.to(scores.device, dtype=scores.dtype)
+
+        attention_mask = self._pick_attention_mask(batch_size, lq, lk, args, kwargs)
+        scores = self._apply_mask(scores, attention_mask)
+
+        s = scores.float()
+        s = s - s.max(dim=-1, keepdim=True).values
+        probs = torch.softmax(s, dim=-1).to(dtype=v.dtype)
+
+        ctx = torch.matmul(probs, v)
+        ctx = ctx.transpose(1, 2).contiguous().view(batch_size, lq, embed_dim)
+        return (self.o_proj(ctx), None)
+
+
+def _replace_vision_cross_attn(model, upto_layers: int = 6) -> None:
+    for i in range(upto_layers):
+        model.detr_decoder.layers[i].vision_cross_attn = SafeSam3Attention(
+            model.detr_decoder.layers[i].vision_cross_attn,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Model loading & post-processing
+# ---------------------------------------------------------------------------
 
 def _load_sam3_replica(segmenter_model: str, load_kwargs: dict, device: str):
     """Load Sam3Processor + Sam3Model. Requires transformers>=5.0.0."""
+    if _is_npu_device(device):
+        _configure_npu_once()
+        _try_patch_roi_align_for_npu()
+
     is_local = (
         os.path.isabs(segmenter_model)
         or segmenter_model.startswith("./")
@@ -112,6 +374,9 @@ def _load_sam3_replica(segmenter_model: str, load_kwargs: dict, device: str):
             "Sam3Processor/Sam3Model not found. Install transformers>=5.0.0."
         ) from e
 
+    if _is_npu_device(device) and "torch_dtype" not in load_kwargs:
+        load_kwargs = {**load_kwargs, "torch_dtype": torch.float32}
+
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
@@ -125,6 +390,11 @@ def _load_sam3_replica(segmenter_model: str, load_kwargs: dict, device: str):
             raise RuntimeError(
                 f"Failed to load Sam3Model from {segmenter_model!r}."
             ) from e
+
+    if _is_npu_device(device):
+        _replace_vision_cross_attn(model)
+
+    model.eval()
     return proc, model
 
 
@@ -133,26 +403,13 @@ def _target_sizes(inputs) -> list:
     return sizes.tolist() if hasattr(sizes, "tolist") else list(sizes)
 
 
-_SEG_LOGGED = False
-
-
-def _post_process(processor, outputs, min_score: float, target_sizes: list):
-    global _SEG_LOGGED
-    result = processor.post_process_instance_segmentation(
+def _post_process(processor, outputs, score_threshold: float, target_sizes: list):
+    return processor.post_process_instance_segmentation(
         outputs,
-        threshold=min_score,
+        threshold=score_threshold,
         mask_threshold=0.5,
         target_sizes=target_sizes,
     )
-    if not _SEG_LOGGED:
-        _SEG_LOGGED = True
-        d = result[0] if isinstance(result, list) and result else result
-        print(f"[Sam3Refiner] post_process -> {type(result).__name__}", flush=True)
-        if isinstance(d, dict):
-            for k, v in d.items():
-                extra = f" {tuple(v.shape)} {v.dtype}" if hasattr(v, "shape") else ""
-                print(f"  {k}: {type(v).__name__}{extra}", flush=True)
-    return result
 
 
 def _load_coarse_mask(path: str) -> np.ndarray:
@@ -181,32 +438,98 @@ def _tags_per_box(tags, n_boxes: int) -> list[str]:
     return out
 
 
-def _best_mask_from_seg(seg_item) -> tuple[np.ndarray, float]:
-    scores, masks = seg_item.get("scores"), seg_item.get("masks")
-    if scores is None or masks is None or len(scores) == 0:
-        return np.zeros((1, 1), dtype=np.float32), 0.0
-    scores_np = scores.float().cpu().numpy() if hasattr(scores, "cpu") else np.asarray(scores)
-    best = int(scores_np.argmax())
-    mask = masks[best]
+def _unique_tags_preserve_order(tags: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for tag in tags:
+        if tag not in seen:
+            seen.add(tag)
+            out.append(tag)
+    return out
+
+
+def _mask_to_numpy(mask) -> np.ndarray:
     if hasattr(mask, "float"):
         mask = mask.float()
-    mask = mask.cpu().numpy() if hasattr(mask, "cpu") else np.asarray(mask)
-    if mask.ndim == 3:
-        mask = mask[0]
-    return mask, float(scores_np[best])
+    arr = mask.cpu().numpy() if hasattr(mask, "cpu") else np.asarray(mask)
+    if arr.ndim == 3:
+        arr = arr[0]
+    return arr.astype(np.float32)
+
+
+def _mask_box_iou(mask: np.ndarray, box: np.ndarray) -> float:
+    """IoU between a binary mask and an axis-aligned box region."""
+    h, w = mask.shape
+    x1, y1, x2, y2 = [int(round(float(v))) for v in box]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w - 1, x2), min(h - 1, y2)
+    if x2 < x1 or y2 < y1:
+        return 0.0
+    box_area = (x2 - x1 + 1) * (y2 - y1 + 1)
+    mask_bin = mask > 0
+    mask_area = float(mask_bin.sum())
+    inter = float(mask_bin[y1 : y2 + 1, x1 : x2 + 1].sum())
+    union = mask_area + box_area - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _extract_seg_masks_scores(seg_item) -> tuple[list[np.ndarray], list[float]]:
+    scores, masks = seg_item.get("scores"), seg_item.get("masks")
+    if scores is None or masks is None or len(scores) == 0:
+        return [], []
+    scores_np = (
+        scores.float().cpu().numpy()
+        if hasattr(scores, "cpu")
+        else np.asarray(scores, dtype=np.float32)
+    )
+    return (
+        [_mask_to_numpy(m) for m in masks],
+        [float(s) for s in scores_np],
+    )
+
+
+def _match_masks_to_boxes(
+    candidate_masks: list[np.ndarray],
+    candidate_scores: list[float],
+    target_boxes: list[np.ndarray],
+    empty_shape: tuple[int, int],
+) -> list[tuple[np.ndarray, float]]:
+    """Assign candidate masks to target boxes by maximum mask-box IoU (Hungarian)."""
+    n_obj = len(target_boxes)
+    if n_obj == 0:
+        return []
+
+    empty_mask = np.zeros(empty_shape, dtype=np.float32)
+    if not candidate_masks:
+        return [(empty_mask, 0.0)] * n_obj
+
+    n_mask = len(candidate_masks)
+    iou_mat = np.zeros((n_obj, n_mask), dtype=np.float64)
+    for i, box in enumerate(target_boxes):
+        for j, mask in enumerate(candidate_masks):
+            iou_mat[i, j] = _mask_box_iou(mask, box)
+
+    row_ind, col_ind = linear_sum_assignment(-iou_mat)
+    results: list[tuple[np.ndarray, float]] = [(empty_mask.copy(), 0.0)] * n_obj
+    for row, col in zip(row_ind, col_ind):
+        if iou_mat[row, col] <= 0.0:
+            continue
+        results[row] = (candidate_masks[col], candidate_scores[col])
+    return results
 
 
 def _infer_refiner(
     processor,
     model,
-    device,
     images,
     boxes_per_image,
     tags_per_image,
     prompt_batch_size: int = 32,
+    score_threshold: float = 0.5,
 ):
-    """Batched text+positive-box refinement: one SAM3 row per (image, tag, box)."""
+    """Text-only SAM3 refinement: one forward row per (image, unique tag)."""
     per_image: list[tuple[list, list]] = []
+    tags_by_image: list[list[str]] = []
     queries: list[dict] = []
 
     for img_idx, image in enumerate(images):
@@ -214,66 +537,92 @@ def _infer_refiner(
         n = len(boxes)
         if n == 0:
             per_image.append(([], []))
+            tags_by_image.append([])
             continue
+
         tags = _tags_per_box(
             tags_per_image[img_idx] if tags_per_image else None, n,
         )
-        per_image.append(([np.zeros((1, 1), dtype=np.float32)] * n, [0.0] * n))
-        for obj_idx, (box, tag) in enumerate(zip(boxes, tags)):
-            queries.append({
-                "img_idx": img_idx, "obj_idx": obj_idx,
-                "image": image, "text": tag, "box": box,
-            })
+        tags_by_image.append(tags)
+        per_image.append((
+            [np.zeros((1, 1), dtype=np.float32) for _ in range(n)],
+            [0.0] * n,
+        ))
+
+        for tag in _unique_tags_preserve_order(tags):
+            queries.append({"img_idx": img_idx, "tag": tag, "image": image})
 
     if not queries:
         return per_image
 
+    device = next(model.parameters()).device
     batch_size = max(1, int(prompt_batch_size))
     for start in range(0, len(queries), batch_size):
         chunk = queries[start : start + batch_size]
         inputs = processor(
             images=[q["image"] for q in chunk],
-            text=[q["text"] for q in chunk],
-            input_boxes=[[q["box"].tolist()] for q in chunk],
-            input_boxes_labels=[[1] for _ in chunk],
+            text=[q["tag"] for q in chunk],
             return_tensors="pt",
         ).to(device)
         with torch.no_grad():
             outputs = model(**inputs)
-        seg_list = _post_process(processor, outputs, 0.6, _target_sizes(inputs))
+        seg_list = _post_process(
+            processor, outputs, score_threshold, _target_sizes(inputs),
+        )
+
         for seg, q in zip(seg_list, chunk):
-            mask, score = _best_mask_from_seg(seg)
-            print(f"score: {score}")
-            masks, scores = per_image[q["img_idx"]]
-            masks[q["obj_idx"]] = mask
-            scores[q["obj_idx"]] = score
+            img_idx = q["img_idx"]
+            tag = q["tag"]
+            tags = tags_by_image[img_idx]
+            boxes = np.asarray(boxes_per_image[img_idx], dtype=np.float32).reshape(-1, 4)
+
+            obj_indices = [i for i, t in enumerate(tags) if t == tag]
+            target_boxes = [boxes[i] for i in obj_indices]
+            cand_masks, cand_scores = _extract_seg_masks_scores(seg)
+
+            h, w = images[img_idx].size[1], images[img_idx].size[0]
+            if cand_masks:
+                h, w = cand_masks[0].shape
+            assignments = _match_masks_to_boxes(
+                cand_masks, cand_scores, target_boxes, empty_shape=(h, w),
+            )
+
+            masks_out, scores_out = per_image[img_idx]
+            for obj_idx, (mask, score) in zip(obj_indices, assignments):
+                masks_out[obj_idx] = mask
+                scores_out[obj_idx] = score
 
     return per_image
 
 
 class Sam3Refiner(BaseTask):
-    """Refine filter-stage masks with Sam3Model hybrid text+box prompts."""
+    """Refine filter-stage masks with Sam3Model text-only prompts (NPU-safe)."""
 
-    MIN_SCORE = 0.6
+    MIN_SCORE = 0.5
     MIN_MASK_PIXELS = 20
 
     def __init__(self, args, device=None):
         super().__init__(args)
         segmenter_model = args.get("segmenter_model", "facebook/sam3")
         devices = _parse_devices(
-            args.get("device") or device or ("cuda" if torch.cuda.is_available() else "cpu")
+            args.get("device") or device or _default_device()
         )
-        self.device = devices[0]
         self.min_score = float(args.get("min_score", self.MIN_SCORE))
         self.min_mask_pixels = int(args.get("min_mask_pixels", self.MIN_MASK_PIXELS))
         self.prompt_batch_size = int(args.get("prompt_batch_size", 32))
 
+        load_kwargs = {}
         replicas_per_device = int(args.get("replicas_per_device", 1))
+        if any(_is_npu_device(dev) for dev in devices) and replicas_per_device != 1:
+            raise ValueError(
+                "SAM3 NPU mode supports exactly one replica per NPU. "
+                "Set replicas_per_device: 1 to avoid known AICPU errors."
+            )
+
         self._replica_pool: queue.Queue = queue.Queue()
         for dev in devices:
             for _ in range(replicas_per_device):
-                proc, model = _load_sam3_replica(segmenter_model, {}, dev)
-                model.eval()
+                proc, model = _load_sam3_replica(segmenter_model, load_kwargs, dev)
                 self._replica_pool.put((proc, model, dev))
 
         total_replicas = len(devices) * replicas_per_device
@@ -283,7 +632,7 @@ class Sam3Refiner(BaseTask):
                 args["num_workers"] = total_replicas
 
         print(
-            f"[Sam3Refiner] Sam3Model on {','.join(devices)} | "
+            f"[Sam3Refiner] Sam3Model text-only on {','.join(devices)} | "
             f"replicas={total_replicas} prompt_batch_size={self.prompt_batch_size} "
             f"pipeline_batch_size={args.get('batch_size', 4)} "
             f"min_score={self.min_score:.2f} min_mask_pixels={self.min_mask_pixels}",
@@ -310,9 +659,10 @@ class Sam3Refiner(BaseTask):
         try:
             _set_npu_device(dev)
             return _infer_refiner(
-                processor, model, dev,
+                processor, model,
                 images, boxes_per_image, tags_list,
                 prompt_batch_size=self.prompt_batch_size,
+                score_threshold=self.min_score,
             )
         finally:
             self._replica_pool.put((processor, model, dev))
