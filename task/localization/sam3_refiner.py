@@ -494,7 +494,7 @@ def _match_masks_to_boxes(
 ) -> list[tuple[np.ndarray, float]]:
     """Greedy object-centric assignment; mask count and object count need not match.
 
-    Single object: pick the best max(IoU, IoB) mask with no similarity threshold.
+    Single object: highest SAM score among post-process candidates, then geometric gate.
     Multiple objects: greedy assignment gated by match_sim_threshold.
     """
     n_obj = len(target_boxes)
@@ -506,15 +506,9 @@ def _match_masks_to_boxes(
         return [(empty_mask, 0.0)] * n_obj
 
     if n_obj == 1:
-        best_j = 0
-        best_sim = -1.0
-        for j, mask in enumerate(candidate_masks):
-            sim = _mask_box_sim(mask, target_boxes[0])
-            if sim > best_sim or (
-                sim == best_sim and candidate_scores[j] > candidate_scores[best_j]
-            ):
-                best_sim = sim
-                best_j = j
+        best_j = max(range(len(candidate_masks)), key=lambda j: candidate_scores[j])
+        if _mask_box_sim(candidate_masks[best_j], target_boxes[0]) < match_sim_threshold:
+            return [(empty_mask, 0.0)]
         return [(candidate_masks[best_j], candidate_scores[best_j])]
 
     pairs: list[tuple[float, float, int, int]] = []
@@ -545,7 +539,7 @@ def _infer_refiner(
     boxes_per_image,
     tags_per_image,
     prompt_batch_size: int = 32,
-    score_threshold: float = 0.5,
+    score_threshold: float = 0.25,
     match_sim_threshold: float = 0.25,
 ):
     """Text-only SAM3 refinement: one forward row per (image, unique tag)."""
@@ -630,7 +624,7 @@ def _infer_refiner(
 class Sam3Refiner(BaseTask):
     """Refine filter-stage masks with Sam3Model text-only prompts (NPU-safe)."""
 
-    MIN_SCORE = 0.5
+    SCORE_THRESHOLD = 0.25
     MIN_MASK_PIXELS = 20
     MATCH_SIM_THRESHOLD = 0.25
 
@@ -640,7 +634,9 @@ class Sam3Refiner(BaseTask):
         devices = _parse_devices(
             args.get("device") or device or _default_device()
         )
-        self.min_score = float(args.get("min_score", self.MIN_SCORE))
+        self.score_threshold = float(
+            args.get("score_threshold", args.get("min_score", self.SCORE_THRESHOLD))
+        )
         self.match_sim_threshold = float(
             args.get("match_sim_threshold", self.MATCH_SIM_THRESHOLD)
         )
@@ -671,8 +667,9 @@ class Sam3Refiner(BaseTask):
             f"[Sam3Refiner] Sam3Model text-only on {','.join(devices)} | "
             f"replicas={total_replicas} prompt_batch_size={self.prompt_batch_size} "
             f"pipeline_batch_size={args.get('batch_size', 4)} "
+            f"score_threshold={self.score_threshold:.2f} "
             f"match_sim_threshold={self.match_sim_threshold:.2f} "
-            f"min_score={self.min_score:.2f} min_mask_pixels={self.min_mask_pixels}",
+            f"min_mask_pixels={self.min_mask_pixels}",
             flush=True,
         )
 
@@ -699,7 +696,7 @@ class Sam3Refiner(BaseTask):
                 processor, model,
                 images, boxes_per_image, tags_list,
                 prompt_batch_size=self.prompt_batch_size,
-                score_threshold=self.min_score,
+                score_threshold=self.score_threshold,
                 match_sim_threshold=self.match_sim_threshold,
             )
         finally:
@@ -708,8 +705,6 @@ class Sam3Refiner(BaseTask):
     def _filter_masks(self, pred_masks, scores):
         refined, keep_indices = [], []
         for i, arr in enumerate(pred_masks):
-            if float(scores[i]) < self.min_score:
-                continue
             arr = np.asarray(arr) > 0
             if np.sum(arr) > self.min_mask_pixels:
                 refined.append(arr)
