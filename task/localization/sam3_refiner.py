@@ -16,7 +16,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 
 from task.base_task import BaseTask
-from task.localization.sam3_label_trick import sam3_prompt_text_for_tag  # TEMP: label experiment
 
 
 # ---------------------------------------------------------------------------
@@ -419,25 +418,6 @@ def _load_coarse_mask(path: str) -> np.ndarray:
     return m > 127
 
 
-def _tags_per_box(tags, n_boxes: int) -> list[str]:
-    if n_boxes <= 0:
-        return []
-    if tags is None:
-        return ["object"] * n_boxes
-    if isinstance(tags, np.ndarray):
-        tags = tags.tolist()
-    elif not isinstance(tags, (list, tuple)):
-        tags = [tags]
-    out: list[str] = []
-    for i in range(n_boxes):
-        tag = tags[i] if i < len(tags) else None
-        if tag is not None and str(tag).strip():
-            out.append(str(tag).strip())
-        else:
-            out.append("object")
-    return out
-
-
 def _unique_tags_preserve_order(tags: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -581,9 +561,19 @@ def _infer_refiner(
             tags_by_image.append([])
             continue
 
-        tags = _tags_per_box(
-            tags_per_image[img_idx] if tags_per_image else None, n,
-        )
+        raw_tags = tags_per_image[img_idx] if tags_per_image else None
+        if raw_tags is None:
+            tags = ["object"] * n
+        else:
+            if isinstance(raw_tags, np.ndarray):
+                raw_tags = raw_tags.tolist()
+            elif not isinstance(raw_tags, (list, tuple)):
+                raw_tags = [raw_tags]
+            if len(raw_tags) != n:
+                raise ValueError(
+                    f"obj_tags length ({len(raw_tags)}) != masks/boxes length ({n})"
+                )
+            tags = [str(t).strip() or "object" for t in raw_tags]
         tags_by_image.append(tags)
         per_image.append((
             [np.zeros((1, 1), dtype=np.float32) for _ in range(n)],
@@ -602,7 +592,7 @@ def _infer_refiner(
         chunk = queries[start : start + batch_size]
         inputs = processor(
             images=[q["image"] for q in chunk],
-            text=[sam3_prompt_text_for_tag(q["tag"]) for q in chunk],  # TEMP: label experiment
+            text=[q["tag"] for q in chunk],
             return_tensors="pt",
         ).to(device)
         with torch.no_grad():
@@ -859,8 +849,19 @@ class Sam3Refiner(BaseTask):
         for key in ("image", "masks", "obj_tags"):
             if key not in example:
                 raise ValueError(f"{key} not found in example")
-        if len(example["obj_tags"]) == 0:
+        n = len(example["obj_tags"])
+        if n == 0:
             raise ValueError("obj_tags is empty")
+        if len(example["masks"]) != n:
+            raise ValueError(
+                f"masks length ({len(example['masks'])}) != obj_tags length ({n}); "
+                "each object must have one coarse mask before SAM3 refinement."
+            )
+        boxes = example.get("bboxes_3d_world_coords")
+        if boxes is not None and len(boxes) != n:
+            raise ValueError(
+                f"bboxes_3d_world_coords length ({len(boxes)}) != obj_tags length ({n})"
+            )
 
     def _filter_by_keep_indices(self, example, keep_indices):
         for key in self.args.get("update_keys", []):
