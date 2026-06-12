@@ -513,9 +513,8 @@ def _match_masks_to_boxes(
 ) -> list[tuple[np.ndarray, float]]:
     """Greedy object-centric assignment; mask count and object count need not match.
 
-    Each annotated box independently competes for SAM masks. Pairs are ranked by
-    geometric similarity ``max(IoU, IoB)`` (SORT-style gate), then by SAM score.
-    A mask is used at most once; extra masks or unmatched boxes are left empty.
+    Single object: pick the best max(IoU, IoB) mask with no similarity threshold.
+    Multiple objects: greedy assignment gated by match_sim_threshold.
     """
     n_obj = len(target_boxes)
     if n_obj == 0:
@@ -524,6 +523,18 @@ def _match_masks_to_boxes(
     empty_mask = np.zeros(empty_shape, dtype=np.float32)
     if not candidate_masks:
         return [(empty_mask, 0.0)] * n_obj
+
+    if n_obj == 1:
+        best_j = 0
+        best_sim = -1.0
+        for j, mask in enumerate(candidate_masks):
+            sim = _mask_box_sim(mask, target_boxes[0])
+            if sim > best_sim or (
+                sim == best_sim and candidate_scores[j] > candidate_scores[best_j]
+            ):
+                best_sim = sim
+                best_j = j
+        return [(candidate_masks[best_j], candidate_scores[best_j])]
 
     pairs: list[tuple[float, float, int, int]] = []
     for i, box in enumerate(target_boxes):
