@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 
 from task.base_task import BaseTask
+from task.localization.sam3_label_trick import sam3_prompt_text_for_tag  # TEMP: label experiment
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +602,7 @@ def _infer_refiner(
         chunk = queries[start : start + batch_size]
         inputs = processor(
             images=[q["image"] for q in chunk],
-            text=[q["tag"] for q in chunk],
+            text=[sam3_prompt_text_for_tag(q["tag"]) for q in chunk],  # TEMP: label experiment
             return_tensors="pt",
         ).to(device)
         with torch.no_grad():
