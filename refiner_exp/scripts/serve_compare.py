@@ -316,13 +316,13 @@ def _load_pcd_points(path: str, max_points: int) -> Tuple[np.ndarray, ...]:
 
 
 def _pack_branch_from_fusion(
-    refine_records: List[Dict[str, Any]],
+    fusion_records: List[Dict[str, Any]],
     max_points_per_object: int,
 ) -> Dict[str, Any]:
     """Pack per-object fusion .pcd clouds for one branch (colors match 2D overlay)."""
     objects: List[Dict[str, Any]] = []
     chunks: List[np.ndarray] = []
-    for rec in refine_records:
+    for rec in fusion_records:
         path = str(rec.get("pointcloud_path") or "")
         pts = _load_pcd_points(path, max_points_per_object)[0]
         if len(pts) == 0:
@@ -368,51 +368,18 @@ def _records_by_key(records: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, An
     return {rec["object_key"]: rec for rec in records}
 
 
-def _records_by_image_object(
-    records: Iterable[Dict[str, Any]],
-) -> Dict[Tuple[str, int], Dict[str, Any]]:
-    return {(rec["image_key"], int(rec["object_index"])): rec for rec in records}
-
-
-def _merge_fusion_fields(
-    refine_records: List[Dict[str, Any]],
-    fusion_records: List[Dict[str, Any]],
-) -> None:
-    """Overlay scene_fusion outputs (refined 3D box, .pcd path) onto refine-stage records."""
-    fusion_lut = _records_by_image_object(fusion_records)
-    for rec in refine_records:
-        fusion = fusion_lut.get((rec["image_key"], int(rec["object_index"])))
-        if fusion is None:
-            continue
-        box = fusion.get("box_3d")
-        if box:
-            rec["box_3d"] = box
-            rec["box_3d_signature"] = fusion.get("box_3d_signature")
-        pcd = fusion.get("pointcloud_path")
-        if pcd:
-            rec["pointcloud_path"] = pcd
-
-
 def load_branch_records(
     branch: str,
     run_root: Path,
     raw_filter_records: List[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    refine_task = BRANCHES[branch]["refine_task"]
-    if refine_task is None:
-        refine_df = load_stage_df(run_root, "filter_stage", "3dbox_filter")
-    else:
-        refine_df = load_stage_df(run_root, "localization_stage", refine_task)
+) -> List[Dict[str, Any]]:
+    """Load per-object records from scene_fusion (final retained pipeline output)."""
     fusion_df = load_stage_df(run_root, "scene_fusion_stage", "depth_back_projection")
-    refine_records = collect_records(
-        refine_df, branch=branch, stage_label="refine", run_root=run_root, include_assets=False,
-    )
     fusion_records = collect_records(
         fusion_df, branch=branch, stage_label="fusion", run_root=run_root, include_assets=False,
     )
-    enrich_against_raw(refine_records, raw_filter_records, include_assets=False)
-    _merge_fusion_fields(refine_records, fusion_records)
-    return refine_records, fusion_records
+    enrich_against_raw(fusion_records, raw_filter_records, include_assets=False)
+    return fusion_records
 
 
 def _enrich_image_records_for_stats(
@@ -439,7 +406,7 @@ def _enrich_image_records_for_stats(
 
 @dataclass
 class CompareIndex:
-    """In-memory index for refiner comparison (parquet metadata, no bulk IO)."""
+    """In-memory index for refiner comparison (fusion-stage survivors only)."""
 
     image_keys: List[str]
     name_by_key: Dict[str, str]
@@ -470,15 +437,14 @@ def build_compare_index(
     )
     raw_by_key = _records_by_key(raw_filter_records)
 
-    refine_by_branch: Dict[str, List[Dict[str, Any]]] = {}
+    fusion_by_branch: Dict[str, List[Dict[str, Any]]] = {}
     for branch, root in run_roots.items():
-        _log(f"  indexing branch={branch} ...")
-        refine_records, _fusion_records = load_branch_records(
+        _log(f"  indexing branch={branch} (fusion) ...")
+        fusion_by_branch[branch] = load_branch_records(
             branch, root, raw_filter_records,
         )
-        refine_by_branch[branch] = refine_records
 
-    by_image = {branch: _records_by_image(records) for branch, records in refine_by_branch.items()}
+    by_image = {branch: _records_by_image(records) for branch, records in fusion_by_branch.items()}
     image_keys = sorted(set().union(*(set(items.keys()) for items in by_image.values())))
     if max_images:
         image_keys = image_keys[:max_images]
@@ -628,7 +594,7 @@ _INDEX_HTML = """<!doctype html>
 </head>
 <body>
   <h1>Refiner 对照实验</h1>
-  <p class="hint">共 {count} 个样本 · 点云按需从 fusion .pcd 加载</p>
+  <p class="hint">共 {count} 个样本（各分支 fusion 并集，仅含最终留存）· 点云来自 depth_back_projection</p>
   <ul>
 {rows}
   </ul>
