@@ -40,6 +40,7 @@ from summarize_runs import (  # noqa: E402
     _mask_bbox,
     collect_records,
     compute_box_3d_corners_from_params,
+    convert_box_3d_world_to_camera,
     enrich_against_raw,
     load_stage_df,
     mask_iou,
@@ -52,7 +53,14 @@ except ImportError:  # pragma: no cover
 
 
 # Bump when panel rendering / coloring / 3D coords change (invalidates disk cache).
-PANEL_RENDER_VERSION = "v5"
+PANEL_RENDER_VERSION = "v6"
+
+# 12 edges of an 8-corner OBB (same order as compute_box_3d_corners).
+_BOX_EDGE_IDX: Tuple[Tuple[int, int], ...] = (
+    (0, 1), (1, 2), (2, 3), (3, 0),
+    (4, 5), (5, 6), (6, 7), (7, 4),
+    (0, 4), (1, 5), (2, 6), (3, 7),
+)
 
 # Ten high-contrast colors; object_index % 10 picks one (per branch, not cross-column).
 OBJECT_COLORS: Tuple[Tuple[int, int, int], ...] = (
@@ -245,11 +253,47 @@ def _draw_object_panel(
     return _resize_panel(canvas.convert("RGB"), max_width)
 
 
-def _camera_points_to_viewer(pts: np.ndarray) -> np.ndarray:
-    """OpenCV camera frame → viewer: keep +Z depth, flip Y so image is not upside-down."""
+def opencv_camera_to_viewer(pts: np.ndarray) -> np.ndarray:
+    """OpenCV camera frame → Three.js viewer frame.
+
+    Annotation / depth back-projection use OpenCV camera coords:
+    +X right, +Y down, +Z forward (into the scene).
+
+    Three.js uses +X right, +Y up, camera looks down -Z. Map with (x, -y, -z).
+    """
     out = np.asarray(pts, dtype=np.float32).copy()
     out[:, 1] *= -1.0
+    out[:, 2] *= -1.0
     return out
+
+
+def _box_corners_viewer(rec: Dict[str, Any]) -> Optional[np.ndarray]:
+    """World-frame 9-param box → 8 corners in viewer coords (camera frame first)."""
+    box = rec.get("box_3d")
+    if not box:
+        return None
+    pose_path = str(rec.get("pose") or "")
+    intrinsic_path = str(rec.get("intrinsic") or "")
+    pose, _ = _load_pose_intrinsic(pose_path, intrinsic_path)
+    if pose is None:
+        return None
+    try:
+        cam_box = convert_box_3d_world_to_camera(_as_list(box), pose)
+        if cam_box is None:
+            return None
+        corners = compute_box_3d_corners_from_params(cam_box)
+        return opencv_camera_to_viewer(corners)
+    except Exception:
+        return None
+
+
+def _wireframe_segments(corners: np.ndarray) -> np.ndarray:
+    """Flatten 12 box edges to (24, 3) line segment endpoints."""
+    segs = np.empty((len(_BOX_EDGE_IDX) * 2, 3), dtype=np.float32)
+    for i, (a, b) in enumerate(_BOX_EDGE_IDX):
+        segs[i * 2] = corners[a]
+        segs[i * 2 + 1] = corners[b]
+    return segs
 
 
 @lru_cache(maxsize=8192)
@@ -268,7 +312,7 @@ def _load_pcd_points(path: str, max_points: int) -> Tuple[np.ndarray, ...]:
         rng = np.random.default_rng(0)
         keep = rng.choice(len(pts), size=max_points, replace=False)
         pts = pts[keep]
-    return (_camera_points_to_viewer(pts),)
+    return (opencv_camera_to_viewer(pts),)
 
 
 def _pack_branch_from_fusion(
@@ -284,7 +328,7 @@ def _pack_branch_from_fusion(
         if len(pts) == 0:
             continue
         r, g, b = _index_color(int(rec.get("object_index", 0)))
-        objects.append({
+        obj: Dict[str, Any] = {
             "tag": rec.get("tag", ""),
             "object_index": rec.get("object_index"),
             "object_key": rec["object_key"],
@@ -292,10 +336,16 @@ def _pack_branch_from_fusion(
             "positions": base64.b64encode(pts.tobytes()).decode("ascii"),
             "color": [int(r), int(g), int(b)],
             "pcd_path": path,
-        })
+        }
+        corners = _box_corners_viewer(rec)
+        if corners is not None:
+            wire = _wireframe_segments(corners)
+            obj["wireframe"] = base64.b64encode(wire.tobytes()).decode("ascii")
+            obj["wireframe_n"] = int(len(wire))
+        objects.append(obj)
         chunks.append(pts)
     if not chunks:
-        return {"objects": [], "n": 0, "centroid": [0.0, 0.0, 1.0], "extent": 1.0}
+        return {"objects": [], "n": 0, "centroid": [0.0, 0.0, -1.0], "extent": 1.0}
     all_pts = np.vstack(chunks)
     centroid = all_pts.mean(axis=0)
     extent = float(np.linalg.norm(all_pts.max(axis=0) - all_pts.min(axis=0)))
@@ -507,6 +557,37 @@ def sample_panels_json(index: CompareIndex, image_key: str) -> Dict[str, Any]:
     }
 
 
+def _viewer_nav_html(
+    index: CompareIndex,
+    image_key: str,
+    *,
+    query_suffix: str = "",
+) -> Tuple[str, str, str]:
+    """Prev / position / Next links for the sample viewer page."""
+    keys = index.image_keys
+    try:
+        i = keys.index(image_key)
+    except ValueError:
+        return (
+            '<span class="nav-disabled">← Prev</span>',
+            "0 / 0",
+            '<span class="nav-disabled">Next →</span>',
+        )
+    total = len(keys)
+    pos = f"{i + 1} / {total}"
+    if i > 0:
+        prev_name = html_module.escape(index.name_by_key[keys[i - 1]], quote=True)
+        prev = f'<a class="nav-btn" href="/view/{prev_name}{query_suffix}">← Prev</a>'
+    else:
+        prev = '<span class="nav-disabled">← Prev</span>'
+    if i + 1 < total:
+        next_name = html_module.escape(index.name_by_key[keys[i + 1]], quote=True)
+        nxt = f'<a class="nav-btn" href="/view/{next_name}{query_suffix}">Next →</a>'
+    else:
+        nxt = '<span class="nav-disabled">Next →</span>'
+    return prev, pos, nxt
+
+
 def sample_stats_json(index: CompareIndex, image_key: str) -> Dict[str, Any]:
     branch_records = branch_records_for_image(index, image_key)
     _enrich_image_records_for_stats(branch_records, index.raw_by_key)
@@ -568,6 +649,11 @@ _VIEWER_HTML = """<!doctype html>
     header h1 {{ margin: 0 0 6px; font-size: 1.05rem; }}
     header p {{ margin: 0; font-size: 0.85rem; color: #aaa; }}
     a {{ color: #7eb8ff; }}
+    .pager {{ display: flex; align-items: center; gap: 12px; margin: 8px 0 4px; }}
+    .pager .nav-pos {{ color: #ccc; font-size: 0.9rem; min-width: 4.5rem; text-align: center; }}
+    .nav-btn {{ padding: 4px 12px; background: #333; border-radius: 4px; text-decoration: none; }}
+    .nav-btn:hover {{ background: #444; text-decoration: none; }}
+    .nav-disabled {{ color: #555; padding: 4px 12px; }}
     .panels-2d {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 12px 16px; background: #111; }}
     .branch-col {{ background: #242424; border: 1px solid #333; border-radius: 6px; padding: 8px; }}
     .branch-col h3 {{ margin: 0 0 8px; font-size: 0.9rem; color: #ccc; }}
@@ -593,7 +679,12 @@ _VIEWER_HTML = """<!doctype html>
 <body>
   <header>
     <h1>{title}</h1>
-    <p>拖拽旋转 · 滚轮缩放 · 右键平移 · <span style="color:#ccc">点击图片放大</span></p>
+    <div class="pager">
+      {nav_prev}
+      <span class="nav-pos">{nav_pos}</span>
+      {nav_next}
+    </div>
+    <p>拖拽旋转 · 滚轮缩放 · 右键平移 · 3D 视图中彩色线框为相机系 3D 标注框 · <span style="color:#ccc">点击图片放大</span></p>
     <p><a href="/">← 样本列表</a> · <a href="?refresh=1">刷新 2D 图</a></p>
   </header>
   <div class="panels-2d">
@@ -678,7 +769,6 @@ _VIEWER_HTML = """<!doctype html>
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(0x141414);
       const camera = new THREE.PerspectiveCamera(50, w / h, 0.001, 500);
-      camera.up.set(0, -1, 0);
       const controls = new THREE.OrbitControls(camera, canvas);
       controls.enableDamping = false;
       let visible = false;
@@ -686,8 +776,8 @@ _VIEWER_HTML = """<!doctype html>
       const objects = (packed && packed.objects) ? packed.objects : [];
       if (!objects.length) {{
         meta.textContent = "无点云";
-        controls.target.set(0, 0, 1);
-        camera.position.set(0, 0, -2);
+        controls.target.set(0, 0, -1);
+        camera.position.set(0, 0, 1);
         controls.update();
         renderer.render(scene, camera);
         return;
@@ -711,12 +801,21 @@ _VIEWER_HTML = """<!doctype html>
         scene.add(new THREE.Points(geometry, new THREE.PointsMaterial({{
           size: pointSize, vertexColors: true, sizeAttenuation: true,
         }})));
+        if (obj.wireframe && obj.wireframe_n) {{
+          const wf = new Float32Array(b64ToBytes(obj.wireframe).buffer);
+          const wfGeom = new THREE.BufferGeometry();
+          wfGeom.setAttribute("position", new THREE.BufferAttribute(wf, 3));
+          const wfMat = new THREE.LineBasicMaterial({{
+            color: new THREE.Color(rgb[0]/255, rgb[1]/255, rgb[2]/255),
+            linewidth: 2,
+          }});
+          scene.add(new THREE.LineSegments(wfGeom, wfMat));
+        }}
       }}
       const c = packed.centroid;
-      // OpenCV camera at origin looks +Z; scene points have z>0 (near=small z, far=large z).
-      // Viewer uses (x,-y,z); place virtual camera on -Z side looking into the scene.
+      // Server packs OpenCV camera points as Three.js (x, -y, -z); camera on +Z looks at -Z.
       controls.target.set(c[0], c[1], c[2]);
-      camera.position.set(c[0], c[1], c[2] - extent * 1.2);
+      camera.position.set(c[0], c[1], c[2] + extent * 1.2);
       controls.update();
       meta.textContent = objects.length + " objects · " + totalPts.toLocaleString() + " pts";
       function renderOnce() {{
@@ -892,7 +991,7 @@ class CompareServerState:
             return data
 
     def points_bytes(self, image_key: str, branch: str, *, refresh: bool = False) -> bytes:
-        mem_key = f"pts:{image_key}|{branch}"
+        mem_key = f"{PANEL_RENDER_VERSION}/pts:{image_key}|{branch}"
         if not refresh:
             with self._mem_lock:
                 cached = self._points_mem.get(mem_key)
@@ -1118,10 +1217,17 @@ def make_handler(state: CompareServerState):
                     self._send_html("样本不存在", status=404)
                     return
                 title = html_module.escape(image_key, quote=True)
+                query_suffix = "?refresh=1" if refresh else ""
+                nav_prev, nav_pos, nav_next = _viewer_nav_html(
+                    state.index, image_key, query_suffix=query_suffix,
+                )
                 body = _VIEWER_HTML.format(
                     title=title,
                     name=name,
                     name_json=json.dumps(name),
+                    nav_prev=nav_prev,
+                    nav_pos=nav_pos,
+                    nav_next=nav_next,
                 )
                 self._send_html(body)
                 return

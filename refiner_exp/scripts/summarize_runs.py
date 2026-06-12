@@ -9,12 +9,14 @@ import json
 import math
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from PIL import Image
+from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -44,6 +46,17 @@ BRANCHES = {
     "sam2": {"refine_task": "sam2_refiner", "config_stem": "sam2_refine"},
     "sam3": {"refine_task": "sam3_refiner", "config_stem": "sam3_refine"},
 }
+
+
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def _iter_rows(df: pd.DataFrame, *, desc: str, enabled: bool = True):
+    rows = df.iterrows()
+    if not enabled or len(df) == 0:
+        return rows
+    return tqdm(rows, total=len(df), desc=desc, unit="row", leave=False)
 
 
 def _is_missing(value: Any) -> bool:
@@ -285,8 +298,13 @@ def _stage_parquet(run_root: Path, stage: str, task: str) -> Optional[Path]:
 def load_stage_df(run_root: Path, stage: str, task: str) -> pd.DataFrame:
     path = _stage_parquet(run_root, stage, task)
     if path is None:
+        _log(f"  [skip] {stage}/{task}: not found under {run_root}")
         return pd.DataFrame()
-    return load_parquet_dataframe(str(path))
+    _log(f"  loading {stage}/{task} ...")
+    t0 = time.perf_counter()
+    df = load_parquet_dataframe(str(path))
+    _log(f"  loaded {stage}/{task}: {len(df)} rows ({time.perf_counter() - t0:.1f}s)")
+    return df
 
 
 def collect_records(
@@ -296,6 +314,7 @@ def collect_records(
     stage_label: str,
     run_root: Path,
     include_assets: bool = True,
+    show_progress: bool = True,
 ) -> List[Dict[str, Any]]:
     """Expand parquet rows to per-object records.
 
@@ -303,7 +322,8 @@ def collect_records(
     serve_compare); geometry metrics are left None.
     """
     records: List[Dict[str, Any]] = []
-    for row_idx, row_obj in df.iterrows():
+    progress_desc = f"{branch}/{stage_label}"
+    for row_idx, row_obj in _iter_rows(df, desc=progress_desc, enabled=show_progress):
         row = row_obj.to_dict()
         tags = _as_list(row.get("obj_tags"))
         masks = _as_list(row.get("masks"))
@@ -367,6 +387,8 @@ def collect_records(
                     "pointcloud_inside_box_ratio": None,
                 })
             records.append(rec)
+    if show_progress and len(df) > 0:
+        _log(f"  {progress_desc}: {len(records)} objects from {len(df)} rows")
     return records
 
 
@@ -379,14 +401,22 @@ def enrich_against_raw(
     raw_records: List[Dict[str, Any]],
     *,
     include_assets: bool = True,
+    progress_desc: str = "enrich vs raw",
+    show_progress: bool = True,
 ) -> None:
     raw_by_key = _records_by_key(raw_records)
     raw_masks: Dict[str, Optional[np.ndarray]] = {}
     if include_assets:
-        for raw in raw_records:
+        raw_iter = raw_records
+        if show_progress and raw_records:
+            raw_iter = tqdm(raw_records, desc=f"{progress_desc} (load raw masks)", unit="obj", leave=False)
+        for raw in raw_iter:
             raw_masks[raw["object_key"]] = _load_mask(raw.get("mask_path"))
 
-    for rec in records:
+    rec_iter = records
+    if show_progress and records:
+        rec_iter = tqdm(records, desc=progress_desc, unit="obj", leave=False)
+    for rec in rec_iter:
         raw = raw_by_key.get(rec["object_key"])
         if raw is None:
             rec["present_in_raw"] = False
@@ -437,19 +467,35 @@ def _stage_summary(df: pd.DataFrame, records: List[Dict[str, Any]]) -> Dict[str,
     }
 
 
-def summarize_branch(branch: str, run_root: Path, raw_filter_records: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+def summarize_branch(
+    branch: str,
+    run_root: Path,
+    raw_filter_records: List[Dict[str, Any]],
+    *,
+    show_progress: bool = True,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    _log(f"[{branch}] run root: {run_root}")
     refine_task = BRANCHES[branch]["refine_task"]
     filter_df = load_stage_df(run_root, "filter_stage", "3dbox_filter")
     refine_df = filter_df if refine_task is None else load_stage_df(run_root, "localization_stage", refine_task)
     fusion_df = load_stage_df(run_root, "scene_fusion_stage", "depth_back_projection")
 
-    filter_records = collect_records(filter_df, branch=branch, stage_label="filter", run_root=run_root)
-    refine_records = collect_records(refine_df, branch=branch, stage_label="refine", run_root=run_root)
-    fusion_records = collect_records(fusion_df, branch=branch, stage_label="fusion", run_root=run_root)
+    collect_kw = {"branch": branch, "run_root": run_root, "show_progress": show_progress}
+    filter_records = collect_records(filter_df, stage_label="filter", **collect_kw)
+    refine_records = collect_records(refine_df, stage_label="refine", **collect_kw)
+    fusion_records = collect_records(fusion_df, stage_label="fusion", **collect_kw)
 
     baseline = raw_filter_records if raw_filter_records else filter_records
-    enrich_against_raw(refine_records, baseline)
-    enrich_against_raw(fusion_records, baseline)
+    enrich_against_raw(
+        refine_records, baseline,
+        progress_desc=f"{branch}/refine vs raw",
+        show_progress=show_progress,
+    )
+    enrich_against_raw(
+        fusion_records, baseline,
+        progress_desc=f"{branch}/fusion vs raw",
+        show_progress=show_progress,
+    )
 
     summary = {
         "run_root": str(run_root),
@@ -527,39 +573,66 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sam2-run", default="refiner_exp/outputs/sam2")
     parser.add_argument("--sam3-run", default="refiner_exp/outputs/sam3")
     parser.add_argument("--output-dir", default="refiner_exp/outputs/compare")
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Disable progress bars (phase logs are still printed).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    show_progress = not args.quiet
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    run_roots = {
-        "raw": resolve_run_root(args.raw_run, BRANCHES["raw"]["config_stem"]),
-        "sam2": resolve_run_root(args.sam2_run, BRANCHES["sam2"]["config_stem"]),
-        "sam3": resolve_run_root(args.sam3_run, BRANCHES["sam3"]["config_stem"]),
-    }
+    _log("Resolving run roots ...")
+    run_roots = {}
+    for branch, path_attr in [("raw", "raw_run"), ("sam2", "sam2_run"), ("sam3", "sam3_run")]:
+        run_roots[branch] = resolve_run_root(getattr(args, path_attr), BRANCHES[branch]["config_stem"])
+        _log(f"  {branch}: {run_roots[branch]}")
 
+    _log("Building raw filter baseline ...")
     raw_filter_df = load_stage_df(run_roots["raw"], "filter_stage", "3dbox_filter")
-    raw_filter_records = collect_records(raw_filter_df, branch="raw", stage_label="filter", run_root=run_roots["raw"])
+    raw_filter_records = collect_records(
+        raw_filter_df,
+        branch="raw",
+        stage_label="filter",
+        run_root=run_roots["raw"],
+        show_progress=show_progress,
+    )
 
     summary = {"branches": {}}
     all_records: List[Dict[str, Any]] = []
-    for branch, run_root in run_roots.items():
-        branch_summary, branch_records = summarize_branch(branch, run_root, raw_filter_records)
+    branch_iter = run_roots.items()
+    if show_progress:
+        branch_iter = tqdm(list(branch_iter), desc="branches", unit="branch")
+    for branch, run_root in branch_iter:
+        branch_summary, branch_records = summarize_branch(
+            branch, run_root, raw_filter_records, show_progress=show_progress,
+        )
         summary["branches"][branch] = branch_summary
         all_records.extend(branch_records)
+        _log(
+            f"[{branch}] done — filter/refine/fusion objects: "
+            f"{branch_summary['filter']['objects']}/"
+            f"{branch_summary['refine']['objects']}/"
+            f"{branch_summary['fusion']['objects']}"
+        )
 
+    _log(f"Writing outputs to {output_dir} ...")
     (output_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    _log(f"  wrote summary.json")
     write_summary_md(summary, output_dir / "summary.md")
+    _log(f"  wrote summary.md")
+    _log(f"  writing object_metrics.csv ({len(all_records)} records) ...")
     pd.DataFrame(all_records).to_csv(output_dir / "object_metrics.csv", index=False)
-    print(f"Wrote {output_dir / 'summary.json'}")
-    print(f"Wrote {output_dir / 'summary.md'}")
-    print(f"Wrote {output_dir / 'object_metrics.csv'}")
+    _log(f"  wrote object_metrics.csv")
+    _log("Done.")
 
 
 if __name__ == "__main__":

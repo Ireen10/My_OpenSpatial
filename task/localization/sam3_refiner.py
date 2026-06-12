@@ -14,7 +14,6 @@ import torch.nn as nn
 import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
-from scipy.optimize import linear_sum_assignment
 
 from task.base_task import BaseTask
 
@@ -494,7 +493,7 @@ def _match_masks_to_boxes(
     target_boxes: list[np.ndarray],
     empty_shape: tuple[int, int],
 ) -> list[tuple[np.ndarray, float]]:
-    """Assign candidate masks to target boxes by maximum mask-box IoU (Hungarian)."""
+    """Assign masks via mutual nearest-neighbor on mask-box IoU (bidirectional match)."""
     n_obj = len(target_boxes)
     if n_obj == 0:
         return []
@@ -504,17 +503,22 @@ def _match_masks_to_boxes(
         return [(empty_mask, 0.0)] * n_obj
 
     n_mask = len(candidate_masks)
-    iou_mat = np.zeros((n_obj, n_mask), dtype=np.float64)
+    sim = np.zeros((n_obj, n_mask), dtype=np.float64)
     for i, box in enumerate(target_boxes):
         for j, mask in enumerate(candidate_masks):
-            iou_mat[i, j] = _mask_box_iou(mask, box)
+            sim[i, j] = _mask_box_iou(mask, box)
 
-    row_ind, col_ind = linear_sum_assignment(-iou_mat)
+    obj_best_mask = sim.argmax(axis=1)
+    mask_best_obj = sim.argmax(axis=0)
+
     results: list[tuple[np.ndarray, float]] = [(empty_mask.copy(), 0.0)] * n_obj
-    for row, col in zip(row_ind, col_ind):
-        if iou_mat[row, col] <= 0.0:
+    for i in range(n_obj):
+        j = int(obj_best_mask[i])
+        if sim[i, j] <= 0.0:
             continue
-        results[row] = (candidate_masks[col], candidate_scores[col])
+        if int(mask_best_obj[j]) != i:
+            continue
+        results[i] = (candidate_masks[j], candidate_scores[j])
     return results
 
 
