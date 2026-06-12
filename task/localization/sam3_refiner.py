@@ -456,20 +456,37 @@ def _mask_to_numpy(mask) -> np.ndarray:
     return arr.astype(np.float32)
 
 
-def _mask_box_iou(mask: np.ndarray, box: np.ndarray) -> float:
-    """IoU between a binary mask and an axis-aligned box region."""
+def _mask_box_overlap(mask: np.ndarray, box: np.ndarray) -> tuple[float, float, float]:
+    """Return (intersection, box_area, mask_area) for a mask and axis-aligned box."""
     h, w = mask.shape
     x1, y1, x2, y2 = [int(round(float(v))) for v in box]
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(w - 1, x2), min(h - 1, y2)
     if x2 < x1 or y2 < y1:
-        return 0.0
-    box_area = (x2 - x1 + 1) * (y2 - y1 + 1)
+        return 0.0, 0.0, float((mask > 0).sum())
+    box_area = float((x2 - x1 + 1) * (y2 - y1 + 1))
     mask_bin = mask > 0
     mask_area = float(mask_bin.sum())
     inter = float(mask_bin[y1 : y2 + 1, x1 : x2 + 1].sum())
+    return inter, box_area, mask_area
+
+
+def _mask_box_iou(mask: np.ndarray, box: np.ndarray) -> float:
+    inter, box_area, mask_area = _mask_box_overlap(mask, box)
+    if inter <= 0.0:
+        return 0.0
     union = mask_area + box_area - inter
     return inter / union if union > 0 else 0.0
+
+
+def _mask_box_iob(mask: np.ndarray, box: np.ndarray) -> float:
+    """Intersection over box area — robust when the coarse box is smaller than the mask."""
+    inter, box_area, _ = _mask_box_overlap(mask, box)
+    return inter / box_area if box_area > 0 else 0.0
+
+
+def _mask_box_sim(mask: np.ndarray, box: np.ndarray) -> float:
+    return max(_mask_box_iou(mask, box), _mask_box_iob(mask, box))
 
 
 def _extract_seg_masks_scores(seg_item) -> tuple[list[np.ndarray], list[float]]:
@@ -492,8 +509,14 @@ def _match_masks_to_boxes(
     candidate_scores: list[float],
     target_boxes: list[np.ndarray],
     empty_shape: tuple[int, int],
+    match_sim_threshold: float = 0.25,
 ) -> list[tuple[np.ndarray, float]]:
-    """Assign masks via mutual nearest-neighbor on mask-box IoU (bidirectional match)."""
+    """Greedy object-centric assignment; mask count and object count need not match.
+
+    Each annotated box independently competes for SAM masks. Pairs are ranked by
+    geometric similarity ``max(IoU, IoB)`` (SORT-style gate), then by SAM score.
+    A mask is used at most once; extra masks or unmatched boxes are left empty.
+    """
     n_obj = len(target_boxes)
     if n_obj == 0:
         return []
@@ -502,23 +525,24 @@ def _match_masks_to_boxes(
     if not candidate_masks:
         return [(empty_mask, 0.0)] * n_obj
 
-    n_mask = len(candidate_masks)
-    sim = np.zeros((n_obj, n_mask), dtype=np.float64)
+    pairs: list[tuple[float, float, int, int]] = []
     for i, box in enumerate(target_boxes):
         for j, mask in enumerate(candidate_masks):
-            sim[i, j] = _mask_box_iou(mask, box)
+            sim = _mask_box_sim(mask, box)
+            if sim >= match_sim_threshold:
+                pairs.append((sim, candidate_scores[j], i, j))
 
-    obj_best_mask = sim.argmax(axis=1)
-    mask_best_obj = sim.argmax(axis=0)
+    pairs.sort(key=lambda x: (-x[0], -x[1]))
 
+    assigned_obj: set[int] = set()
+    assigned_mask: set[int] = set()
     results: list[tuple[np.ndarray, float]] = [(empty_mask.copy(), 0.0)] * n_obj
-    for i in range(n_obj):
-        j = int(obj_best_mask[i])
-        if sim[i, j] <= 0.0:
+    for sim, score, i, j in pairs:
+        if i in assigned_obj or j in assigned_mask:
             continue
-        if int(mask_best_obj[j]) != i:
-            continue
-        results[i] = (candidate_masks[j], candidate_scores[j])
+        results[i] = (candidate_masks[j], score)
+        assigned_obj.add(i)
+        assigned_mask.add(j)
     return results
 
 
@@ -530,6 +554,7 @@ def _infer_refiner(
     tags_per_image,
     prompt_batch_size: int = 32,
     score_threshold: float = 0.5,
+    match_sim_threshold: float = 0.25,
 ):
     """Text-only SAM3 refinement: one forward row per (image, unique tag)."""
     per_image: list[tuple[list, list]] = []
@@ -589,6 +614,7 @@ def _infer_refiner(
                 h, w = cand_masks[0].shape
             assignments = _match_masks_to_boxes(
                 cand_masks, cand_scores, target_boxes, empty_shape=(h, w),
+                match_sim_threshold=match_sim_threshold,
             )
 
             masks_out, scores_out = per_image[img_idx]
@@ -604,6 +630,7 @@ class Sam3Refiner(BaseTask):
 
     MIN_SCORE = 0.5
     MIN_MASK_PIXELS = 20
+    MATCH_SIM_THRESHOLD = 0.25
 
     def __init__(self, args, device=None):
         super().__init__(args)
@@ -612,6 +639,9 @@ class Sam3Refiner(BaseTask):
             args.get("device") or device or _default_device()
         )
         self.min_score = float(args.get("min_score", self.MIN_SCORE))
+        self.match_sim_threshold = float(
+            args.get("match_sim_threshold", self.MATCH_SIM_THRESHOLD)
+        )
         self.min_mask_pixels = int(args.get("min_mask_pixels", self.MIN_MASK_PIXELS))
         self.prompt_batch_size = int(args.get("prompt_batch_size", 32))
 
@@ -639,6 +669,7 @@ class Sam3Refiner(BaseTask):
             f"[Sam3Refiner] Sam3Model text-only on {','.join(devices)} | "
             f"replicas={total_replicas} prompt_batch_size={self.prompt_batch_size} "
             f"pipeline_batch_size={args.get('batch_size', 4)} "
+            f"match_sim_threshold={self.match_sim_threshold:.2f} "
             f"min_score={self.min_score:.2f} min_mask_pixels={self.min_mask_pixels}",
             flush=True,
         )
@@ -667,6 +698,7 @@ class Sam3Refiner(BaseTask):
                 images, boxes_per_image, tags_list,
                 prompt_batch_size=self.prompt_batch_size,
                 score_threshold=self.min_score,
+                match_sim_threshold=self.match_sim_threshold,
             )
         finally:
             self._replica_pool.put((processor, model, dev))
