@@ -1,9 +1,9 @@
 """ScanNet++ dataset preprocessing pipeline.
 
-Processes ScanNet++ scenes:
-  - Reads RGB, depth, aligned poses, and intrinsics per frame
-  - Extracts object annotations from mesh segmentation + OBB data
-  - Outputs Parquet files for downstream consumption
+Reads RGB, depth, poses, and intrinsics from each scene under ``--input_root``.
+Camera parameters come from ``iphone/pose_intrinsic_imu.json`` (``aligned_poses``
+and ``intrinsic``, both per frame). Per-frame 4×4 txt files are written because
+downstream Parquet expects file paths.
 """
 
 import argparse
@@ -19,7 +19,6 @@ import trimesh
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
-
 
 # ---------------------------------------------------------------------------
 # Mesh & OBB utilities
@@ -81,30 +80,25 @@ def get_obb_from_annotation(obb_box: dict) -> list:
 # Per-scene processing
 # ---------------------------------------------------------------------------
 
-def json_to_4x4_txt(json_path: str) -> str:
-    """Read a matrix from JSON and save as 4x4 txt in the same directory.
-
-    If the JSON contains a 3x3 matrix, it is expanded to 4x4 (bottom-right = 1).
-    Returns the absolute path to the saved txt file.
-    """
-    txt_path = json_path.replace(".json", ".txt")
-    if os.path.exists(txt_path):
-        return os.path.abspath(txt_path)
-
-    with open(json_path, "r", encoding="utf-8") as f:
-        mat = np.array(json.load(f))
-
+def matrix_to_4x4(mat: np.ndarray) -> np.ndarray:
+    mat = np.asarray(mat, dtype=np.float64)
+    if mat.shape == (4, 4):
+        return mat
     if mat.shape == (3, 3):
-        mat_4x4 = np.eye(4)
-        mat_4x4[:3, :3] = mat
-    else:
-        mat_4x4 = mat
+        out = np.eye(4)
+        out[:3, :3] = mat
+        return out
+    raise ValueError(f"Expected 3x3 or 4x4 matrix, got shape {mat.shape}")
 
-    np.savetxt(txt_path, mat_4x4)
-    return os.path.abspath(txt_path)
 
-def process_single_scene(
-    scene_id: str,
+def write_matrix_txt(matrix: np.ndarray, txt_path: str) -> str:
+    txt_path = os.path.abspath(txt_path)
+    os.makedirs(os.path.dirname(txt_path), exist_ok=True)
+    np.savetxt(txt_path, matrix_to_4x4(matrix))
+    return txt_path
+
+
+def process_single_scene(    scene_id: str,
     input_root_dir: str,
     selected_obj_tags: list | None,
 ) -> dict | None:
@@ -114,16 +108,24 @@ def process_single_scene(
         base_sensor_path = os.path.join(scene_path, "iphone")
         rgb_dir = os.path.join(base_sensor_path, "rgb")
         depth_dir = os.path.join(base_sensor_path, "depth")
-        pose_dir = os.path.join(base_sensor_path, "aligned_pose")
-        intrinsic_dir = os.path.join(base_sensor_path, "intrinsic")
+        pose_intrinsic_imu_path = os.path.join(base_sensor_path, "pose_intrinsic_imu.json")
         mesh_path = os.path.join(scene_path, "scans", "mesh_aligned_0.05.ply")
         anno_path = os.path.join(scene_path, "scans", "segments_anno.json")
 
         if not os.path.exists(rgb_dir) or not os.path.exists(mesh_path) or not os.path.exists(anno_path):
             print(f"[scannetpp] Missing data for scene {scene_id}, skipping.")
             return None
+        if not os.path.isfile(pose_intrinsic_imu_path):
+            print(f"[scannetpp] Missing pose_intrinsic_imu.json for {scene_id}, skipping.")
+            return None
 
-        # Mesh & OBB processing
+        with open(pose_intrinsic_imu_path, encoding="utf-8") as f:
+            imu_meta = json.load(f)
+        aligned_poses = imu_meta["aligned_poses"]
+        aligned_intrinsics = imu_meta["intrinsic"]
+        pose_txt_dir = os.path.join(base_sensor_path, "aligned_pose")
+        intrinsic_txt_dir = os.path.join(base_sensor_path, "intrinsic")
+
         input_ply = o3d.io.read_triangle_mesh(mesh_path)
         with open(anno_path, "r", encoding="utf-8") as f:
             objs = json.load(f)["segGroups"]
@@ -152,42 +154,46 @@ def process_single_scene(
 
         ids, images, poses, intrinsics, depth_maps = [], [], [], [], []
         for rgb_file in rgb_files:
-            abs_rgb_path = os.path.abspath(rgb_file)
             frame_name = os.path.splitext(os.path.basename(rgb_file))[0]
-            frame_idx_str = frame_name.split("_")[-1]
+            frame_idx = int(frame_name.split("_")[-1])
 
-            ids.append(frame_idx_str)
-            images.append(abs_rgb_path)
+            if frame_idx >= len(aligned_poses):
+                print(f"[scannetpp] Pose index out of range for {frame_name} in {scene_id}")
+                continue
+            if frame_idx >= len(aligned_intrinsics):
+                print(f"[scannetpp] Intrinsic index out of range for {frame_name} in {scene_id}")
+                continue
 
             expected_depth = os.path.join(depth_dir, f"{frame_name}.png")
-            if os.path.exists(expected_depth):
-                resized_depth_path = os.path.join(depth_resized_dir, f"{frame_name}.png")
-                if not os.path.exists(resized_depth_path):
-                    depth_raw = cv2.imread(expected_depth, cv2.IMREAD_UNCHANGED)
-                    if depth_raw.shape[:2] != (rgb_h, rgb_w):
-                        depth_resized = cv2.resize(depth_raw, (rgb_w, rgb_h), interpolation=cv2.INTER_NEAREST)
-                    else:
-                        depth_resized = depth_raw
-                    cv2.imwrite(resized_depth_path, depth_resized)
-                depth_maps.append(os.path.abspath(resized_depth_path))
-            else:
+            if not os.path.exists(expected_depth):
                 print(f"[scannetpp] Depth not found for {frame_name} in {scene_id}")
                 continue
 
-            expected_pose = os.path.join(pose_dir, f"{frame_name}.json")
-            if os.path.exists(expected_pose):
-                poses.append(json_to_4x4_txt(expected_pose))
-            else:
-                print(f"[scannetpp] Pose not found for {frame_name} in {scene_id}")
-                continue
+            resized_depth_path = os.path.join(depth_resized_dir, f"{frame_name}.png")
+            if not os.path.exists(resized_depth_path):
+                depth_raw = cv2.imread(expected_depth, cv2.IMREAD_UNCHANGED)
+                if depth_raw.shape[:2] != (rgb_h, rgb_w):
+                    depth_resized = cv2.resize(
+                        depth_raw, (rgb_w, rgb_h), interpolation=cv2.INTER_NEAREST
+                    )
+                else:
+                    depth_resized = depth_raw
+                cv2.imwrite(resized_depth_path, depth_resized)
 
-            expected_intr = os.path.join(intrinsic_dir, f"{frame_name}.json")
-            if os.path.exists(expected_intr):
-                intrinsics.append(json_to_4x4_txt(expected_intr))
-            else:
-                print(f"[scannetpp] Intrinsic not found for {frame_name} in {scene_id}")
-                continue
+            pose_path = write_matrix_txt(
+                np.asarray(aligned_poses[frame_idx], dtype=np.float64),
+                os.path.join(pose_txt_dir, f"{frame_name}.txt"),
+            )
+            intrinsic_path = write_matrix_txt(
+                np.asarray(aligned_intrinsics[frame_idx], dtype=np.float64),
+                os.path.join(intrinsic_txt_dir, f"{frame_name}.txt"),
+            )
 
+            ids.append(frame_name.split("_")[-1])
+            images.append(os.path.abspath(rgb_file))
+            depth_maps.append(os.path.abspath(resized_depth_path))
+            poses.append(pose_path)
+            intrinsics.append(intrinsic_path)
         if (
             len(images) == 0
             or len(poses) != len(images)
