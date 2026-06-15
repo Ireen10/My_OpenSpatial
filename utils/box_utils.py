@@ -11,6 +11,24 @@ EULER_GROUNDING_ORDER = "zxy"
 # Relative size: skip pairs when max(D_diag)/min(D_diag) < this threshold.
 RELATIVE_SIZE_DIAG_RATIO_MIN = 1.2
 
+# 3D grounding annotation: reject boxes that fail geometric checks.
+GROUNDING_COORD_IMAGE_SCALE = 3.0
+GROUNDING_MIN_VISIBLE_PROJ_RATIO = 0.3
+GROUNDING_MAX_CLIPPED_EDGES = 9  # reject when >= 10 of 12 edges are clipped
+GROUNDING_Z_EPS = 1e-3
+
+# 12 edges of the 8-corner box (indices match compute_box_3d_points ordering).
+BOX_3D_EDGES = (
+    (0, 1), (1, 2), (2, 3), (3, 0),
+    (4, 5), (5, 6), (6, 7), (7, 4),
+    (0, 4), (1, 5), (2, 6), (3, 7),
+)
+
+BOX_3D_FACES = (
+    (0, 1, 2, 3), (4, 5, 6, 7), (0, 1, 5, 4),
+    (3, 2, 6, 7), (0, 3, 7, 4), (1, 2, 6, 5),
+)
+
 
 def box_3d_diag_extent(box_3d_world) -> float:
     """Spatial diagonal of 3D box extent: D_diag = sqrt(L^2 + W^2 + H^2)."""
@@ -150,6 +168,146 @@ def compute_box_3d_corners_from_params(box_params, euler_order='zxy'):
     """
     return compute_box_3d_corners(
         box_params[:3], box_params[3:6], box_params[6:9], euler_order)
+
+
+def project_world_box_corners(box_params_world, pose, intrinsic, euler_order=EULER_GROUNDING_ORDER):
+    """Project 8 world-frame box corners to camera space and image pixels.
+
+    Returns:
+        (cam_corners, uv_corners) each shape (8, 2) or (8, 3) for cam.
+    """
+    if box_params_world is None or len(box_params_world) < 9:
+        return None, None
+
+    pose = np.asarray(pose, dtype=np.float64)
+    intrinsic = np.asarray(intrinsic, dtype=np.float64)
+    corners = compute_box_3d_corners_from_params(box_params_world, euler_order)
+    corners_h = np.concatenate([corners, np.ones((corners.shape[0], 1))], axis=1)
+    cam = (np.linalg.inv(pose) @ corners_h.T).T
+    px = (intrinsic @ cam.T).T
+    z_safe = np.where(np.abs(px[:, 2:3]) < GROUNDING_Z_EPS, GROUNDING_Z_EPS, px[:, 2:3])
+    uv = px[:, :2] / z_safe
+    return cam, uv
+
+
+def _box_center_in_camera(box_params_world, pose, euler_order=EULER_GROUNDING_ORDER):
+    center_world = np.asarray(box_params_world[:3], dtype=np.float64)
+    center_h = np.append(center_world, 1.0)
+    return (np.linalg.inv(np.asarray(pose, dtype=np.float64)) @ center_h)[:3]
+
+
+def _has_abnormal_projected_coords(uv, img_dim, coord_scale=GROUNDING_COORD_IMAGE_SCALE, z_mask=None):
+    """True when any in-front corner projects beyond coord_scale * image size."""
+    w, h = img_dim
+    if z_mask is None:
+        z_mask = np.ones(uv.shape[0], dtype=bool)
+    if not z_mask.any():
+        return False
+    u = uv[z_mask, 0]
+    v = uv[z_mask, 1]
+    limit_w = float(coord_scale) * float(w)
+    limit_h = float(coord_scale) * float(h)
+    return bool(
+        (u > limit_w).any() or (u < -limit_w).any()
+        or (v > limit_h).any() or (v < -limit_h).any()
+    )
+
+
+def _is_box_behind_camera(box_params_world, pose, z_eps=GROUNDING_Z_EPS, euler_order=EULER_GROUNDING_ORDER):
+    center_cam = _box_center_in_camera(box_params_world, pose, euler_order)
+    return float(center_cam[2]) <= z_eps
+
+
+def _visible_projection_area_ratio(cam_corners, uv_corners, img_dim, z_eps=GROUNDING_Z_EPS):
+    """Fraction of projected box face union that lies inside the image."""
+    from shapely.geometry import Polygon, box as shapely_box
+    from shapely.ops import unary_union
+
+    w, h = img_dim
+    image_rect = shapely_box(0, 0, w, h)
+    polygons = []
+    for face in BOX_3D_FACES:
+        if (cam_corners[face, 2] <= z_eps).any():
+            continue
+        polygons.append(Polygon(uv_corners[face, :2].tolist()))
+    if not polygons:
+        return 0.0
+    union = unary_union(polygons)
+    if union.is_empty or union.area <= 0:
+        return 0.0
+    visible = union.intersection(image_rect)
+    return float(visible.area) / float(union.area)
+
+
+def _count_clipped_box_edges(cam_corners, uv_corners, img_dim, z_eps=GROUNDING_Z_EPS):
+    """Count projected box edges that are clipped or invalid (behind camera / out of frame)."""
+    w, h = img_dim
+    clipped = 0
+    for i, j in BOX_3D_EDGES:
+        if cam_corners[i, 2] <= z_eps or cam_corners[j, 2] <= z_eps:
+            clipped += 1
+            continue
+        u1, v1 = uv_corners[i]
+        u2, v2 = uv_corners[j]
+        in_frame = (
+            0 <= u1 < w and 0 <= v1 < h and 0 <= u2 < w and 0 <= v2 < h
+        )
+        if not in_frame:
+            clipped += 1
+    return clipped
+
+
+def is_box_valid_for_grounding_annotation(
+    box_params_world,
+    pose,
+    intrinsic,
+    img_dim,
+    *,
+    coord_scale=GROUNDING_COORD_IMAGE_SCALE,
+    min_visible_ratio=GROUNDING_MIN_VISIBLE_PROJ_RATIO,
+    max_clipped_edges=GROUNDING_MAX_CLIPPED_EDGES,
+    z_eps=GROUNDING_Z_EPS,
+    euler_order=EULER_GROUNDING_ORDER,
+):
+    """Return True when a world-frame 3D box passes grounding annotation filters.
+
+    Rejects boxes when:
+    - center is behind the camera;
+    - any in-front corner projects beyond coord_scale * image width/height;
+    - visible projected area / total projected area < min_visible_ratio;
+    - clipped edge count > max_clipped_edges (default: >= 10 of 12 edges clipped).
+    """
+    if box_params_world is None or len(box_params_world) < 9:
+        return False
+    if pose is None or intrinsic is None:
+        return False
+
+    if _is_box_behind_camera(box_params_world, pose, z_eps=z_eps, euler_order=euler_order):
+        return False
+
+    cam_corners, uv_corners = project_world_box_corners(
+        box_params_world, pose, intrinsic, euler_order=euler_order
+    )
+    if cam_corners is None:
+        return False
+
+    in_front = cam_corners[:, 2] > z_eps
+    if _has_abnormal_projected_coords(
+        uv_corners, img_dim, coord_scale=coord_scale, z_mask=in_front
+    ):
+        return False
+
+    visible_ratio = _visible_projection_area_ratio(
+        cam_corners, uv_corners, img_dim, z_eps=z_eps
+    )
+    if visible_ratio < min_visible_ratio:
+        return False
+
+    clipped_edges = _count_clipped_box_edges(cam_corners, uv_corners, img_dim, z_eps=z_eps)
+    if clipped_edges > max_clipped_edges:
+        return False
+
+    return True
 
 
 def all_box_corners_visible_in_image(

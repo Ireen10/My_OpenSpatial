@@ -20,7 +20,14 @@ from task.annotation.core.thread_rng import rng
 from .core.base_annotation_task import BaseAnnotationTask
 from .core.question_type import QuestionType
 from utils.image_utils import convert_pil_to_bytes
-from utils.box_utils import format_bbox_3d_for_grounding, format_grounding_answer_json
+from utils.box_utils import (
+    format_bbox_3d_for_grounding,
+    format_grounding_answer_json,
+    is_box_valid_for_grounding_annotation,
+    GROUNDING_COORD_IMAGE_SCALE,
+    GROUNDING_MAX_CLIPPED_EDGES,
+    GROUNDING_MIN_VISIBLE_PROJ_RATIO,
+)
 
 
 class ThreeDGroundingGenerator(BaseAnnotationTask):
@@ -33,6 +40,24 @@ class ThreeDGroundingGenerator(BaseAnnotationTask):
     def __init__(self, args):
         super().__init__(args)
         self.task_name = args.get("task_name") or args.get("file_name", "3d_grounding")
+        self.grounding_coord_scale = args.get("grounding_coord_scale", GROUNDING_COORD_IMAGE_SCALE)
+        self.grounding_min_visible_ratio = args.get(
+            "grounding_min_visible_ratio", GROUNDING_MIN_VISIBLE_PROJ_RATIO
+        )
+        self.grounding_max_clipped_edges = args.get(
+            "grounding_max_clipped_edges", GROUNDING_MAX_CLIPPED_EDGES
+        )
+
+    def _passes_grounding_box_filter(self, node, pose, intrinsic, img_dim) -> bool:
+        return is_box_valid_for_grounding_annotation(
+            node.box_3d_world,
+            pose,
+            intrinsic,
+            img_dim,
+            coord_scale=self.grounding_coord_scale,
+            min_visible_ratio=self.grounding_min_visible_ratio,
+            max_clipped_edges=self.grounding_max_clipped_edges,
+        )
 
     def check_example(self, example) -> bool:
         return super().check_example(example)
@@ -72,7 +97,7 @@ class ThreeDGroundingGenerator(BaseAnnotationTask):
         """Sample 1-3 object tags and ask for their 3D bounding boxes."""
         view = graph.primary_view
         pose = view.pose
-        if pose is None:
+        if pose is None or view.intrinsic is None:
             return None
 
         depth_map = view.depth_map
@@ -82,6 +107,10 @@ class ThreeDGroundingGenerator(BaseAnnotationTask):
         nodes = graph.get_object_nodes()
         if self.filter_tags is not None:
             nodes = [n for n in nodes if n.tag not in self.filter_tags]
+        nodes = [
+            n for n in nodes
+            if self._passes_grounding_box_filter(n, pose, view.intrinsic, img_dim)
+        ]
 
         tags_to_boxes = {}
         for node in nodes:
