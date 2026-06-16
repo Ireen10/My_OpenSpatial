@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 
 REQUIRED_FIELDS = {
     "id", "dataset", "scene_id", "image", "pose", "depth_map",
-    "intrinsic", "depth_scale", "bboxes_3d_world_coords", "obj_tags",
-    "axis_align_matrix",
+    "intrinsic", "depth_scale", "is_metric_depth", "bboxes_3d_world_coords",
+    "obj_tags", "axis_align_matrix",
 }
 VALID_DATASETS = {"scannet", "3rscan", "matterport3d", "arkitscenes"}
 VALID_DEPTH_SCALES = {1000, 4000}
@@ -91,6 +91,9 @@ def validate_value_ranges(directory: str) -> List[str]:
         ds = r.get("depth_scale")
         if ds not in VALID_DEPTH_SCALES:
             errors.append(f"Record {i}: invalid depth_scale={ds}")
+
+        if r.get("is_metric_depth") is not True:
+            errors.append(f"Record {i}: is_metric_depth must be true")
 
         dataset = r.get("dataset")
         if dataset not in VALID_DATASETS:

@@ -8,7 +8,7 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 # Fields that stay scalar in per-scene output (not aggregated into lists)
-SCENE_LEVEL_FIELDS = {"dataset", "scene_id"}
+SCENE_LEVEL_FIELDS = {"dataset", "scene_id", "is_metric_depth"}
 
 
 def merge_to_scenes(input_path: str, output_path: Optional[str] = None) -> str:
@@ -71,6 +71,7 @@ def merge_to_scenes(input_path: str, output_path: Optional[str] = None) -> str:
                 "dataset": records[0].get("dataset", ""),
                 "scene_id": scene_id,
                 "num_images": len(records),
+                "is_metric_depth": records[0].get("is_metric_depth", True),
             }
             # Aggregate all non-scene-level fields into lists
             for key in records[0]:

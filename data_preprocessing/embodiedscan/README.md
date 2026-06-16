@@ -212,6 +212,7 @@ Checks schema completeness, record counts, value ranges, and file path reachabil
 | `pose` | `str` | 4x4 camera-to-world extrinsic matrix (txt) |
 | `intrinsic` | `str` | 4x4 camera intrinsic matrix (txt) |
 | `depth_scale` | `int` | Depth scale factor (1000 or 4000) |
+| `is_metric_depth` | `bool` | Always `true`; depth values are metric after `depth_scale` division |
 | `bboxes_3d_world_coords` | `list[list[float]]` | 3D OBBs `[cx,cy,cz,xl,yl,zl,roll,pitch,yaw]` |
 | `obj_tags` | `list[str]` | Object semantic labels |
 | `axis_align_matrix` | `str` | Axis alignment matrix path |

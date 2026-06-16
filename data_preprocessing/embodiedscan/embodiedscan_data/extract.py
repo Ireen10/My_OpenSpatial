@@ -78,6 +78,7 @@ def _process_single(args):
         info["dataset"] = _worker_config.name
         info["scene_id"] = _worker_config.get_scene_id(scene)
         info["depth_scale"] = _worker_config.depth_scale
+        info["is_metric_depth"] = _worker_config.is_metric_depth
 
         # Get intrinsic
         try:

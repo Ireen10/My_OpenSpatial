@@ -7,6 +7,7 @@ class DatasetConfig(ABC):
     name: str
     dataset_key: str
     depth_scale: int
+    is_metric_depth: bool = True
     ann_files: List[str]
 
     @abstractmethod

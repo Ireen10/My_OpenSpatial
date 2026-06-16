@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenSpatial Data Preprocessing Flow</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app">
+    <main class="main">
+      <div class="eyebrow">OpenSpatial Visualization</div>
+      <h1 id="page-title">Data Preprocessing Flow</h1>
+      <p class="lead" id="page-lead"></p>
+
+      <div class="tab-bar" id="tab-bar" role="tablist" aria-label="预处理数据集"></div>
+
+      <div class="toolbar">
+        <div class="legend" id="legend"></div>
+        <div class="hint">提示：点击流程图中的节点查看详情</div>
+      </div>
+
+      <div class="canvas-wrap">
+        <svg id="pipeline-svg" role="img" aria-label="数据预处理交互流程图">
+          <defs>
+            <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+              <path d="M1.5,1.5 L9,5.5 L1.5,9.5 Z" fill="#64748b"></path>
+            </marker>
+          </defs>
+          <g id="stage-layer"></g>
+          <g id="edge-layer"></g>
+          <g id="node-layer"></g>
+        </svg>
+      </div>
+
+      <p class="footer-note">
+        本页为静态自包含页面，可直接打开 <code>assets/preprocessing/index.html</code>。
+        上游官方步骤（EmbodiedScan / ScanNet++）标注为橙色；OpenSpatial 仓库内脚本为绿色。
+      </p>
+    </main>
+
+    <aside class="detail" id="detail" aria-live="polite"></aside>
+  </div>
+
+  <script src="./preprocessing-data.js"></script>
+  <script>
+    const stageColors = {
+      upstream: "#f97316",
+      convert: "#10b981",
+      output: "#3b82f6",
+      validate: "#8b5cf6"
+    };
+
+    const UI_STAGE_LABELS = {
+      upstream: "上游 / 官方",
+      convert: "转换",
+      output: "导出",
+      validate: "校验"
+    };
+
+    const svg = document.getElementById("pipeline-svg");
+    const stageLayer = document.getElementById("stage-layer");
+    const edgeLayer = document.getElementById("edge-layer");
+    const nodeLayer = document.getElementById("node-layer");
+    const detail = document.getElementById("detail");
+    const legend = document.getElementById("legend");
+    const tabBar = document.getElementById("tab-bar");
+    const pageTitle = document.getElementById("page-title");
+    const pageLead = document.getElementById("page-lead");
+
+    let activePipelineId = "embodiedscan";
+    let activeStepId = null;
+
+    function svgEl(name, attrs = {}) {
+      const el = document.createElementNS("http://www.w3.org/2000/svg", name);
+      Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value));
+      return el;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function hasCJK(text) {
+      return /[\u3000-\u9fff\uff00-\uffef]/.test(String(text));
+    }
+
+    /** Estimate how many characters fit in a node line (CJK ≈ 1em wide). */
+    function charsPerLine(boxWidth, fontSize, isTitle = false) {
+      const inner = boxWidth - 26;
+      const unit = fontSize * (isTitle ? 0.98 : 0.84);
+      return Math.max(5, Math.floor(inner / unit));
+    }
+
+    function wrapText(text, maxChars, maxLines = 3) {
+      const s = String(text || "");
+      if (!s) return [];
+
+      if (s.includes(" ") && !hasCJK(s)) {
+        const words = s.split(" ");
+        const lines = [];
+        let current = "";
+        words.forEach((word) => {
+          const next = current ? `${current} ${word}` : word;
+          if (next.length > maxChars && current) {
+            lines.push(current);
+            current = word;
+          } else {
+            current = next;
+          }
+        });
+        if (current) lines.push(current);
+        return lines.slice(0, maxLines);
+      }
+
+      const lines = [];
+      for (let i = 0; i < s.length; i += maxChars) {
+        lines.push(s.slice(i, i + maxChars));
+        if (lines.length >= maxLines) break;
+      }
+      return lines;
+    }
+
+    function computeNodeLayout(step) {
+      const boxW = step.w;
+      const titleLines = wrapText(
+        step.nodeTitle || step.title,
+        charsPerLine(boxW, 15, true),
+        2
+      );
+      const summaryLines = wrapText(
+        step.nodeSummary || step.summary,
+        charsPerLine(boxW, 12),
+        3
+      );
+      const boxH = Math.max(
+        step.h,
+        14 + titleLines.length * 18 + 6 + summaryLines.length * 15 + 14
+      );
+      return { boxW, boxH, titleLines, summaryLines };
+    }
+
+    function nodeCenter(step) {
+      const boxH = step._renderH || step.h;
+      return { x: step.x + step.w / 2, y: step.y + boxH / 2 };
+    }
+
+    function edgePath(from, to) {
+      const fromH = from._renderH || from.h;
+      const toH = to._renderH || to.h;
+      const a = nodeCenter(from);
+      const b = nodeCenter(to);
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+
+      if (Math.abs(dy) < 80) {
+        const x1 = from.x + from.w;
+        const y1 = a.y;
+        const x2 = to.x;
+        const y2 = b.y;
+        return `M ${x1} ${y1} C ${x1 + Math.max(45, dx * 0.35)} ${y1}, ${x2 - Math.max(45, dx * 0.35)} ${y2}, ${x2} ${y2}`;
+      }
+
+      const startX = a.x;
+      const startY = from.y + fromH;
+      const endX = b.x;
+      const endY = to.y;
+      const midY = startY + (endY - startY) * 0.55;
+      return `M ${startX} ${startY} C ${startX} ${midY}, ${endX} ${midY}, ${endX} ${endY}`;
+    }
+
+    function getPipeline() {
+      return PIPELINES[activePipelineId];
+    }
+
+    function clearSvgGroup(group) {
+      while (group.firstChild) group.removeChild(group.firstChild);
+    }
+
+    function drawLegend() {
+      const stages = new Set(getPipeline().steps.map((s) => s.stage));
+      const order = ["upstream", "convert", "output", "validate"];
+      legend.innerHTML = order
+        .filter((id) => stages.has(id))
+        .map((id) => (
+          `<span class="legend-item"><span class="dot ${id}"></span>${escapeHtml(UI_STAGE_LABELS[id] || STAGE_LABELS[id])}</span>`
+        ))
+        .join("");
+    }
+
+    function drawStages(pipeline) {
+      pipeline.stageBands.forEach((band) => {
+        stageLayer.appendChild(svgEl("rect", {
+          class: "stage-band",
+          x: band.x,
+          y: band.y,
+          width: band.w,
+          height: band.h,
+          rx: 18
+        }));
+        const label = svgEl("text", {
+          class: "stage-label",
+          x: band.x + 18,
+          y: band.y + 28
+        });
+        label.textContent = UI_STAGE_LABELS[band.id] || STAGE_LABELS[band.id] || band.id;
+        stageLayer.appendChild(label);
+      });
+    }
+
+    function drawEdges(pipeline) {
+      pipeline.steps.forEach((step) => {
+        const layout = computeNodeLayout(step);
+        step._renderH = layout.boxH;
+        step._titleLines = layout.titleLines;
+        step._summaryLines = layout.summaryLines;
+      });
+
+      pipeline.edges.forEach((edge) => {
+        const fromId = edge[0];
+        const toId = edge[1];
+        const label = edge[2] || "";
+        const from = pipeline.byId[fromId];
+        const to = pipeline.byId[toId];
+        if (!from || !to) return;
+
+        const path = svgEl("path", {
+          class: `edge${label ? " branch" : ""}`,
+          d: edgePath(from, to)
+        });
+        edgeLayer.appendChild(path);
+
+        if (label) {
+          const a = nodeCenter(from);
+          const b = nodeCenter(to);
+          const text = svgEl("text", {
+            class: "edge-label",
+            x: (a.x + b.x) / 2 + 12,
+            y: (from.y + from.h + to.y) / 2 - 6
+          });
+          text.textContent = label;
+          edgeLayer.appendChild(text);
+        }
+      });
+    }
+
+    function clearClipPaths() {
+      const defs = svg.querySelector("defs");
+      if (!defs) return;
+      defs.querySelectorAll("clipPath[id^='clip-']").forEach((el) => el.remove());
+    }
+
+    function drawNodes(pipeline) {
+      clearClipPaths();
+      const defs = svg.querySelector("defs");
+
+      pipeline.steps.forEach((step) => {
+        if (!step._renderH) {
+          const layout = computeNodeLayout(step);
+          step._renderH = layout.boxH;
+          step._titleLines = layout.titleLines;
+          step._summaryLines = layout.summaryLines;
+        }
+        const boxW = step.w;
+        const titleLines = step._titleLines;
+        const summaryLines = step._summaryLines;
+        const boxH = step._renderH;
+
+        const titleLineHeight = 18;
+        const summaryLineHeight = 15;
+
+        const clipId = `clip-${pipeline.id}-${step.id}`;
+        const clip = svgEl("clipPath", { id: clipId });
+        clip.appendChild(svgEl("rect", {
+          x: step.x + 9,
+          y: step.y + 5,
+          width: boxW - 12,
+          height: boxH - 10,
+          rx: 12
+        }));
+        defs.appendChild(clip);
+
+        const g = svgEl("g", {
+          class: `node${step.id === activeStepId ? " active" : ""}`,
+          "data-id": step.id,
+          "data-stage": step.stage,
+          tabindex: 0,
+          role: "button",
+          "aria-label": step.nodeTitle || step.title
+        });
+
+        g.appendChild(svgEl("rect", {
+          x: step.x,
+          y: step.y,
+          width: boxW,
+          height: boxH,
+          rx: 16
+        }));
+
+        g.appendChild(svgEl("rect", {
+          x: step.x,
+          y: step.y,
+          width: 8,
+          height: boxH,
+          rx: 4,
+          fill: stageColors[step.stage] || "#2563eb"
+        }));
+
+        const textGroup = svgEl("g", { "clip-path": `url(#${clipId})` });
+        let cursorY = step.y + 24;
+
+        titleLines.forEach((line) => {
+          const text = svgEl("text", {
+            class: "node-title",
+            x: step.x + 18,
+            y: cursorY
+          });
+          text.textContent = line;
+          textGroup.appendChild(text);
+          cursorY += titleLineHeight;
+        });
+
+        cursorY += 4;
+        summaryLines.forEach((line) => {
+          const text = svgEl("text", {
+            class: "node-subtitle",
+            x: step.x + 18,
+            y: cursorY
+          });
+          text.textContent = line;
+          textGroup.appendChild(text);
+          cursorY += summaryLineHeight;
+        });
+
+        g.appendChild(textGroup);
+
+        g.addEventListener("click", () => selectStep(step.id));
+        g.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectStep(step.id);
+          }
+        });
+
+        nodeLayer.appendChild(g);
+      });
+    }
+
+    function listItems(items, ordered = false) {
+      if (!items || !items.length) return "";
+      const tag = ordered ? "ol" : "ul";
+      return `<${tag}>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</${tag}>`;
+    }
+
+    function renderDetail(step) {
+      const inputsBlock = step.inputs && step.inputs.length
+        ? `<div class="section"><h3>输入（路径 / 格式 / 配置）</h3>${listItems(step.inputs)}</div>`
+        : "";
+      const outputsBlock = step.outputs && step.outputs.length
+        ? `<div class="section"><h3>输出（路径 / 格式）</h3>${listItems(step.outputs)}</div>`
+        : "";
+      const paramsBlock = step.params && step.params.length
+        ? `<div class="section"><h3>约束与踩坑</h3>${listItems(step.params)}</div>`
+        : "";
+
+      detail.innerHTML = `
+        <div class="detail-stage">
+          <span class="dot ${step.stage}"></span>
+          ${escapeHtml(UI_STAGE_LABELS[step.stage] || STAGE_LABELS[step.stage] || step.stage)}
+        </div>
+        <h2>${escapeHtml(step.title)}</h2>
+        <p class="detail-summary">${escapeHtml(step.summary)}</p>
+
+        <div class="section">
+          <h3>关键操作</h3>
+          ${listItems(step.flow, true)}
+        </div>
+
+        ${inputsBlock}
+        ${outputsBlock}
+        ${paramsBlock}
+
+        <div class="section">
+          <h3>代码入口</h3>
+          <div class="file-list">
+            ${(step.files || []).map((file) => `<div class="file-chip">${escapeHtml(file)}</div>`).join("")}
+          </div>
+        </div>
+      `;
+    }
+
+    function selectStep(id) {
+      activeStepId = id;
+      document.querySelectorAll(".node").forEach((node) => {
+        node.classList.toggle("active", node.getAttribute("data-id") === id);
+      });
+      renderDetail(getPipeline().byId[id]);
+    }
+
+    function renderPipeline(pipelineId) {
+      activePipelineId = pipelineId;
+      const pipeline = getPipeline();
+      pipeline.steps.forEach((step) => {
+        delete step._renderH;
+        delete step._titleLines;
+        delete step._summaryLines;
+      });
+
+      pageTitle.textContent = pipeline.title;
+      pageLead.textContent = pipeline.lead;
+
+      svg.setAttribute("width", pipeline.svg.width);
+      svg.setAttribute("height", pipeline.svg.height);
+      svg.setAttribute("viewBox", pipeline.svg.viewBox);
+
+      clearSvgGroup(stageLayer);
+      clearSvgGroup(edgeLayer);
+      clearSvgGroup(nodeLayer);
+      clearClipPaths();
+
+      drawLegend();
+      drawStages(pipeline);
+      drawEdges(pipeline);
+      drawNodes(pipeline);
+
+      activeStepId = pipeline.steps[0].id;
+      selectStep(activeStepId);
+
+      document.querySelectorAll(".tab-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.pipeline === pipelineId);
+        btn.setAttribute("aria-selected", btn.dataset.pipeline === pipelineId ? "true" : "false");
+      });
+    }
+
+    function initTabs() {
+      Object.values(PIPELINES).forEach((pipeline) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "tab-btn";
+        btn.dataset.pipeline = pipeline.id;
+        btn.textContent = pipeline.tabLabel;
+        btn.setAttribute("role", "tab");
+        btn.addEventListener("click", () => renderPipeline(pipeline.id));
+        tabBar.appendChild(btn);
+      });
+    }
+
+    initTabs();
+    renderPipeline("embodiedscan");
+  </script>
+</body>
+</html>
