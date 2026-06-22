@@ -2,9 +2,9 @@ dataset:
   modality: image
   dataset_name: image_base
   # Parquet from embodiedscan_data export (per_image shards or single file).
-  data_dir: E:/GitRepo/OpenSpatial/data_root/EmbodiedScan/preprocess_output_frame_rot/per_image/data-00000.parquet
+  data_dir: /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/data_root/EmbodiedScan/preprocessed/scannet/per_image/
   # Root of raw RGB/depth assets; joined with relative paths in parquet (EmbodiedScan data/).
-  raw_data_root: E:/GitRepo/OpenSpatial/data_root/EmbodiedScan/data
+  raw_data_root: /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/data_root/EmbodiedScan/data/
 
 pipeline:
   file_name: base_pipeline
@@ -24,7 +24,7 @@ pipeline:
         filter_tags: ["ceiling", "floor", "wall", "object"]
         output_dir:
         use_multi_processing: true
-        num_workers: 40              # CPU-bound (cv2/open3d/numpy release GIL)
+        num_workers: 96              # CPU-bound (cv2/open3d/numpy release GIL)
 
     localization_stage:
       -
@@ -34,17 +34,18 @@ pipeline:
         depends_on: filter_stage/3dbox_filter
         output_dir:
 
-        segmenter_model: facebook/sam3
+        segmenter_model: /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/data_root/model_weights/sam3/
 
-        min_score: 0.6
+        # Quality gates (same as Sam2Refiner): confidence + minimum mask area.
+        score_threshold: 0.25
         min_mask_pixels: 20
 
-        device: "npu:0,npu:1"
+        device: "npu:0,npu:1,npu:2,npu:3"
         replicas_per_device: 1
         use_multi_processing: true
-        num_workers: 2
-        batch_size: 4                # pipeline images per _refine() call
-        prompt_batch_size: 32        # SAM3 hybrid-prompt rows per NPU forward
+        num_workers: 4
+        batch_size: 16                # pipeline images per _refine() call
+        prompt_batch_size: 32        # flattened (image, tag, box) rows per SAM3 forward
 
     scene_fusion_stage:
       -
@@ -53,7 +54,7 @@ pipeline:
         depends_on: localization_stage/sam3_refiner
         output_dir:
         use_multi_processing: true
-        num_workers: 40              # CPU-bound (numpy/open3d release GIL)
+        num_workers: 64              # CPU-bound (numpy/open3d release GIL)
 
     # Per-scene multiview input (347 per-image rows → N scenes by scene_id).
     # Output: group_stage/group/data.parquet — point demo_multiview_all_frame_rot.yaml data_dir here.

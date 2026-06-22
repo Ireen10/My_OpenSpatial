@@ -1,8 +1,8 @@
 dataset:
   modality: image
   dataset_name: image_base
-  data_dir: E:/GitRepo/OpenSpatial/data_root/EmbodiedScan/preprocess_output_frame_rot/per_image/data-00000.parquet
-  raw_data_root: E:/GitRepo/OpenSpatial/data_root/EmbodiedScan/data
+  data_dir: /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/data_root/EmbodiedScan/preprocessed/arkitscenes/per_image/data-00000.parquet
+  raw_data_root: /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/data_root/EmbodiedScan/data/
 
 pipeline:
   file_name: base_pipeline
@@ -14,7 +14,7 @@ pipeline:
         file_name: 3dbox_filter
         method: ThreeDBoxFilter
         proj_mask_threshold: 0.1
-        box3d_pcd_threshold: 0.1
+        box3d_pcd_threshold: 0.2
         box_scale_factor: 0.9
         mask_area_threshold: 0.005
         update_keys: []
@@ -30,13 +30,13 @@ pipeline:
         update_keys: ["obj_tags", "bboxes_3d_world_coords"]
         depends_on: filter_stage/3dbox_filter
         output_dir:
-        segmenter_model: facebook/sam2-hiera-small
+        segmenter_model: /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/data_root/model_weights/sam2-hiera-large/
         segmenter_backend: transformers
         device: "npu:0,npu:1,npu:2,npu:3"
         replicas_per_device: 1
         use_multi_processing: true
         num_workers: 4
-        batch_size: 4
+        batch_size: 32
 
     scene_fusion_stage:
       -

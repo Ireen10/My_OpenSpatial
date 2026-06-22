@@ -1,8 +1,9 @@
 """ScanNet++ dataset preprocessing pipeline.
 
 Reads RGB, depth, poses, and intrinsics from each scene under ``--input_root``.
-Camera parameters come from ``iphone/pose_intrinsic_imu.json`` (``aligned_poses``
-and ``intrinsic``, both per frame). Per-frame 4×4 txt files are written because
+Camera parameters come from ``iphone/pose_intrinsic_imu.json`` where each
+``frame_XXXXXX`` entry stores ``aligned_pose`` and ``intrinsic``. Per-frame 4×4
+txt files are written because
 downstream Parquet expects file paths.
 """
 
@@ -121,8 +122,6 @@ def process_single_scene(    scene_id: str,
 
         with open(pose_intrinsic_imu_path, encoding="utf-8") as f:
             imu_meta = json.load(f)
-        aligned_poses = imu_meta["aligned_poses"]
-        aligned_intrinsics = imu_meta["intrinsic"]
         pose_txt_dir = os.path.join(base_sensor_path, "aligned_pose")
         intrinsic_txt_dir = os.path.join(base_sensor_path, "intrinsic")
 
@@ -155,13 +154,12 @@ def process_single_scene(    scene_id: str,
         ids, images, poses, intrinsics, depth_maps = [], [], [], [], []
         for rgb_file in rgb_files:
             frame_name = os.path.splitext(os.path.basename(rgb_file))[0]
-            frame_idx = int(frame_name.split("_")[-1])
-
-            if frame_idx >= len(aligned_poses):
-                print(f"[scannetpp] Pose index out of range for {frame_name} in {scene_id}")
+            frame_meta = imu_meta.get(frame_name)
+            if frame_meta is None:
+                print(f"[scannetpp] Missing frame meta for {frame_name} in {scene_id}")
                 continue
-            if frame_idx >= len(aligned_intrinsics):
-                print(f"[scannetpp] Intrinsic index out of range for {frame_name} in {scene_id}")
+            if "aligned_pose" not in frame_meta or "intrinsic" not in frame_meta:
+                print(f"[scannetpp] Invalid frame meta for {frame_name} in {scene_id}")
                 continue
 
             expected_depth = os.path.join(depth_dir, f"{frame_name}.png")
@@ -181,11 +179,11 @@ def process_single_scene(    scene_id: str,
                 cv2.imwrite(resized_depth_path, depth_resized)
 
             pose_path = write_matrix_txt(
-                np.asarray(aligned_poses[frame_idx], dtype=np.float64),
+                np.asarray(frame_meta["aligned_pose"], dtype=np.float64),
                 os.path.join(pose_txt_dir, f"{frame_name}.txt"),
             )
             intrinsic_path = write_matrix_txt(
-                np.asarray(aligned_intrinsics[frame_idx], dtype=np.float64),
+                np.asarray(frame_meta["intrinsic"], dtype=np.float64),
                 os.path.join(intrinsic_txt_dir, f"{frame_name}.txt"),
             )
 
