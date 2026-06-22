@@ -24,7 +24,7 @@ pipeline:
         filter_tags: ["ceiling", "floor", "wall", "object"]
         output_dir:
         use_multi_processing: true
-        num_workers: 96              # CPU-bound (cv2/open3d/numpy release GIL)
+        num_workers: 64              # CPU-bound (cv2/open3d/numpy release GIL)
 
     localization_stage:
       -

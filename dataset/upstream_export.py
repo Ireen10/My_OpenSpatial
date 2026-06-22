@@ -217,9 +217,12 @@ def write_sharded_upstream_bundle(
     n_images_packed = 0
     all_missing: List[str] = []
     shard_summaries: List[dict] = []
+    total_records = len(dataset)
+    records_processed = 0
+    progress_every = 500
 
     def flush_shard() -> None:
-        nonlocal shard_idx, n_images_packed
+        nonlocal shard_idx, n_images_packed, records_processed
         if not buffer:
             return
         base = shard_basename(shard_idx)
@@ -229,8 +232,12 @@ def write_sharded_upstream_bundle(
         shard_missing: List[str] = []
         shard_images = 0
 
+        print(
+            f">>> Upstream export shard {shard_idx + 1}: "
+            f"writing {len(buffer)} sample(s) to {tar_path.name}"
+        )
         with open(jsonl_path, "w", encoding="utf-8") as jf, tarfile.open(tar_path, "w") as tar:
-            for record in buffer:
+            for i, record in enumerate(buffer, start=1):
                 record, n_new, missing = _pack_record_images(
                     record, tar=tar, seen_paths=seen_paths, stats=stats
                 )
@@ -239,6 +246,13 @@ def write_sharded_upstream_bundle(
                 record["schema_version"] = record.get("schema_version") or schema_version
                 stats.observe_record(record)
                 jf.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+                records_processed += 1
+                if i % progress_every == 0 or i == len(buffer):
+                    print(
+                        f">>> Upstream export progress: shard {shard_idx + 1} "
+                        f"{i}/{len(buffer)} samples, "
+                        f"global {records_processed}/{total_records}"
+                    )
 
         n_images_packed += shard_images
         all_missing.extend(shard_missing)
@@ -250,6 +264,10 @@ def write_sharded_upstream_bundle(
             "jsonl": str(jsonl_path.relative_to(out)).replace("\\", "/"),
             "tar": str(tar_path.relative_to(out)).replace("\\", "/"),
         })
+        print(
+            f">>> Upstream export shard {shard_idx + 1} done: "
+            f"{len(buffer)} sample(s), {shard_images} image(s)"
+        )
         shard_idx += 1
         buffer.clear()
 
