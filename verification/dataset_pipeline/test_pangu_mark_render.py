@@ -8,7 +8,6 @@ import pytest
 from PIL import Image
 
 from script.export_to_pangu_ml import (
-    combined_mark_spec_for_view,
     count_renderable_slots_for_view,
     flat_mark_spec_for_view,
     render_marked_image_bytes,
@@ -68,12 +67,12 @@ def test_flat_mark_spec_for_view_reads_per_view_layout():
     assert "views" not in v0
 
 
-def test_combined_mark_spec_unions_sample_level_spec():
+def test_flat_mark_spec_returns_sample_level_view_slots():
     spec = _per_view_spec()
-    merged = combined_mark_spec_for_view([], spec, 0)
-    assert merged is not None
-    assert len(merged["slots"]) == 2
-    assert merged["slots"][0]["tag"] == "chair"
+    flat = flat_mark_spec_for_view(spec, 0)
+    assert flat is not None
+    assert len(flat["slots"]) == 2
+    assert flat["slots"][0]["tag"] == "chair"
 
 
 def test_render_marked_image_bytes_draws_boxes():
@@ -82,14 +81,27 @@ def test_render_marked_image_bytes_draws_boxes():
     img = Image.new("RGB", (100, 100), color=(255, 255, 255))
     raw = convert_pil_to_bytes(img)
     spec = _per_view_spec()
-    view_ms = combined_mark_spec_for_view([], spec, 0)
+    view_ms = flat_mark_spec_for_view(spec, 0)
     out = render_marked_image_bytes(raw, view_ms, view_index=0)
+    assert out != raw
+    assert len(out) > len(raw)
+
+
+def test_render_marked_image_bytes_accepts_flat_spec_for_nonzero_view_index():
+    from utils.image_utils import convert_pil_to_bytes
+
+    img = Image.new("RGB", (100, 100), color=(255, 255, 255))
+    raw = convert_pil_to_bytes(img)
+    spec = _per_view_spec()
+    view_ms = flat_mark_spec_for_view(spec, 1)
+    assert view_ms is not None
+    out = render_marked_image_bytes(raw, view_ms, view_index=1)
     assert out != raw
     assert len(out) > len(raw)
 
 
 def test_count_renderable_slots_for_view():
     spec = _per_view_spec()
-    assert count_renderable_slots_for_view([], spec, 0) == 2
-    assert count_renderable_slots_for_view([], spec, 1) == 1
-    assert count_renderable_slots_for_view([], spec, 2) == 0
+    assert count_renderable_slots_for_view(spec, 0) == 2
+    assert count_renderable_slots_for_view(spec, 1) == 1
+    assert count_renderable_slots_for_view(spec, 2) == 0

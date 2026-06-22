@@ -64,6 +64,7 @@ from dataset.upstream_export import (  # noqa: E402
 from task.annotation.core.mark_spec import (  # noqa: E402
     MARK_SPEC_VERSION,
     all_slots_flat,
+    mark_spec_has_slots,
     render_mark,
     slots_for_view,
 )
@@ -331,28 +332,6 @@ def parse_qa_pairs(messages: List[dict]) -> Optional[List[Tuple[str, str]]]:
     return pairs if pairs else None
 
 
-def turn_mark_specs(metadata: dict) -> List[Optional[dict]]:
-    turns = metadata.get("turns") or []
-    specs: List[Optional[dict]] = []
-    for turn in turns:
-        if not isinstance(turn, dict):
-            specs.append(None)
-            continue
-        ms = turn.get("mark_spec")
-        specs.append(ms if isinstance(ms, dict) else None)
-    return specs
-
-
-def mark_spec_for_turn(
-    turn_specs: List[Optional[dict]],
-    turn_index: int,
-    sample_mark_spec: Optional[dict],
-) -> Optional[dict]:
-    if turn_index < len(turn_specs) and turn_specs[turn_index]:
-        return turn_specs[turn_index]
-    return sample_mark_spec
-
-
 def flat_mark_spec_for_view(
     mark_spec: Optional[dict],
     view_index: int,
@@ -367,45 +346,11 @@ def flat_mark_spec_for_view(
     return {"version": MARK_SPEC_VERSION, "mark_kinds": kinds, "slots": slots}
 
 
-def combined_mark_spec_for_view(
-    turn_specs: List[Optional[dict]],
-    sample_mark_spec: Optional[dict],
-    view_index: int,
-) -> Optional[dict]:
-    """Union all mark slots on one view across turns (flat spec for render_mark)."""
-    seen: set = set()
-    merged_slots: List[dict] = []
-
-    sources: List[dict] = []
-    for ms in turn_specs:
-        if ms:
-            sources.append(ms)
-    if sample_mark_spec:
-        sources.append(sample_mark_spec)
-
-    for ms in sources:
-        flat = flat_mark_spec_for_view(ms, view_index)
-        if not flat:
-            continue
-        for slot in flat.get("slots") or []:
-            key = (slot.get("slot_id"), slot.get("tag"), slot.get("mark_kind"))
-            if key in seen:
-                continue
-            seen.add(key)
-            merged_slots.append(slot)
-
-    if not merged_slots:
-        return None
-    kinds = sorted({s.get("mark_kind") for s in merged_slots if s.get("mark_kind")})
-    return {"version": MARK_SPEC_VERSION, "mark_kinds": kinds, "slots": merged_slots}
-
-
 def count_renderable_slots_for_view(
-    turn_specs: List[Optional[dict]],
     sample_mark_spec: Optional[dict],
     view_index: int,
 ) -> int:
-    flat = combined_mark_spec_for_view(turn_specs, sample_mark_spec, view_index)
+    flat = flat_mark_spec_for_view(sample_mark_spec, view_index)
     if not flat:
         return 0
     return sum(
@@ -427,16 +372,14 @@ def audit_sample_marks(
     sample_mark_spec = metadata.get("mark_spec")
     if sample_mark_spec is not None and not isinstance(sample_mark_spec, dict):
         sample_mark_spec = None
-    turn_specs = turn_mark_specs(metadata)
-
     legacy = count_legacy_marks_in_pairs(pairs)
     refs = list(record.get("image_refs") or [])
     renderable = 0
     views_no_render = 0
     for vi in range(len(refs)):
-        n = count_renderable_slots_for_view(turn_specs, sample_mark_spec, vi)
+        n = count_renderable_slots_for_view(sample_mark_spec, vi)
         renderable += n
-        flat = combined_mark_spec_for_view(turn_specs, sample_mark_spec, vi)
+        flat = flat_mark_spec_for_view(sample_mark_spec, vi)
         spec_slots = len(flat.get("slots") or []) if flat else 0
         if spec_slots > 0 and n == 0:
             views_no_render += 1
@@ -461,7 +404,11 @@ def render_marked_image_bytes(
     from PIL import Image
 
     img = Image.open(io.BytesIO(raw_bytes))
-    flat = flat_mark_spec_for_view(mark_spec, view_index) if mark_spec else None
+    if mark_spec and isinstance(mark_spec, dict) and mark_spec.get("slots") is not None and not mark_spec.get("views"):
+        # Already a one-view flat spec (e.g. from combined_mark_spec_for_view).
+        flat = mark_spec
+    else:
+        flat = flat_mark_spec_for_view(mark_spec, view_index) if mark_spec else None
     if flat and flat.get("slots"):
         out = render_mark(img, flat, view_index=0)
         return out["bytes"]
@@ -471,7 +418,6 @@ def render_marked_image_bytes(
 def load_and_encode_marked_images(
     record: dict,
     safe_id: str,
-    turn_specs: List[Optional[dict]],
     sample_mark_spec: Optional[dict],
     tar_cache: dict,
 ) -> Tuple[List[Tuple[str, bytes, int, int, str]], List[str]]:
@@ -496,7 +442,7 @@ def load_and_encode_marked_images(
             errors.append(f"missing image: {ref}")
             continue
 
-        view_ms = combined_mark_spec_for_view(turn_specs, sample_mark_spec, vi)
+        view_ms = flat_mark_spec_for_view(sample_mark_spec, vi)
         try:
             marked_bytes = render_marked_image_bytes(
                 raw, view_ms, view_index=vi,
@@ -527,11 +473,17 @@ def build_pangu_sample(
     if sample_mark_spec is not None and not isinstance(sample_mark_spec, dict):
         sample_mark_spec = None
 
-    turn_specs = turn_mark_specs(metadata)
+    turn_specs_raw = metadata.get("turns") or []
+    for turn in turn_specs_raw:
+        if not isinstance(turn, dict):
+            continue
+        turn_ms = turn.get("mark_spec")
+        if isinstance(turn_ms, dict) and mark_spec_has_slots(turn_ms):
+            return None, [], "unexpected_turn_mark_spec"
     sample_id = sanitize_sample_id(str(record.get("sample_id") or ""), row_index)
 
     image_rows, img_errors = load_and_encode_marked_images(
-        record, sample_id, turn_specs, sample_mark_spec, tar_cache,
+        record, sample_id, sample_mark_spec, tar_cache,
     )
     if img_errors and not image_rows:
         return None, [], "missing_images"
@@ -539,11 +491,10 @@ def build_pangu_sample(
     data: List[Dict[str, Any]] = []
 
     first_q, first_a = pairs[0]
-    ms0 = mark_spec_for_turn(turn_specs, 0, sample_mark_spec)
     first_user_content: List[Dict[str, Any]] = []
     for rel, _b, w, h, mime in image_rows:
         first_user_content.append(to_image_content(rel, w, h, mime))
-    q0 = apply_marked_text(first_q, ms0)
+    q0 = apply_marked_text(first_q, sample_mark_spec)
     if q0:
         first_user_content.append(to_text_content(q0))
     if not first_user_content:
@@ -551,16 +502,15 @@ def build_pangu_sample(
 
     data.append({"role": "user", "content": first_user_content})
 
-    a0 = apply_marked_text(first_a, ms0)
+    a0 = apply_marked_text(first_a, sample_mark_spec)
     if not a0:
         return None, [], "empty_first_answer"
     data.append({"role": "assistant", "content": [to_text_content(a0)]})
 
     for ti in range(1, len(pairs)):
         q_raw, a_raw = pairs[ti]
-        ms = mark_spec_for_turn(turn_specs, ti, sample_mark_spec)
-        q = apply_marked_text(q_raw, ms)
-        a = apply_marked_text(a_raw, ms)
+        q = apply_marked_text(q_raw, sample_mark_spec)
+        a = apply_marked_text(a_raw, sample_mark_spec)
         if not q:
             return None, [], f"empty_question_turn_{ti}"
         if not a:

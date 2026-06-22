@@ -27,12 +27,10 @@ from dataset.upstream_export import discover_shard_pairs, normalize_messages  # 
 from script.export_to_pangu_ml import (  # noqa: E402
     LEGACY_MARK_SUFFIX_RE,
     audit_sample_marks,
-    combined_mark_spec_for_view,
     count_legacy_mark_tokens,
     flat_mark_spec_for_view,
     parse_qa_pairs,
     slot_has_renderable_geometry,
-    turn_mark_specs,
 )
 from task.annotation.core.mark_spec import mark_spec_views, slots_for_view  # noqa: E402
 
@@ -47,11 +45,10 @@ def per_view_report(
     n_views: int,
 ) -> List[Dict[str, Any]]:
     ms = _sample_mark_spec(metadata)
-    turn_specs = turn_mark_specs(metadata)
     rows = []
     for vi in range(n_views):
         spec_slots = slots_for_view(ms, vi) if ms else []
-        flat = combined_mark_spec_for_view(turn_specs, ms, vi)
+        flat = flat_mark_spec_for_view(ms, vi)
         renderable = [
             s for s in (flat.get("slots") or []) if slot_has_renderable_geometry(s)
         ]

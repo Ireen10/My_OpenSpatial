@@ -29,7 +29,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, render_template_string, request
 from PIL import Image, ImageDraw
@@ -49,6 +49,11 @@ _SETTINGS = {
     "tar_cache_handles": 128,
     "prefetch_pages": 4,
     "page_size": 8,
+}
+_RAW_TRUNCATE = {
+    "max_depth": 8,
+    "max_items": 256,
+    "max_string": 12000,
 }
 
 
@@ -1066,7 +1071,12 @@ function toggleRaw(idx, btn) {
   panel.classList.add('open');
   panel.textContent = 'Loading...';
   fetch(`/api/raw_row?root=${encodeURIComponent(currentRoot)}&index=${idx}`)
-    .then(r => r.json()).then(d => { panel.textContent = JSON.stringify(d.row, null, 2); });
+    .then(r => r.json())
+    .then(d => {
+      const prefix = d.truncated ? '[truncated to keep UI responsive]\\n\\n' : '';
+      panel.textContent = prefix + JSON.stringify(d.row, null, 2);
+    })
+    .catch(() => { panel.textContent = 'Failed to load raw JSON.'; });
 }
 
 function escapeHtml(t) {
@@ -1167,9 +1177,68 @@ def api_render():
 @app.route("/api/raw_row")
 def api_raw_row():
     root = request.args.get("root", "")
-    index = int(request.args.get("index", 0))
+    try:
+        index = int(request.args.get("index", 0))
+    except (TypeError, ValueError):
+        return jsonify({"row": {}, "truncated": False, "error": "invalid index"}), 400
+
     sample = read_sample(root, index)
-    return jsonify({"row": sample or {}})
+    state = {"truncated": False}
+    safe = _sanitize_raw_for_json(sample or {}, state=state)
+    return jsonify({"row": safe, "truncated": bool(state["truncated"])})
+
+
+def _sanitize_raw_for_json(
+    value: Any,
+    *,
+    depth: int = 0,
+    state: Optional[dict] = None,
+) -> Any:
+    if state is None:
+        state = {"truncated": False}
+
+    if depth > _RAW_TRUNCATE["max_depth"]:
+        state["truncated"] = True
+        return "<truncated: max depth>"
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    if isinstance(value, str):
+        if len(value) <= _RAW_TRUNCATE["max_string"]:
+            return value
+        state["truncated"] = True
+        keep = _RAW_TRUNCATE["max_string"]
+        return f"{value[:keep]} ... <truncated {len(value) - keep} chars>"
+
+    if isinstance(value, bytes):
+        state["truncated"] = True
+        return f"<bytes:{len(value)}>"
+
+    if isinstance(value, list):
+        limit = _RAW_TRUNCATE["max_items"]
+        out = [
+            _sanitize_raw_for_json(v, depth=depth + 1, state=state)
+            for v in value[:limit]
+        ]
+        if len(value) > limit:
+            state["truncated"] = True
+            out.append(f"... <truncated {len(value) - limit} items>")
+        return out
+
+    if isinstance(value, dict):
+        limit = _RAW_TRUNCATE["max_items"]
+        out: Dict[str, Any] = {}
+        items = list(value.items())
+        for k, v in items[:limit]:
+            out[str(k)] = _sanitize_raw_for_json(v, depth=depth + 1, state=state)
+        if len(items) > limit:
+            state["truncated"] = True
+            out["__truncated_keys__"] = len(items) - limit
+        return out
+
+    state["truncated"] = True
+    return str(value)
 
 
 def _lan_urls(port: int) -> List[str]:
