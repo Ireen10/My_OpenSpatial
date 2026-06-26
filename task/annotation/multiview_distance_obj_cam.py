@@ -62,6 +62,10 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         else:
             answer = "B"
 
+        if not self.register_semantic_candidate(
+            "multiview_distance.obj_cam", A_desc, close_far, answer,
+        ):
+            return None
         opt_tpl = rng().choice(multiview_distance_obj_cam_option_phrases)
         opt_a = PromptTemplate._fill(opt_tpl, {"A": A_desc, "Y": close_far, "X": "View 1"})
         opt_b = PromptTemplate._fill(opt_tpl, {"A": A_desc, "Y": close_far, "X": "View 2"})
@@ -128,6 +132,8 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         mark_type = self.marker.choose_mark_type()
         processed_images, objs = self._mark_per_view(meta, mark_type)
         prompt = self.obj_cam_distance_prompt_func(*self._marked_prompt_items(meta, objs))
+        if prompt is None:
+            return None
         self._record_multiview_turn(
             "object_camera_distance", "multiview_distance.obj_cam_mcq", prompt, QuestionType.MCQ, meta,
             mark_spec=self.marker.last_mark_spec,

@@ -5,6 +5,21 @@ from .thread_rng import rng
 from typing import Dict, List, Optional, Tuple
 
 PLACEHOLDER_RE = re.compile(r"\[([A-Z])\]")
+WHITESPACE_RE = re.compile(r"\s+")
+
+
+def normalize_generated_text(text: str) -> str:
+    """Lightweight grammar cleanup after placeholder substitution."""
+    text = WHITESPACE_RE.sub(" ", str(text or "")).strip()
+    if not text:
+        return ""
+    # Preserve JSON/list answers such as 3D grounding targets.
+    if text[0] in "[{":
+        return text
+    for i, ch in enumerate(text):
+        if ch.isalpha():
+            return text[:i] + ch.upper() + text[i + 1:]
+    return text
 
 
 @dataclass(frozen=True)
@@ -120,8 +135,8 @@ class PromptTemplate:
             answer_index=ai,
             question_line=q_line,
             answer_line=a_line,
-            question_text=q_text.strip(),
-            answer_text=a_text.strip(),
+            question_text=normalize_generated_text(q_text),
+            answer_text=normalize_generated_text(a_text),
             question_bindings=self._bindings_applied_to_line(q_line, shared, q_args),
             answer_bindings=self._bindings_applied_to_line(a_line, shared, a_args),
         )

@@ -242,12 +242,7 @@ def generate_parquet(
     # Load selected object tags
     selected_obj_tags = None
     if selected_tags_file is not None:
-        selected_obj_tags = []
-        with open(selected_tags_file, "r") as f:
-            for line in f:
-                tag = line.strip()
-                if tag:
-                    selected_obj_tags.append(tag)
+        selected_obj_tags = load_selected_tags(selected_tags_file)
 
     all_results = []
     chunk_count = 0
@@ -276,6 +271,43 @@ def generate_parquet(
     
 
     print(f"Done. Generated {chunk_count + 1} Parquet file(s).")
+
+
+def load_selected_tags(selected_tags_file: str) -> list[str]:
+    """Load plain tag lists or ScanNet label TSV files.
+
+    ``scannet-labels.combined.tsv`` contains tab-separated metadata rather than
+    one label per line; keeping the whole line as a tag filters out every object.
+    """
+    tags: set[str] = set()
+    with open(selected_tags_file, "r", encoding="utf-8") as f:
+        first = f.readline()
+        if not first:
+            return []
+        first_parts = first.rstrip("\n").split("\t")
+        is_tsv = len(first_parts) > 1
+        if is_tsv:
+            header = [p.strip().lower() for p in first_parts]
+            preferred = [
+                i for i, name in enumerate(header)
+                if name in {"raw_category", "category", "nyu40class"}
+            ]
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                for idx in preferred:
+                    if idx < len(parts):
+                        tag = parts[idx].strip()
+                        if tag and tag.lower() not in {"void", "unannotated"}:
+                            tags.add(tag)
+        else:
+            tag = first.strip()
+            if tag:
+                tags.add(tag)
+            for line in f:
+                tag = line.strip()
+                if tag:
+                    tags.add(tag)
+    return sorted(tags)
 
 
 # ---------------------------------------------------------------------------

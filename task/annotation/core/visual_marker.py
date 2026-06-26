@@ -227,10 +227,12 @@ class VisualMarker:
     def __init__(self, config: MarkConfig = None):
         self.config = config or MarkConfig()
         self.color_queue = list(COLOR_QUEUE_DEFAULT)
+        self.mark_token_index = 0
 
     def reset(self, shuffle: bool = None):
         """Reset color queue to default order, optionally shuffling."""
         self.color_queue = list(COLOR_QUEUE_DEFAULT)
+        self.mark_token_index = 0
         do_shuffle = shuffle if shuffle is not None else self.config.shuffle_colors
         if do_shuffle:
             rng().shuffle(self.color_queue)
@@ -239,6 +241,12 @@ class VisualMarker:
         """Pop the next color from the queue."""
         name = self.color_queue.pop(0)
         return name, COLOR_MAP[name]
+
+    def pop_mark_token(self) -> str:
+        """Stable pre-render mark token; real colors are assigned during export/render."""
+        token = f"mark{self.mark_token_index}"
+        self.mark_token_index += 1
+        return token
 
     @staticmethod
     def _allowed_types(types) -> List[str]:

@@ -131,7 +131,7 @@ const PIPELINE_STEPS = [
     y: 206,
     w: 190,
     h: 92,
-    summary: "Refines object localization using SAM2 or SAM3 based on filtered objects.",
+    summary: "Refines object masks and 2D boxes using SAM2 or SAM3 while preserving existing 3D boxes.",
     files: [
       "task/localization/sam2_refiner.py",
       "task/localization/sam3_refiner.py",
@@ -144,11 +144,13 @@ const PIPELINE_STEPS = [
     ],
     flow: [
       "Load the localization model selected by config.",
-      "Refine object masks and associated 2D/3D localization fields.",
+      "Refine object masks and update 2D boxes from the refined masks.",
+      "For SAM3, run text-only prompts per unique object tag and match predicted masks back to input boxes with mask-box similarity.",
+      "Do not recompute or overwrite bboxes_3d_world_coords; only remove entries for objects filtered out by localization.",
       "Preserve the object-aligned columns that annotation and scene fusion need."
     ],
     outputs: [
-      "Refined masks / bboxes_2d / object fields",
+      "Refined masks / bboxes_2d / object-aligned fields",
       "localization_stage/sam*_refiner/data.parquet"
     ]
   },
@@ -161,7 +163,7 @@ const PIPELINE_STEPS = [
     y: 206,
     w: 190,
     h: 92,
-    summary: "Back-projects each object mask through depth into cleaned per-object 3D point clouds.",
+    summary: "Back-projects each object mask through depth into per-object 3D point clouds without changing retained 3D box values.",
     files: [
       "task/scene_fusion/depth_back_projection.py"
     ],
@@ -173,12 +175,13 @@ const PIPELINE_STEPS = [
     ],
     flow: [
       "Load masks from paths or embedded bytes and resize them to depth resolution.",
-      "Back-project the whole depth map into 3D camera coordinates.",
-      "Select points under each mask, remove statistical outliers, and write cleaned .pcd files.",
-      "Drop invalid mask/object entries and require at least two valid object point clouds."
+      "Use mask-only backprojection: collect valid depth pixels under each object mask.",
+      "Sample at most max_points_per_object points per object, optionally apply statistical outlier removal, and write .pcd files.",
+      "Drop invalid mask/object entries by valid_flags and require at least two valid object point clouds.",
+      "Filter only explicit object-aligned fields; retained bboxes_3d_world_coords values are copied unchanged."
     ],
     outputs: [
-      "pointclouds list on each row",
+      "pointclouds list on each retained row",
       "scene_fusion_stage/depth_back_projection/pointclouds/*.pcd",
       "scene_fusion_stage/depth_back_projection/data.parquet"
     ]
@@ -560,9 +563,10 @@ const PIPELINE_STEPS = [
       "metadata_*.jsonl + metadata_*.tar"
     ],
     flow: [
-      "Discover upstream shard pairs and process shard-level jobs, optionally in parallel.",
-      "Resolve images from each upstream tar and render mark overlays from mark_spec when needed.",
+      "Discover upstream shard pairs and process shard-level jobs, optionally with file-level processes and intra-shard threads.",
+      "Resolve images from each upstream tar, assign final mark colors at export time, and render mark overlays from mark_spec when needed.",
       "Move all image content into the first user turn and strip image placeholder tokens from text.",
+      "Rewrite legacy mark tokens into natural text and apply export-time text cleanup for capitalization and legacy correspondence/distance fixes.",
       "Map roles from human/gpt to user/assistant.",
       "Write data_*.jsonl and data_*.tar shards with Pangu-safe sample/image paths."
     ],

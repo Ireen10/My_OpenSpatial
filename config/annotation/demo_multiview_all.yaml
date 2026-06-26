@@ -17,36 +17,36 @@ pipeline:
 
   stages:
     annotation_stage:
-      -
-        file_name: multiview_distance
-        method: AnnotationGenerator
-        scaling_factor: 1
-        filter_tags: ["ceiling", "floor", "wall", "object"]
-        sub_tasks:
-          pair_absolute_distance: 1
-          multi_relative_distance: 1
-        max_num_views: 400
-        min_rot_angle: 15.0
-        min_translation: 0.0
-        use_multi_processing: true
-        num_workers: 32
-        output_dir:
+      # -
+      #   file_name: multiview_distance
+      #   method: AnnotationGenerator
+      #   scaling_factor: 1
+      #   filter_tags: ["ceiling", "floor", "wall", "object"]
+      #   sub_tasks:
+      #     pair_absolute_distance: 1
+      #     multi_relative_distance: 1
+      #   max_num_views: 400
+      #   min_rot_angle: 15.0
+      #   min_translation: 0.0
+      #   use_multi_processing: true
+      #   num_workers: 32
+      #   output_dir:
 
-      -
-        file_name: multiview_size
-        method: AnnotationGenerator
-        depends_on: *multiview_input
-        scaling_factor: 1
-        filter_tags: ["ceiling", "floor", "wall", "object"]
-        sub_tasks:
-          pair_relative_size: 1
-          multi_relative_size: 1
-        max_num_views: 400
-        min_rot_angle: 15.0
-        min_translation: 0.0
-        use_multi_processing: true
-        num_workers: 32
-        output_dir:
+      # -
+      #   file_name: multiview_size
+      #   method: AnnotationGenerator
+      #   depends_on: *multiview_input
+      #   scaling_factor: 1
+      #   filter_tags: ["ceiling", "floor", "wall", "object"]
+      #   sub_tasks:
+      #     pair_relative_size: 1
+      #     multi_relative_size: 1
+      #   max_num_views: 400
+      #   min_rot_angle: 15.0
+      #   min_translation: 0.0
+      #   use_multi_processing: true
+      #   num_workers: 32
+      #   output_dir:
 
       -
         file_name: multiview_correspondence
@@ -68,34 +68,34 @@ pipeline:
         num_workers: 32
         output_dir:
 
-      -
-        file_name: multiview_distance_obj_cam
-        method: AnnotationGenerator
-        depends_on: *multiview_input
-        scaling_factor: 1
-        filter_tags: ["ceiling", "floor", "wall", "object"]
-        sub_tasks:
-          object_camera_distance: 1
-        max_num_views: 400
-        min_rot_angle: 15.0
-        min_translation: 0.0
-        dis_pot_thre: 0.08
-        use_multi_processing: true
-        num_workers: 32
-        output_dir:
+      # -
+      #   file_name: multiview_distance_obj_cam
+      #   method: AnnotationGenerator
+      #   depends_on: *multiview_input
+      #   scaling_factor: 1
+      #   filter_tags: ["ceiling", "floor", "wall", "object"]
+      #   sub_tasks:
+      #     object_camera_distance: 1
+      #   max_num_views: 400
+      #   min_rot_angle: 15.0
+      #   min_translation: 0.0
+      #   dis_pot_thre: 0.08
+      #   use_multi_processing: true
+      #   num_workers: 32
+      #   output_dir:
 
-      -
-        file_name: multiview_object_position
-        method: AnnotationGenerator
-        depends_on: *multiview_input
-        scaling_factor: 1
-        filter_tags: ["ceiling", "floor", "wall", "object"]
-        sub_tasks:
-          position_oe: 1
-          position_mcq: 1
-        max_num_views: 400
-        min_rot_angle: 15.0
-        min_translation: 0.0
-        use_multi_processing: true
-        num_workers: 32
-        output_dir:
+      # -
+      #   file_name: multiview_object_position
+      #   method: AnnotationGenerator
+      #   depends_on: *multiview_input
+      #   scaling_factor: 1
+      #   filter_tags: ["ceiling", "floor", "wall", "object"]
+      #   sub_tasks:
+      #     position_oe: 1
+      #     position_mcq: 1
+      #   max_num_views: 400
+      #   min_rot_angle: 15.0
+      #   min_translation: 0.0
+      #   use_multi_processing: true
+      #   num_workers: 32
+      #   output_dir:

@@ -31,9 +31,9 @@ pipeline:
           - multiview_correspondence
           - multiview_distance_obj_cam
           - multiview_object_position
-        dedup_within_task: true
+        # Dedup is handled during annotation sampling; aggregate only merges turns.
+        dedup_within_task: false
         merge_by_visual_input_group: true
-        dedup_keep_policy: semantic_first
         output_dir:
 
     export_stage:

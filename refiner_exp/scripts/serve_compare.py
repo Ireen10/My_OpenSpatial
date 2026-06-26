@@ -268,7 +268,12 @@ def opencv_camera_to_viewer(pts: np.ndarray) -> np.ndarray:
 
 
 def _box_corners_viewer(rec: Dict[str, Any]) -> Optional[np.ndarray]:
-    """World-frame 9-param box → 8 corners in viewer coords (camera frame first)."""
+    """World-frame 9-param bbox field -> 8 corners in viewer coords.
+
+    This intentionally uses ``rec["box_3d"]`` from the parquet
+    ``bboxes_3d_world_coords`` field. Do not fit a bbox from the point cloud
+    here; the point cloud is only a rendered asset / diagnostic signal.
+    """
     box = rec.get("box_3d")
     if not box:
         return None
@@ -342,6 +347,7 @@ def _pack_branch_from_fusion(
             wire = _wireframe_segments(corners)
             obj["wireframe"] = base64.b64encode(wire.tobytes()).decode("ascii")
             obj["wireframe_n"] = int(len(wire))
+            obj["wireframe_source"] = "bboxes_3d_world_coords"
         objects.append(obj)
         chunks.append(pts)
     if not chunks:

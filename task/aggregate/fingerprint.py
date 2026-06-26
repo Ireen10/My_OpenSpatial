@@ -26,6 +26,22 @@ def normalize_image_ref(path: Any) -> str:
     return str(path).replace("\\", "/")
 
 
+def _pyify(obj: Any) -> Any:
+    """Convert parquet/numpy nested values to plain Python containers."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return {k: _pyify(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_pyify(v) for v in obj]
+    if hasattr(obj, "tolist") and not isinstance(obj, (str, bytes)):
+        try:
+            return _pyify(obj.tolist())
+        except Exception:
+            pass
+    return obj
+
+
 def image_refs_from_row(row: dict) -> List[str]:
     meta = row.get("metadata")
     if isinstance(meta, list) and meta:
@@ -50,8 +66,43 @@ def image_refs_from_row(row: dict) -> List[str]:
 def mark_spec_has_slots(mark_spec: Any) -> bool:
     if not isinstance(mark_spec, dict):
         return False
-    from task.annotation.core.mark_spec import mark_spec_has_slots as _has
-    return _has(mark_spec)
+    return any((v.get("slots") or []) for v in _mark_spec_views_for_norm(mark_spec))
+
+
+def _mark_spec_views_for_norm(mark_spec: Optional[dict]) -> List[dict]:
+    """Lightweight mark_spec view reader for aggregate keys (no annotation imports)."""
+    mark_spec = _pyify(mark_spec)
+    if not isinstance(mark_spec, dict):
+        return []
+    views_raw = mark_spec.get("views")
+    if mark_spec.get("layout") == "per_view" and isinstance(views_raw, list):
+        views = [v for v in views_raw if isinstance(v, dict)]
+        if views:
+            return views
+
+    slots = mark_spec.get("slots") or []
+    if not isinstance(slots, list):
+        return []
+    by_view: Dict[int, list] = {}
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        try:
+            vi = int(slot.get("view_index", 0))
+        except (TypeError, ValueError):
+            vi = 0
+        slot_out = {k: v for k, v in slot.items() if k != "view_index"}
+        by_view.setdefault(vi, []).append(slot_out)
+    return [
+        {
+            "view_index": vi,
+            "mark_kinds": sorted({
+                s.get("mark_kind") for s in view_slots if s.get("mark_kind")
+            }),
+            "slots": view_slots,
+        }
+        for vi, view_slots in sorted(by_view.items())
+    ]
 
 
 def _norm_slot(s: dict) -> dict:
@@ -77,16 +128,15 @@ def _norm_slot(s: dict) -> dict:
         "obj_idx": s.get("obj_idx"),
         "tag": s.get("tag"),
         "mark_kind": s.get("mark_kind"),
-        "color_name": s.get("color_name"),
         "geometry": gnorm,
     }
 
 
 def mark_spec_norm(mark_spec: Optional[dict]) -> Optional[dict]:
+    mark_spec = _pyify(mark_spec)
     if not isinstance(mark_spec, dict):
         return None
-    from task.annotation.core.mark_spec import mark_spec_views
-    views_raw = mark_spec_views(mark_spec)
+    views_raw = _mark_spec_views_for_norm(mark_spec)
     if not views_raw:
         return None
     views = []
@@ -283,13 +333,3 @@ def compute_merge_group_key(row: dict, turn: Optional[dict] = None) -> str:
     return _sha256_hex(_canonical_json(body))
 
 
-def pick_dedup_winner(candidates: List[dict], policy: str = "semantic_first") -> dict:
-    if policy != "semantic_first":
-        return candidates[0]
-
-    def sort_key(t: dict):
-        has_struct = 0 if t.get("prompt_struct") else 1
-        tpl = (t.get("prompt_struct") or {}).get("template_id") or ""
-        return (has_struct, tpl)
-
-    return min(candidates, key=sort_key)

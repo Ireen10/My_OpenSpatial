@@ -49,7 +49,7 @@ positional_far_oe_questions = [
     "Considering the 3D positions of objects in this image, which one is farther from the [C], the [A] or the [B]?",
     "From the perspective of this image, which object is more distant from the [C], the [A] or the [B]?",
     "Looking at the spatial layout in this image, which object is farther from the [C], the [A] or the [B]?",
-    "Which of [A] and [B] is farther to [C]?",
+    "Which of the [A] and the [B] is farther from the [C]?",
 ]
 
 positional_far_mcq_questions = [
@@ -58,7 +58,7 @@ positional_far_mcq_questions = [
     "Considering the 3D positions of objects in this image, which one is farther from the [C], the [A] or the [B]? [O]",
     "From the perspective of this image, which object is more distant from the [C], the [A] or the [B]? [O]",
     "Looking at the spatial layout in this image, which object is farther from the [C], the [A] or the [B]? [O]",
-    "Which of [A] and [B] is farther to [C]? [O]",
+    "Which of the [A] and the [B] is farther from the [C]? [O]",
 ]
 
 positional_far_oe_direct_answers = [
@@ -88,7 +88,7 @@ positional_close_oe_questions = [
     "Considering the 3D positions of objects in this image, which one is closer to the [C], the [A] or the [B]?",
     "From the perspective of this image, which object is nearer to the [C], the [A] or the [B]?",
     "Looking at the spatial layout in this image, which object is closer to the [C], the [A] or the [B]?",
-    "Which of [A] and [B] is closer to [C]?",
+    "Which of the [A] and the [B] is closer to the [C]?",
 ]
 
 positional_close_mcq_questions = [
@@ -97,7 +97,7 @@ positional_close_mcq_questions = [
     "Considering the 3D positions of objects in this image, which one is closer to the [C], the [A] or the [B]? [O]",
     "From the perspective of this image, which object is nearer to the [C], the [A] or the [B]? [O]",
     "Looking at the spatial layout in this image, which object is closer to the [C], the [A] or the [B]? [O]",
-    "Which of [A] and [B] is closer to [C]? [O]",
+    "Which of the [A] and the [B] is closer to the [C]? [O]",
 ]
 
 positional_close_oe_direct_answers = [
@@ -205,12 +205,12 @@ relative_mcq_reasoning_instructions = [
 multiview_distance_introduction = MULTIVIEW_SCENE_INTRODUCTION
 
 multiview_distance_farthest_questions = [
-    "Among the objects [T], which one is the farthest from [X]?",
-    "Considering the set of objects [T], which object is most distant from [X]?",
-    "From the provided objects [T], identify the one that is farthest from [X].",
-    "Which object in [T] has the greatest distance from [X]?",
-    "Out of the objects [T], which one is the most distant from [X]?",
-    "Which object in [T] has the maximum distance to [X]?",
+    "Among the listed objects ([T]), which one is the farthest from the [X]?",
+    "Considering the set of objects ([T]), which object is most distant from the [X]?",
+    "From the provided objects ([T]), identify the one that is farthest from the [X].",
+    "Which object in the list ([T]) has the greatest distance from the [X]?",
+    "Out of the listed objects ([T]), which one is the most distant from the [X]?",
+    "Which object in the list ([T]) has the maximum distance to the [X]?",
 ]
 
 multiview_distance_farthest_direct_answers = [
@@ -218,18 +218,24 @@ multiview_distance_farthest_direct_answers = [
 ]
 
 multiview_distance_farthest_sentence_answers = [
-    "The object [X] is farther from [Y] than any other listed object.",
-    "Among the listed objects, [X] has the greatest distance to [Y].",
-    "Compared with the other listed objects, [X] is the most distant from [Y].",
+    "The [X] is farther from the [Y] than any other listed object.",
+    "Among the listed objects, the [X] has the greatest distance to the [Y].",
+    "Compared with the other listed objects, the [X] is the most distant from the [Y].",
+]
+
+multiview_distance_farthest_reasoning_answers = [
+    "After comparing the listed objects by their distance from the [Y], the [X] is the most distant one. Therefore, the [X] is the farthest from the [Y].",
+    "The object farthest from the [Y] is the one with the greatest separation among the candidates. That object is the [X].",
+    "Comparing the [X] with the other listed objects, the [X] has the largest distance to the [Y], so it is the farthest.",
 ]
 
 multiview_distance_closest_questions = [
-    "Among the objects [T], which one is the closest to [X]?",
-    "Considering the set of objects [T], which object is nearest to [X]?",
-    "From the provided objects [T], identify the one that is closest to [X].",
-    "Which object in [T] has the smallest distance from [X]?",
-    "Out of the objects [T], which one is the nearest to [X]?",
-    "Which object in [T] has the minimum distance to [X]?",
+    "Among the listed objects ([T]), which one is the closest to the [X]?",
+    "Considering the set of objects ([T]), which object is nearest to the [X]?",
+    "From the provided objects ([T]), identify the one that is closest to the [X].",
+    "Which object in the list ([T]) has the smallest distance from the [X]?",
+    "Out of the listed objects ([T]), which one is the nearest to the [X]?",
+    "Which object in the list ([T]) has the minimum distance to the [X]?",
 ]
 
 multiview_distance_closest_direct_answers = [
@@ -237,9 +243,15 @@ multiview_distance_closest_direct_answers = [
 ]
 
 multiview_distance_closest_sentence_answers = [
-    "The object [X] is closer to [Y] than any other listed object.",
-    "Among the listed objects, [X] has the smallest distance to [Y].",
-    "Compared with the other listed objects, [X] is the nearest to [Y].",
+    "The [X] is closer to the [Y] than any other listed object.",
+    "Among the listed objects, the [X] has the smallest distance to the [Y].",
+    "Compared with the other listed objects, the [X] is the nearest to the [Y].",
+]
+
+multiview_distance_closest_reasoning_answers = [
+    "After comparing the listed objects by their distance from the [Y], the [X] is the nearest one. Therefore, the [X] is the closest to the [Y].",
+    "The object closest to the [Y] is the one with the smallest separation among the candidates. That object is the [X].",
+    "Comparing the [X] with the other listed objects, the [X] has the smallest distance to the [Y], so it is the closest.",
 ]
 
 multiview_distance_obj_cam_questions = [
@@ -379,6 +391,7 @@ def _register_multiview_superlative_family(
     stems: list,
     direct_answers: list,
     sentence_answers: list,
+    reasoning_answers: list,
 ) -> None:
     register_oe_mode(
         f"multiview_distance.{polarity}.direct",
@@ -392,15 +405,28 @@ def _register_multiview_superlative_family(
         f"multiview_distance.{polarity}.reasoning",
         "reasoning",
         stems,
-        sentence_answers,
+        reasoning_answers,
         introduction=multiview_distance_introduction,
         question_instruction=relative_oe_reasoning_instructions,
+    )
+    register_oe_mode(
+        f"multiview_distance.{polarity}.sentence",
+        "sentence",
+        stems,
+        sentence_answers,
+        introduction=multiview_distance_introduction,
+        question_instruction=relative_oe_sentence_instructions,
     )
     register_oe_mode(
         f"multiview_distance.{polarity}.free",
         "free",
         stems,
-        sentence_answers,
+        [],
+        answer_profiles=mixed_metric_default_profile(
+            reasoning_answers,
+            sentence_answers,
+            instruction_type="free",
+        ),
         introduction=multiview_distance_introduction,
         question_instruction=EMPTY_QUESTION_INSTRUCTION,
     )
@@ -418,18 +444,20 @@ def register_structured_distance_templates() -> None:
     _register_relative_mcq_pair("far")
     _register_relative_mcq_pair("close")
 
-    for polarity, stems, direct_ans, sentence_ans in (
+    for polarity, stems, direct_ans, sentence_ans, reasoning_ans in (
         (
             "farthest",
             multiview_distance_farthest_questions,
             multiview_distance_farthest_direct_answers,
             multiview_distance_farthest_sentence_answers,
+            multiview_distance_farthest_reasoning_answers,
         ),
         (
             "closest",
             multiview_distance_closest_questions,
             multiview_distance_closest_direct_answers,
             multiview_distance_closest_sentence_answers,
+            multiview_distance_closest_reasoning_answers,
         ),
     ):
         _register_multiview_superlative_family(
@@ -437,6 +465,7 @@ def register_structured_distance_templates() -> None:
             stems,
             direct_ans,
             sentence_ans,
+            reasoning_ans,
         )
     register_mcq(
         "multiview_distance.obj_cam_mcq",

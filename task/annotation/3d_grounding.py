@@ -93,6 +93,26 @@ class ThreeDGroundingGenerator(BaseAnnotationTask):
             },
         )
 
+    def _grounding_seen_object_keys(self) -> set:
+        seen = getattr(self._thread_local, "grounding_seen_object_keys", None)
+        if seen is None:
+            seen = set()
+            self._thread_local.grounding_seen_object_keys = seen
+        return seen
+
+    def _grounding_object_key(self, node) -> tuple:
+        """3D grounding dedup is per physical object, not per question combination."""
+        return self.semantic_item_key(node)
+
+    def _grounding_nodes_available(self, nodes) -> bool:
+        seen = self._grounding_seen_object_keys()
+        return all(self._grounding_object_key(node) not in seen for node in nodes)
+
+    def _mark_grounding_nodes_used(self, nodes) -> None:
+        seen = self._grounding_seen_object_keys()
+        for node in nodes:
+            seen.add(self._grounding_object_key(node))
+
     def _generate_grounding_oe(self, graph):
         """Sample 1-3 object tags and ask for their 3D bounding boxes."""
         view = graph.primary_view
@@ -113,19 +133,39 @@ class ThreeDGroundingGenerator(BaseAnnotationTask):
         ]
 
         tags_to_boxes = {}
+        tags_to_nodes = {}
         for node in nodes:
             cam_box = node.box_3d_in_camera(pose)
             if cam_box is not None:
                 tags_to_boxes.setdefault(node.tag, []).append(cam_box)
+                tags_to_nodes.setdefault(node.tag, []).append(node)
         if not tags_to_boxes:
             return None
 
-        unique_tags = list(tags_to_boxes.keys())
-        sampled_tags = rng().sample(unique_tags, rng().randint(1, min(3, len(unique_tags))))
+        available_tags = [
+            tag for tag, tag_nodes in tags_to_nodes.items()
+            if self._grounding_nodes_available(tag_nodes)
+        ]
+        if not available_tags:
+            return None
+
+        sampled_tags = rng().sample(
+            available_tags,
+            rng().randint(1, min(3, len(available_tags))),
+        )
+        sampled_nodes = [
+            node for tag in sampled_tags for node in tags_to_nodes.get(tag, [])
+        ]
+        if not self.register_semantic_candidate(
+            "grounding_3d.open_ended",
+            sorted(self._grounding_object_key(node) for node in sampled_nodes),
+        ):
+            return None
 
         prompt = self.grounding_oe_prompt_func(sampled_tags, tags_to_boxes, camera_shared)
         if prompt is None:
             return None
+        self._mark_grounding_nodes_used(sampled_nodes)
 
         extra_slots = {}
         for i, tag in enumerate(sampled_tags):

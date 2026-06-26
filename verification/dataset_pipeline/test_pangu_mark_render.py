@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import io
 
+import numpy as np
 import pytest
 from PIL import Image
 
 from script.export_to_pangu_ml import (
+    apply_marked_text,
+    assign_export_colors,
     count_renderable_slots_for_view,
     flat_mark_spec_for_view,
     render_marked_image_bytes,
 )
+from task.aggregate.fingerprint import mark_spec_norm
 
 
 def _per_view_spec() -> dict:
@@ -105,3 +109,56 @@ def test_count_renderable_slots_for_view():
     assert count_renderable_slots_for_view(spec, 0) == 2
     assert count_renderable_slots_for_view(spec, 1) == 1
     assert count_renderable_slots_for_view(spec, 2) == 0
+
+
+def test_mark_spec_norm_ignores_color_names():
+    spec_a = _per_view_spec()
+    spec_b = _per_view_spec()
+    spec_b["views"][0]["slots"][0]["color_name"] = "purple"
+    spec_b["views"][0]["slots"][1]["color_name"] = "orange"
+    assert mark_spec_norm(spec_a) == mark_spec_norm(spec_b)
+
+
+def test_mark_spec_norm_accepts_parquet_numpy_nested_values():
+    spec = _per_view_spec()
+    for view in spec["views"]:
+        view["slots"] = np.array(view["slots"], dtype=object)
+    spec["views"] = np.array(spec["views"], dtype=object)
+
+    norm = mark_spec_norm(spec)
+
+    assert norm is not None
+    assert len(norm["views"]) == 2
+    assert sum(len(v["slots"]) for v in norm["views"]) == 3
+
+
+def test_export_color_assignment_rewrites_legacy_mark_text():
+    spec = _per_view_spec()
+    colored, replacements = assign_export_colors(spec)
+    assert colored is not spec
+    assert replacements
+    assert colored["views"][0]["slots"][0]["color_name"]
+
+    repl = {
+        "tag": "chair",
+        "kind": "box",
+        "old_color": "red",
+        "new_color": "purple",
+    }
+    old_text = f"{repl['tag']}-({repl['old_color']} {repl['kind']})"
+    new_text = apply_marked_text(f"Choose {old_text}.", [repl])
+    assert repl["new_color"] in new_text
+    assert repl["old_color"] not in new_text
+
+
+def test_export_color_assignment_rewrites_placeholder_mark_tokens():
+    spec = _per_view_spec()
+    spec["views"][0]["slots"][0]["color_name"] = "mark0"
+
+    colored, replacements = assign_export_colors(spec)
+    repl = next(r for r in replacements if r["tag"] == "chair")
+    text = apply_marked_text("Choose chair-(mark0 box).", [repl])
+
+    assert colored["views"][0]["slots"][0]["color_name"] == repl["new_color"]
+    assert "mark0" not in text
+    assert repl["new_color"] in text

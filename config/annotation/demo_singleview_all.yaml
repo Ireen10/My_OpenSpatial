@@ -9,7 +9,7 @@
 dataset:
   modality: image
   dataset_name: image_base
-  data_dir: &singleview_input /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/output/EmbodiedScan/arkitscenes/base_pipeline_demo_preprocessing_embodiedscan_sam3/scene_fusion_stage/depth_back_projection/data.parquet
+  data_dir: &singleview_input /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/output/EmbodiedScan/scannet/base_pipeline_demo_preprocessing_embodiedscan_sam3/scene_fusion_stage/depth_back_projection/data.parquet
 
 pipeline:
   file_name: base_pipeline
@@ -26,7 +26,7 @@ pipeline:
           absolute_distance: 1
           relative_distance: 1
         use_multi_processing: true
-        num_workers: 32
+        num_workers: 64
         output_dir:
 
       -
@@ -41,7 +41,7 @@ pipeline:
           depth_choice_oe: 1
           depth_choice_mcq: 1
         use_multi_processing: true
-        num_workers: 32
+        num_workers: 64
         output_dir:
 
       -
@@ -54,7 +54,7 @@ pipeline:
           absolute_size: 1
           relative_size: 1
         use_multi_processing: true
-        num_workers: 32
+        num_workers: 64
         output_dir:
 
       -
@@ -67,7 +67,7 @@ pipeline:
           height_comparison: 1
           proximity: 1
         use_multi_processing: true
-        num_workers: 32
+        num_workers: 64
         output_dir:
 
       -
@@ -79,5 +79,5 @@ pipeline:
         sub_tasks:
           grounding_oe: 1
         use_multi_processing: true
-        num_workers: 32
+        num_workers: 64
         output_dir:

@@ -370,7 +370,7 @@ def plan_object_marks(
         if not geometry:
             continue
 
-        color_name, _color = marker.pop_color()
+        color_name = marker.pop_mark_token()
         slots.append({
             "slot_id": slot_id,
             "obj_idx": _obj_idx_from_node(passthrough),
@@ -405,7 +405,7 @@ def plan_point_marks(
 ) -> Tuple[dict, list]:
     slots = []
     for i, uv in enumerate(points):
-        color_name, _color = marker.pop_color()
+        color_name = marker.pop_mark_token()
         slots.append({
             "slot_id": _slot_id(i, labels),
             "obj_idx": -1,

@@ -51,11 +51,23 @@ class AnnotationGenerator(BaseAnnotationTask):
 
         if rng().random() < 0.5:
             tpl = "size.big.single_view"
+            semantic_kind = "big"
+            if not self.register_semantic_candidate(
+                "size.relative", semantic_kind,
+                sorted([self.semantic_item_key(A), self.semantic_item_key(B)]),
+            ):
+                return None, None
             prompt = self.render_structured_prompt(
                 tpl, condition=d_A > d_B, shared={"A": A_desc, "B": B_desc},
             )
         else:
             tpl = "size.small.single_view"
+            semantic_kind = "small"
+            if not self.register_semantic_candidate(
+                "size.relative", semantic_kind,
+                sorted([self.semantic_item_key(A), self.semantic_item_key(B)]),
+            ):
+                return None, None
             prompt = self.render_structured_prompt(
                 tpl, condition=d_A < d_B, shared={"A": A_desc, "B": B_desc},
             )
@@ -65,6 +77,10 @@ class AnnotationGenerator(BaseAnnotationTask):
         A_desc = marked_surface_label(marked)
         _, node = marked
         value_m = float(get_value(node))
+        if not self.register_semantic_candidate(
+            "size.absolute", stem_kind, self.semantic_item_key(marked),
+        ):
+            return None, None
         mode = pick_instruction_mode(ABSOLUTE_DISTANCE_MODES)
         tpl = f"size.{stem_kind}.single_view.{mode}"
         x_val = format_distance_value(value_m)
@@ -91,6 +107,8 @@ class AnnotationGenerator(BaseAnnotationTask):
                 m, "absolute",
                 lambda n: max(self._get_node_extent(n)),
             )
+            if p is None:
+                continue
             prompts.append(p)
             self._record_turn(
                 "absolute_size", tpl, p, QuestionType.OPEN_ENDED,
@@ -100,12 +118,16 @@ class AnnotationGenerator(BaseAnnotationTask):
                 m, "height",
                 lambda n: n.box_3d_world[5],
             )
+            if p2 is None:
+                continue
             prompts.append(p2)
             self._record_turn(
                 "absolute_size", tpl2, p2, QuestionType.OPEN_ENDED,
                 mark_spec=mark_spec, extra_slots=self._slots_from_marked([m]),
             )
 
+        if not prompts:
+            return None
         return [
             (p, processed_image, QuestionType.OPEN_ENDED) for p in prompts
         ]

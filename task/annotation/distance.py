@@ -111,6 +111,10 @@ class AnnotationGenerator(BaseAnnotationTask):
         B_desc, B_cloud = self._get_cleaned_cloud(B)
 
         dist_m = compute_point_cloud_distance(A_cloud, B_cloud)
+        if not self.register_semantic_candidate(
+            "distance.absolute", sorted([self.semantic_item_key(A), self.semantic_item_key(B)]),
+        ):
+            return None, None
         mode = pick_instruction_mode(ABSOLUTE_DISTANCE_MODES)
         tpl = f"distance.absolute.{mode}"
         x_val = format_distance_value(dist_m, scaling_factor=self.scaling_factor)
@@ -140,6 +144,12 @@ class AnnotationGenerator(BaseAnnotationTask):
         else:
             polarity, winner, other = "close", closer, farther
 
+        if not self.register_semantic_candidate(
+            "distance.relative", "OE", polarity,
+            self.semantic_item_key(A), self.semantic_item_key(B), self.semantic_item_key(C),
+            winner,
+        ):
+            return None, None
         mode = pick_relative_distance_mode(is_metric_depth=graph.is_metric_depth)
         tpl = f"distance.relative_{polarity}.{mode}"
         stem_index = self._relative_stem_index(tpl, graph)
@@ -183,6 +193,12 @@ class AnnotationGenerator(BaseAnnotationTask):
         else:
             polarity, target_tag, winner_desc = "close", closer_tag, closer
 
+        if not self.register_semantic_candidate(
+            "distance.relative", "MCQ", polarity,
+            self.semantic_item_key(A), self.semantic_item_key(B), self.semantic_item_key(C),
+            target_tag,
+        ):
+            return None, None
         mode = pick_relative_distance_mode(is_metric_depth=graph.is_metric_depth)
         tpl = f"distance.relative_{polarity}_mcq.{mode}"
         stem_index = self._relative_stem_index(tpl, graph)
@@ -228,6 +244,8 @@ class AnnotationGenerator(BaseAnnotationTask):
         processed_image, marked = self.mark_objects_for_qa(image, sampled)
         A, B = marked
         prompt, tpl = self.absolute_distance_prompt_func(A, B)
+        if prompt is None:
+            return None
         self._record_turn(
             "absolute_distance",
             tpl,
@@ -251,6 +269,8 @@ class AnnotationGenerator(BaseAnnotationTask):
         mark_spec = self.marker.last_mark_spec
 
         oe_prompt, oe_tpl = self.relative_distance_oe_prompt_func(A, B, C, graph=graph)
+        if oe_prompt is None:
+            return None
         self._record_turn(
             "relative_distance",
             oe_tpl,
@@ -260,6 +280,8 @@ class AnnotationGenerator(BaseAnnotationTask):
             extra_slots=slots,
         )
         mcq_prompt, mcq_tpl = self.relative_distance_mcq_prompt_func(A, B, C, graph=graph)
+        if mcq_prompt is None:
+            return None
         self._record_turn(
             "relative_distance",
             mcq_tpl,

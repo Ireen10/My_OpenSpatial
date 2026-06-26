@@ -182,6 +182,18 @@ class ExportStatsCollector:
                 if isinstance(val, str) and val.strip():
                     self._answer_lengths.append(len(val))
 
+    def merge_from(self, other: "ExportStatsCollector") -> None:
+        """Merge stats collected by an independent shard worker."""
+        self._turns_by_task.update(other._turns_by_task)
+        self._turn_count_per_sample.update(other._turn_count_per_sample)
+        self._image_count_per_sample.update(other._image_count_per_sample)
+        self._megapixels.update(other._megapixels)
+        self._short_edge.update(other._short_edge)
+        self._dataset_source.update(other._dataset_source)
+        self._prompt_profile.update(other._prompt_profile)
+        self._answer_lengths.extend(other._answer_lengths)
+        self.n_samples += other.n_samples
+
     def finalize(
         self,
         *,

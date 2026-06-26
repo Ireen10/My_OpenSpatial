@@ -1,7 +1,7 @@
 dataset:
   modality: image
   dataset_name: image_base
-  data_dir: /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/data_root/EmbodiedScan/preprocessed/arkitscenes/per_image/data-00000.parquet
+  data_dir: /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/data_root/EmbodiedScan/preprocessed/scannet/per_image/data-00000.parquet
   raw_data_root: /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/data_root/EmbodiedScan/data/
 
 pipeline:

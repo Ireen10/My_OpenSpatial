@@ -11,38 +11,38 @@ correspondence_introduction = [
 
 # OE: candidates are visible labels on image 2 only (no inline Options block).
 point2point_oe_stems = [
-    "The first image shows a point marked in [A] color. The second image shows several [B] labeled points. Which one corresponds to the original?",
-    "In image one, a point is highlighted in [A] color. In the second image, multiple [B] labeled points are shown. Identify the corresponding point.",
-    "The first image marks a point in [A] color. The second image presents several [B] labeled points. Which one matches the original?",
-    "The first image shows a point highlighted in [A] color. The second image reveals several [B] labeled points. Which point matches the original?",
-    "The first image features a point indicated in [A] color. Multiple [B] labeled points appear in the second image. Which one matches the original?",
-    "In image one, a point is indicated in [A] color. In the second image, there are several [B] labeled points. Can you identify the corresponding point?",
+    "The first image shows a marked query point. The second image shows several labeled candidate points. Which one corresponds to the original?",
+    "In image one, a query point is highlighted. In the second image, multiple labeled candidate points are shown. Identify the corresponding point.",
+    "The first image marks a query point. The second image presents several labeled candidate points. Which one matches the original?",
+    "The first image shows a highlighted query point. The second image reveals several labeled candidate points. Which point matches the original?",
+    "The first image features an indicated query point. Multiple labeled candidate points appear in the second image. Which one matches the original?",
+    "In image one, a query point is indicated. In the second image, there are several labeled candidate points. Can you identify the corresponding point?",
 ]
 
 point2point_oe_stems_num = [
-    "The first image shows a point marked in [A] color. The second image shows several [B] points labeled 1–4. Which one corresponds to the original?",
-    "In image one, a point is highlighted in [A] color. In the second image, multiple [B] points labeled 1, 2, 3, 4 are shown. Identify the corresponding point.",
-    "The first image marks a point in [A] color. The second image presents several [B] points labeled 1–4. Which one matches the original?",
-    "The first image shows a point highlighted in [A] color. The second image reveals several [B] points labeled 1, 2, 3, 4. Which point matches the original?",
-    "The first image features a point indicated in [A] color. Multiple [B] points labeled 1–4 appear in the second image. Which one matches the original?",
-    "In image one, a point is indicated in [A] color. In the second image, there are several [B] points labeled 1, 2, 3, 4. Can you identify the corresponding point?",
+    "The first image shows a marked query point. The second image shows several candidate points labeled 1-4. Which one corresponds to the original?",
+    "In image one, a query point is highlighted. In the second image, multiple candidate points labeled 1, 2, 3, and 4 are shown. Identify the corresponding point.",
+    "The first image marks a query point. The second image presents several candidate points labeled 1-4. Which one matches the original?",
+    "The first image shows a highlighted query point. The second image reveals several candidate points labeled 1, 2, 3, and 4. Which point matches the original?",
+    "The first image features an indicated query point. Multiple candidate points labeled 1-4 appear in the second image. Which one matches the original?",
+    "In image one, a query point is indicated. In the second image, there are several candidate points labeled 1, 2, 3, and 4. Can you identify the corresponding point?",
 ]
 
 # MCQ: options inserted via [O] (handler fills shared["O"]).
 point2point_mcq_stems = [
-    "The first image shows a point marked in [A] color. Which [B] point in the second image is the corresponding match? [O]",
-    "In image one, a point is highlighted in [A] color. Select the matching point from the second image. [O]",
-    "The first image marks a point in [A] color. Which option identifies the corresponding [B] point in image two? [O]",
-    "A point is highlighted in [A] on the first image. Choose the corresponding point on the second image. [O]",
-    "Image one shows a [A] marked query point. Which labeled point on image two corresponds? [O]",
+    "The first image shows a marked query point. Which labeled point in the second image is the corresponding match? [O]",
+    "In image one, a query point is highlighted. Select the matching point from the second image. [O]",
+    "The first image marks a query point. Which option identifies the corresponding point in image two? [O]",
+    "A query point is highlighted in the first image. Choose the corresponding point in the second image. [O]",
+    "Image one shows a marked query point. Which labeled point in image two corresponds? [O]",
 ]
 
 point2point_mcq_stems_num = [
-    "The first image shows a point marked in [A] color. Which option identifies the corresponding [B] point on image two? [O]",
-    "In image one, a point is highlighted in [A] color. Select the matching point from the options. [O]",
-    "The first image marks a point in [A] color. Which [B] point in the second image is the match? [O]",
-    "A point is indicated in [A] on the first image. Choose the corresponding point from the list. [O]",
-    "Image one shows a [A] query point. Pick the matching point on image two. [O]",
+    "The first image shows a marked query point. Which option identifies the corresponding point in image two? [O]",
+    "In image one, a query point is highlighted. Select the matching point from the options. [O]",
+    "The first image marks a query point. Which point in the second image is the match? [O]",
+    "A query point is indicated in the first image. Choose the corresponding point from the list. [O]",
+    "Image one shows a query point. Pick the matching point in image two. [O]",
 ]
 
 correspondence_oe_sentence_instructions = [
@@ -61,20 +61,20 @@ correspondence_mcq_sentence_instructions = [
     "Give your answer as a complete sentence naming the chosen option.",
 ]
 
-# [A]=query color, [B]=candidate color; [L]=point label only (point-A / point-1);
-# [E]=MCQ option letter (always A–D, matches Options line); [T]=full option text (A. point-A / A. point-1).
+# [L]=point label only (Point A / Point 1);
+# [E]=MCQ option letter (always A–D, matches Options line); [T]=full option text (A. Point A / A. Point 1).
 correspondence_oe_sentence_answers = [
-    "The point [L] in image 2 corresponds to the [A] marked point in image 1.",
-    "In image 2, [L] matches the [A] query point shown in image 1.",
-    "The [B] point [L] in the second image is the same location as the [A] point in the first image.",
-    "Image 2's [L] aligns with the [A] highlighted point in image 1.",
+    "[L] in image 2 corresponds to the marked query point in image 1.",
+    "In image 2, [L] matches the query point shown in image 1.",
+    "[L] in the second image is the same location as the query point in the first image.",
+    "Image 2's [L] aligns with the highlighted query point in image 1.",
 ]
 
 correspondence_mcq_sentence_answers = [
-    "In image 2, [L] matches the [A] query point shown in image 1. Therefore the correct option is [E].",
-    "The point [L] in image 2 corresponds to the [A] marked point in image 1. So the answer is [E].",
-    "The [B] point [L] in the second image is the same location as the [A] point in image 1. The correct option is [E].",
-    "Image 2's [L] aligns with the [A] highlighted point in image 1. Therefore the answer is [E].",
+    "In image 2, [L] matches the query point shown in image 1. Therefore the correct option is [E].",
+    "[L] in image 2 corresponds to the marked query point in image 1. So the answer is [E].",
+    "[L] in the second image is the same location as the query point in image 1. The correct option is [E].",
+    "Image 2's [L] aligns with the highlighted query point in image 1. Therefore the answer is [E].",
 ]
 
 from ..annotation.core.structured_prompt_template import AnswerInstructionProfile

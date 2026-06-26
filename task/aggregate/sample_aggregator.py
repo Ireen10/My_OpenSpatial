@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
@@ -17,7 +18,7 @@ import pandas as pd
 
 from task.base_task import BaseTask
 from utils.parquet_io import load_parquet_dataframe, resolve_task_output_dir
-from task.aggregate.fingerprint import image_refs_from_row, pick_dedup_winner
+from task.aggregate.fingerprint import image_refs_from_row, mark_spec_norm
 from task.aggregate.turn_io import (
     TurnRecord,
     _conversations_from_row,
@@ -71,6 +72,98 @@ def _json_dumps(obj: Any) -> str:
     return json.dumps(_json_safe(obj), ensure_ascii=False)
 
 
+def _iter_mark_slots(mark_spec: Optional[dict]) -> List[tuple[int, dict]]:
+    mark_spec = _json_safe(mark_spec)
+    if not isinstance(mark_spec, dict):
+        return []
+    out: List[tuple[int, dict]] = []
+    views = mark_spec.get("views")
+    if isinstance(views, list):
+        for v in views:
+            if not isinstance(v, dict):
+                continue
+            try:
+                vi = int(v.get("view_index", 0))
+            except (TypeError, ValueError):
+                vi = 0
+            for slot in v.get("slots") or []:
+                if isinstance(slot, dict):
+                    out.append((vi, slot))
+        return out
+    for slot in mark_spec.get("slots") or []:
+        if not isinstance(slot, dict):
+            continue
+        try:
+            vi = int(slot.get("view_index", 0))
+        except (TypeError, ValueError):
+            vi = 0
+        out.append((vi, slot))
+    return out
+
+
+def _slot_identity(view_index: int, slot: dict) -> str:
+    geom = slot.get("geometry") or {}
+    if not isinstance(geom, dict):
+        geom = {}
+    box = geom.get("box_2d")
+    uv = geom.get("uv")
+    body = {
+        "view_index": int(view_index),
+        "slot_id": slot.get("slot_id"),
+        "obj_idx": slot.get("obj_idx"),
+        "tag": slot.get("tag"),
+        "mark_kind": slot.get("mark_kind"),
+        "geometry": {
+            "box_2d": [round(float(v), 4) for v in box] if box is not None else None,
+            "uv": [int(uv[0]), int(uv[1])] if uv is not None else None,
+            "mask_ref": geom.get("mask_ref") if isinstance(geom.get("mask_ref"), dict) else None,
+        },
+    }
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _mark_surface(slot: dict) -> Optional[str]:
+    tag = str(slot.get("tag") or "").strip()
+    color = str(slot.get("color_name") or "").strip()
+    kind = str(slot.get("mark_kind") or "box").strip()
+    if not tag or not color or not kind:
+        return None
+    return f"{tag}-({color} {kind})"
+
+
+def _mark_surface_replacements(
+    source_mark_spec: Optional[dict],
+    target_mark_spec: Optional[dict],
+) -> List[tuple[str, str]]:
+    target_by_identity = {
+        _slot_identity(vi, slot): slot
+        for vi, slot in _iter_mark_slots(target_mark_spec)
+    }
+    replacements: List[tuple[str, str]] = []
+    for vi, source_slot in _iter_mark_slots(source_mark_spec):
+        target_slot = target_by_identity.get(_slot_identity(vi, source_slot))
+        if not target_slot:
+            continue
+        old = _mark_surface(source_slot)
+        new = _mark_surface(target_slot)
+        if old and new and old != new:
+            replacements.append((old, new))
+    return replacements
+
+
+def _replace_mark_surfaces(value: Any, replacements: List[tuple[str, str]]) -> Any:
+    if isinstance(value, str):
+        out = value
+        for old, new in replacements:
+            out = re.sub(re.escape(old), new, out, flags=re.IGNORECASE)
+        return out
+    if isinstance(value, dict):
+        return {k: _replace_mark_surfaces(v, replacements) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_replace_mark_surfaces(v, replacements) for v in value]
+    return value
+
+
 class SampleAggregator(BaseTask):
     """M4 + M5: dedup within task_name, merge by merge_group_key."""
 
@@ -81,7 +174,7 @@ class SampleAggregator(BaseTask):
         self.input_tasks_prefix = (args.get("input_tasks_prefix") or "").strip()
         self.dedup_within_task = bool(args.get("dedup_within_task", True))
         self.merge_by_visual_input_group = bool(args.get("merge_by_visual_input_group", True))
-        self.dedup_keep_policy = args.get("dedup_keep_policy", "semantic_first")
+        self.dedup_keep_policy = args.get("dedup_keep_policy", "")
 
     def _resolve_task_ref(self, task_ref: str) -> str:
         ref = str(task_ref).strip().replace("\\", "/")
@@ -116,25 +209,6 @@ class SampleAggregator(BaseTask):
         return load_turns_from_parquet(dataset, task_name)
 
     @staticmethod
-    def _turn_match_signature(turn: dict) -> tuple:
-        ps = turn.get("prompt_struct") if isinstance(turn.get("prompt_struct"), dict) else {}
-        return (
-            turn.get("sub_task"),
-            turn.get("question_type"),
-            ps.get("template_id"),
-        )
-
-    @classmethod
-    def _pick_dedup_source_record(
-        cls, group: List[TurnRecord], winner_turn: dict,
-    ) -> TurnRecord:
-        sig = cls._turn_match_signature(winner_turn)
-        for rec in group:
-            if cls._turn_match_signature(rec.turn) == sig:
-                return rec
-        return group[0]
-
-    @staticmethod
     def _refresh_viz_from_row(rec: TurnRecord) -> None:
         convs = _conversations_from_row(rec.row)
         idx = int(rec.turn_index)
@@ -149,37 +223,6 @@ class SampleAggregator(BaseTask):
             rec.viz_prefix = vp
         rec.viz_n_images = vn
 
-    @classmethod
-    def dedup_turns(cls, records: List[TurnRecord], policy: str) -> tuple[List[TurnRecord], int]:
-        by_fp: Dict[str, List[TurnRecord]] = defaultdict(list)
-        for rec in records:
-            by_fp[rec.dedup_fingerprint].append(rec)
-
-        kept: List[TurnRecord] = []
-        removed = 0
-        for group in by_fp.values():
-            if len(group) == 1:
-                kept.append(group[0])
-            else:
-                winner_turn = pick_dedup_winner([g.turn for g in group], policy=policy)
-                src = cls._pick_dedup_source_record(group, winner_turn)
-                kept.append(TurnRecord(
-                    task_name=group[0].task_name,
-                    row=src.row,
-                    turn=winner_turn,
-                    source_order=min(g.source_order for g in group),
-                    turn_index=src.turn_index,
-                    viz_question=src.viz_question,
-                    viz_answer=src.viz_answer,
-                    viz_prefix=src.viz_prefix,
-                    viz_n_images=src.viz_n_images,
-                ))
-                kept[-1].enrich_keys()
-                if not (kept[-1].viz_question or kept[-1].viz_answer):
-                    cls._refresh_viz_from_row(kept[-1])
-                removed += len(group) - 1
-        return kept, removed
-
     @staticmethod
     def merge_turns(records: List[TurnRecord]) -> List[dict]:
         groups: Dict[str, List[TurnRecord]] = defaultdict(list)
@@ -191,21 +234,22 @@ class SampleAggregator(BaseTask):
             group.sort(key=_turn_merge_sort_key)
             row0 = group[0].row
             image_refs = image_refs_from_row(row0)
+            mark_spec = SampleAggregator._sample_mark_spec_for_group(group)
             turns = []
             for i, rec in enumerate(group):
-                t = {k: v for k, v in rec.turn.items() if k != "mark_spec"}
+                replacements = _mark_surface_replacements(
+                    SampleAggregator._record_mark_spec(rec), mark_spec,
+                )
+                t = {
+                    k: _replace_mark_surfaces(v, replacements)
+                    for k, v in rec.turn.items()
+                    if k != "mark_spec"
+                }
                 t["turn_id"] = i
                 turns.append(t)
 
-            messages_flat = SampleAggregator._turns_to_messages(group)
+            messages_flat = SampleAggregator._turns_to_messages(group, mark_spec)
             meta = row0.get("metadata") if isinstance(row0.get("metadata"), dict) else {}
-            mark_spec = None
-            for rec in group:
-                ms = rec.turn.get("mark_spec") or (meta.get("mark_spec") if isinstance(meta, dict) else None)
-                from task.aggregate.fingerprint import mark_spec_has_slots
-                if mark_spec_has_slots(ms):
-                    mark_spec = ms
-                    break
 
             visual_anchor = meta.get("visual_anchor") if isinstance(meta, dict) else {}
             if not visual_anchor:
@@ -233,15 +277,54 @@ class SampleAggregator(BaseTask):
         return samples
 
     @staticmethod
-    def _turns_to_messages(group: List[TurnRecord]) -> List[dict]:
+    def _record_mark_spec(rec: TurnRecord) -> Optional[dict]:
+        if isinstance(rec.turn, dict) and isinstance(rec.turn.get("mark_spec"), dict):
+            return rec.turn["mark_spec"]
+        meta = rec.row.get("metadata") if isinstance(rec.row.get("metadata"), dict) else {}
+        ms = meta.get("mark_spec") if isinstance(meta, dict) else None
+        return ms if isinstance(ms, dict) else None
+
+    @staticmethod
+    def _sample_mark_spec_for_group(group: List[TurnRecord]) -> Optional[dict]:
+        """Return the unique sample-level mark intent for this group, ignoring color."""
+        chosen: Optional[dict] = None
+        seen: Dict[str, dict] = {}
+        for rec in group:
+            ms = SampleAggregator._record_mark_spec(rec)
+            norm = mark_spec_norm(ms)
+            if norm is None:
+                continue
+            key = json.dumps(norm, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            seen.setdefault(key, ms)
+            if chosen is None:
+                chosen = ms
+        if len(seen) > 1:
+            details = [
+                f"{rec.task_name}[row={rec.source_order},turn={rec.turn_index}]"
+                for rec in group
+            ]
+            raise ValueError(
+                "Merge group contains multiple distinct mark intents; "
+                f"merge_group_key={group[0].merge_group_key}, records={details}"
+            )
+        return chosen
+
+    @staticmethod
+    def _turns_to_messages(
+        group: List[TurnRecord],
+        sample_mark_spec: Optional[dict] = None,
+    ) -> List[dict]:
         """Concatenate per-turn visualization Q/A (from annotation messages)."""
         out: List[dict] = []
         for rec in group:
             if not (rec.viz_question or rec.viz_answer):
                 SampleAggregator._refresh_viz_from_row(rec)
+            replacements = _mark_surface_replacements(
+                SampleAggregator._record_mark_spec(rec), sample_mark_spec,
+            )
             n_img = max(1, rec.viz_n_images or int(rec.turn.get("image_placeholder_count") or 1))
             prefix = (rec.viz_prefix or rec.turn.get("question_prefix") or "").strip()
-            body = (rec.viz_question or "").strip()
+            body = _replace_mark_surfaces((rec.viz_question or "").strip(), replacements)
             if prefix and body.startswith(prefix):
                 body = body[len(prefix):].lstrip()
             q = body
@@ -249,7 +332,8 @@ class SampleAggregator(BaseTask):
                 q = f"{prefix}\n\n{body}" if body else prefix
             q = " ".join(["<image>"] * n_img) + " " + q
             out.append({"from": "human", "value": q.strip()})
-            out.append({"from": "gpt", "value": (rec.viz_answer or "").strip()})
+            answer = _replace_mark_surfaces((rec.viz_answer or "").strip(), replacements)
+            out.append({"from": "gpt", "value": answer})
         return out
 
     def run(self, dataset: pd.DataFrame) -> pd.DataFrame:
@@ -257,15 +341,10 @@ class SampleAggregator(BaseTask):
         stats = {"turns_in": len(records), "dedup_removed": 0, "samples_out": 0}
 
         if self.dedup_within_task:
-            by_task: Dict[str, List[TurnRecord]] = defaultdict(list)
-            for rec in records:
-                by_task[rec.task_name].append(rec)
-            deduped: List[TurnRecord] = []
-            for task_recs in by_task.values():
-                kept, n = self.dedup_turns(task_recs, self.dedup_keep_policy)
-                deduped.extend(kept)
-                stats["dedup_removed"] += n
-            records = deduped
+            print(
+                ">>> Aggregate notice: dedup_within_task is ignored. "
+                "Annotation tasks are responsible for avoiding duplicate turns."
+            )
 
         if self.merge_by_visual_input_group:
             samples = self.merge_turns(records)

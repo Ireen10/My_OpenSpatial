@@ -3,7 +3,7 @@ Multiview distance: pair absolute (2 views) + N-ary farthest/closest (3–6 view
 
 Templates:
     multiview_distance.absolute.{direct,sentence,free}  (stems shared with singleview; + introduction)
-    multiview_distance.{farthest,closest}.{direct,reasoning,free}
+    multiview_distance.{farthest,closest}.{direct,sentence,reasoning,free}
 """
 
 from task.annotation.core.thread_rng import rng
@@ -28,14 +28,14 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         "pair_absolute_distance":  {"default": 1, "handler": "_generate_pair_absolute_distance"},
         "multi_relative_distance": {"default": 1, "handler": "_generate_multi_relative_distance"},
     }
-    _INSTRUCTION_MODES = ("direct", "reasoning", "free")
+    _INSTRUCTION_MODES = ("direct", "sentence", "reasoning", "free")
 
     def _pick_instruction_mode(self, graph) -> str:
-        """Reasoning/free question instructions require metric depth."""
+        """Reasoning requires metric depth; free chooses metric/semantic answer pools."""
         return pick_metric_gated_mode(
             self._INSTRUCTION_MODES,
             is_metric_depth=graph.is_metric_depth,
-            metric_only_modes=("reasoning", "free"),
+            metric_only_modes=("reasoning",),
         )
 
     def get_mark_config(self):
@@ -53,6 +53,11 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         B_cloud = self._clean_cloud(B_cloud)
 
         dist_m = compute_point_cloud_distance(A_cloud, B_cloud)
+        if not self.register_semantic_candidate(
+            "multiview_distance.absolute",
+            sorted([str(A_desc), str(B_desc)]),
+        ):
+            return None, None
         mode = pick_instruction_mode(ABSOLUTE_DISTANCE_MODES)
         tpl = f"multiview_distance.absolute.{mode}"
         x_val = format_distance_value(dist_m, scaling_factor=self.scaling_factor)
@@ -66,8 +71,6 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
     def multi_relative_distance_prompt_func(self, obj_infos, graph):
         """N-ary farthest/closest to a reference object across multi-view marks."""
         distance_type = rng().choice(["closest", "farthest"])
-        mode = self._pick_instruction_mode(graph)
-        tpl = f"multiview_distance.{distance_type}.{mode}"
 
         ref_idx = rng().randint(0, len(obj_infos) - 1)
         ref_desc, ref_cloud = obj_infos[ref_idx]
@@ -86,11 +89,20 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         all_descs = [d for _, d in distances]
         rng().shuffle(all_descs)
 
+        if not self.register_semantic_candidate(
+            "multiview_distance.relative", distance_type,
+            ref_desc, sorted(all_descs), target_desc,
+        ):
+            return None, None
+        mode = self._pick_instruction_mode(graph)
+        tpl = f"multiview_distance.{distance_type}.{mode}"
+
         prompt = self.render_structured_prompt(
             tpl,
             shared={"T": ", ".join(all_descs)},
             q_args={"X": ref_desc},
             a_args={"X": target_desc, "Y": ref_desc},
+            is_metric_depth=graph.is_metric_depth,
         )
         return prompt, tpl
 
@@ -107,6 +119,8 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         prompt, tpl = self.pair_absolute_distance_prompt_func(
             prompt_items[0], prompt_items[1],
         )
+        if prompt is None:
+            return None
         self._record_multiview_turn(
             "pair_absolute_distance", tpl, prompt, QuestionType.OPEN_ENDED, meta,
             mark_spec=self.marker.last_mark_spec,
@@ -122,6 +136,8 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         prompt, tpl = self.multi_relative_distance_prompt_func(
             self._marked_prompt_items(meta, objs), graph,
         )
+        if prompt is None:
+            return None
         labels = [chr(ord("A") + i) for i in range(len(objs))]
         self._record_multiview_turn(
             "multi_relative_distance", tpl, prompt, QuestionType.OPEN_ENDED, meta,

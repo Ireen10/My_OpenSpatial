@@ -1,7 +1,7 @@
 dataset:
   modality: image
   dataset_name: image_base
-  data_dir: /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/data_root/EmbodiedScan/preprocessed/arkitscenes/per_image/data-00000.parquet
+  data_dir: /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/data_root/EmbodiedScan/preprocessed/scannet/per_image/data-00000.parquet
   raw_data_root: /home/ma-user/work/preliminary_grounding/z00848098/code/My_OpenSpatial/data_root/EmbodiedScan/data/
 
 pipeline:
@@ -35,8 +35,10 @@ pipeline:
         device: "npu:0,npu:1,npu:2,npu:3"
         replicas_per_device: 1
         use_multi_processing: true
-        num_workers: 4
-        batch_size: 32
+        num_workers: 8                 # may exceed NPU replica count; workers wait on replica pool
+        postprocess_workers: 16        # CPU mask filtering/saving workers after NPU inference
+        batch_size: 16                # pipeline images per _refine() call
+        prompt_batch_size: 32        # flattened (image, tag, box) rows per SAM3 forward
 
     scene_fusion_stage:
       -

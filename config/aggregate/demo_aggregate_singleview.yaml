@@ -32,9 +32,9 @@ pipeline:
           - size
           - position
           - 3d_grounding
-        dedup_within_task: true
+        # Dedup is handled during annotation sampling; aggregate only merges turns.
+        dedup_within_task: false
         merge_by_visual_input_group: true
-        dedup_keep_policy: semantic_first
         output_dir:
 
     export_stage:
@@ -45,4 +45,7 @@ pipeline:
         view_scope: singleview
         skip_parquet: true
         schema_version: "1.1"
+        use_multi_processing: true
+        num_workers: 8
+        shard_size: 8192
         output_dir:

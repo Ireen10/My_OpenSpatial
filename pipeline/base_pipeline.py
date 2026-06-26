@@ -2,8 +2,11 @@ from utils.common import get_task_instance
 from utils.parquet_io import list_parquet_shards, resolve_task_output_dir
 from dataset import build_dataset
 import copy
+import json
 import os
+import time
 from collections import Counter
+from datetime import datetime, timezone
 
 
 class BasePipeline:
@@ -34,6 +37,38 @@ class BasePipeline:
     def _format_task_ref(stage_name, task_name, occurrence):
         """Format task reference as stage/task#N."""
         return f"{stage_name}/{task_name}#{occurrence}"
+
+    @staticmethod
+    def _utc_now_iso():
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _count_samples(data):
+        if data is None:
+            return 0
+        try:
+            return int(len(data))
+        except TypeError:
+            return 0
+
+    @staticmethod
+    def _avg_seconds(total_seconds, sample_count):
+        if not sample_count:
+            return None
+        return float(total_seconds) / float(sample_count)
+
+    @staticmethod
+    def _round_seconds(value):
+        return round(float(value), 6)
+
+    @staticmethod
+    def _write_json(path, payload):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp_path, path)
 
     def _resolve_dependency_path(self, depends_on, current_task_idx=None):
         """Resolve depends_on to a parquet file or task output directory.
@@ -162,6 +197,19 @@ class BasePipeline:
             self.dataset.override_data(resolved_path)
             self._truncate_dataset_if_needed()
 
+        self.timing_report = {
+            "schema_version": "1.0",
+            "pipeline": {
+                "output_root": self.output_root,
+                "task_count": len(self.task_queue),
+                "max_samples": self.max_samples,
+                "status": "initialized",
+                "created_at": self._utc_now_iso(),
+            },
+            "summary": {},
+            "tasks": [],
+        }
+
     def _truncate_dataset_if_needed(self) -> None:
         """Apply --max_samples truncation (no-op when not set)."""
         if self.dataset.data is None or not self.max_samples:
@@ -224,27 +272,204 @@ class BasePipeline:
         self.dataset.override_data(resolved_path)
         self._truncate_dataset_if_needed()
 
-    def run(self):
+    def _task_output_dir(self, task_info):
+        return self._resolve_output_path(
+            task_info["stage_name"],
+            task_info["task_name"],
+            task_info["task_cfg"],
+            task_info["rel_output_dir"],
+        )
+
+    def _pipeline_timing_path(self):
+        return os.path.join(self.output_root, "pipeline_timing_report.json")
+
+    def _write_pipeline_timing_report(self):
+        self._write_json(self._pipeline_timing_path(), self.timing_report)
+
+    def _write_task_timing_report(self, task_info, task_report):
+        output_dir = self._task_output_dir(task_info)
+        self._write_json(os.path.join(output_dir, "timing_report.json"), task_report)
+
+    def _record_task_timing(self, task_info, task_report):
+        self.timing_report["tasks"].append(task_report)
+        self._write_task_timing_report(task_info, task_report)
+        self._write_pipeline_timing_report()
+
+    def _build_task_report(
+        self,
+        task_info,
+        *,
+        status,
+        input_samples,
+        output_samples,
+        load_seconds,
+        run_seconds,
+        save_seconds,
+        error=None,
+    ):
+        total_seconds = load_seconds + run_seconds + save_seconds
+        return {
+            "stage_name": task_info["stage_name"],
+            "task_name": task_info["task_name"],
+            "task_ref": task_info["full_ref"],
+            "queue_index": task_info["queue_idx"],
+            "status": status,
+            "output_dir": self._task_output_dir(task_info),
+            "input_samples": int(input_samples),
+            "output_samples": int(output_samples),
+            "timing": {
+                "load_seconds": self._round_seconds(load_seconds),
+                "run_seconds": self._round_seconds(run_seconds),
+                "save_seconds": self._round_seconds(save_seconds),
+                "total_seconds": self._round_seconds(total_seconds),
+                "avg_total_per_input_sample_seconds": (
+                    None if input_samples == 0
+                    else self._round_seconds(self._avg_seconds(total_seconds, input_samples))
+                ),
+                "avg_run_per_input_sample_seconds": (
+                    None if input_samples == 0
+                    else self._round_seconds(self._avg_seconds(run_seconds, input_samples))
+                ),
+                "avg_total_per_output_sample_seconds": (
+                    None if output_samples == 0
+                    else self._round_seconds(self._avg_seconds(total_seconds, output_samples))
+                ),
+            },
+            **({"error": str(error)} if error is not None else {}),
+        }
+
+    def run(self, end_to_end_start_time=None):
         """Execute all tasks in pipeline sequentially."""
         print(">>> Running Pipeline...")
-        for i, task_info in enumerate(self.task_queue):
-            stage_name = task_info["stage_name"]
-            task_cfg = task_info["task_cfg"]
-            task_name = task_info["task_name"]
-            task = task_info["task"]
+        pipeline_start = time.perf_counter()
+        self.timing_report["pipeline"].update({
+            "status": "running",
+            "run_started_at": self._utc_now_iso(),
+        })
+        self._write_pipeline_timing_report()
 
-            if i > 0:
-                depends_on = getattr(task_cfg, "depends_on", None)
-                if depends_on:
-                    resolved = self._resolve_dependency_path(depends_on, current_task_idx=i)
-                    print(f">>> Loading data for {task_name} from: {resolved}")
-                else:
-                    print(f">>> Loading data from: {self.task_queue[i-1]['full_ref']}...")
-                self.load_task_data(task_name, task_cfg, current_task_idx=i)
+        try:
+            for i, task_info in enumerate(self.task_queue):
+                stage_name = task_info["stage_name"]
+                task_cfg = task_info["task_cfg"]
+                task_name = task_info["task_name"]
+                task = task_info["task"]
 
-            print(f">>> Running Task [{i+1}/{len(self.task_queue)}]: {task_name}...")
-            processed_data = task.run(copy.deepcopy(self.dataset.data))
-            self.save_task_data(stage_name, task_name, task_cfg, processed_data, task_info["rel_output_dir"])
+                load_seconds = 0.0
+                if i > 0:
+                    depends_on = getattr(task_cfg, "depends_on", None)
+                    if depends_on:
+                        resolved = self._resolve_dependency_path(depends_on, current_task_idx=i)
+                        print(f">>> Loading data for {task_name} from: {resolved}")
+                    else:
+                        print(f">>> Loading data from: {self.task_queue[i-1]['full_ref']}...")
+                    load_start = time.perf_counter()
+                    self.load_task_data(task_name, task_cfg, current_task_idx=i)
+                    load_seconds = time.perf_counter() - load_start
+
+                input_samples = self._count_samples(self.dataset.data)
+                print(f">>> Running Task [{i+1}/{len(self.task_queue)}]: {task_name}...")
+
+                run_start = time.perf_counter()
+                processed_data = None
+                try:
+                    processed_data = task.run(copy.deepcopy(self.dataset.data))
+                    run_seconds = time.perf_counter() - run_start
+
+                    output_samples = self._count_samples(processed_data)
+                    save_start = time.perf_counter()
+                    self.save_task_data(
+                        stage_name,
+                        task_name,
+                        task_cfg,
+                        processed_data,
+                        task_info["rel_output_dir"],
+                    )
+                    save_seconds = time.perf_counter() - save_start
+
+                    task_report = self._build_task_report(
+                        task_info,
+                        status="success",
+                        input_samples=input_samples,
+                        output_samples=output_samples,
+                        load_seconds=load_seconds,
+                        run_seconds=run_seconds,
+                        save_seconds=save_seconds,
+                    )
+                    self._record_task_timing(task_info, task_report)
+                    avg = task_report["timing"]["avg_total_per_input_sample_seconds"]
+                    print(
+                        f">>> Timing {task_info['full_ref']}: "
+                        f"{task_report['timing']['total_seconds']:.3f}s total"
+                        + (f", {avg:.6f}s/sample" if avg is not None else ""),
+                        flush=True,
+                    )
+                except Exception as exc:
+                    run_seconds = time.perf_counter() - run_start
+                    task_report = self._build_task_report(
+                        task_info,
+                        status="failed",
+                        input_samples=input_samples,
+                        output_samples=self._count_samples(processed_data),
+                        load_seconds=load_seconds,
+                        run_seconds=run_seconds,
+                        save_seconds=0.0,
+                        error=exc,
+                    )
+                    self._record_task_timing(task_info, task_report)
+                    raise
+
+            run_seconds_total = time.perf_counter() - pipeline_start
+            e2e_seconds = (
+                time.perf_counter() - end_to_end_start_time
+                if end_to_end_start_time is not None
+                else run_seconds_total
+            )
+            final_output_samples = (
+                self.timing_report["tasks"][-1]["output_samples"]
+                if self.timing_report["tasks"]
+                else 0
+            )
+            self.timing_report["pipeline"].update({
+                "status": "success",
+                "finished_at": self._utc_now_iso(),
+            })
+            self.timing_report["summary"] = {
+                "run_seconds": self._round_seconds(run_seconds_total),
+                "end_to_end_seconds": self._round_seconds(e2e_seconds),
+                "end_to_end_includes_pipeline_initialization": end_to_end_start_time is not None,
+                "task_total_seconds_sum": self._round_seconds(
+                    sum(t["timing"]["total_seconds"] for t in self.timing_report["tasks"])
+                ),
+                "final_dataset_samples": final_output_samples,
+                "avg_end_to_end_per_final_sample_seconds": (
+                    None if final_output_samples == 0
+                    else self._round_seconds(self._avg_seconds(e2e_seconds, final_output_samples))
+                ),
+            }
+            self._write_pipeline_timing_report()
+        except Exception as exc:
+            run_seconds_total = time.perf_counter() - pipeline_start
+            e2e_seconds = (
+                time.perf_counter() - end_to_end_start_time
+                if end_to_end_start_time is not None
+                else run_seconds_total
+            )
+            self.timing_report["pipeline"].update({
+                "status": "failed",
+                "finished_at": self._utc_now_iso(),
+                "error": str(exc),
+            })
+            self.timing_report["summary"] = {
+                "run_seconds": self._round_seconds(run_seconds_total),
+                "end_to_end_seconds": self._round_seconds(e2e_seconds),
+                "end_to_end_includes_pipeline_initialization": end_to_end_start_time is not None,
+                "task_total_seconds_sum": self._round_seconds(
+                    sum(t["timing"]["total_seconds"] for t in self.timing_report["tasks"])
+                ),
+            }
+            self._write_pipeline_timing_report()
+            raise
 
         print(">>> Pipeline Finished.")
 

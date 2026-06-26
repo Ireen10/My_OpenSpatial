@@ -24,7 +24,7 @@ pipeline:
         filter_tags: ["ceiling", "floor", "wall", "object"]
         output_dir:
         use_multi_processing: true
-        num_workers: 64              # CPU-bound (cv2/open3d/numpy release GIL)
+        num_workers: 32              # CPU-bound (cv2/open3d/numpy release GIL)
 
     localization_stage:
       -
@@ -43,7 +43,8 @@ pipeline:
         device: "npu:0,npu:1,npu:2,npu:3"
         replicas_per_device: 1
         use_multi_processing: true
-        num_workers: 4
+        num_workers: 8                 # may exceed NPU replica count; workers wait on replica pool
+        postprocess_workers: 16        # CPU mask filtering/saving workers after NPU inference
         batch_size: 16                # pipeline images per _refine() call
         prompt_batch_size: 32        # flattened (image, tag, box) rows per SAM3 forward
 
@@ -54,7 +55,11 @@ pipeline:
         depends_on: localization_stage/sam3_refiner
         output_dir:
         use_multi_processing: true
-        num_workers: 64              # CPU-bound (numpy/open3d release GIL)
+        num_workers: 32
+        parallel_backend: thread
+        max_points_per_object: 20000
+        min_points_per_object: 30
+        enable_outlier_removal: true
 
     # Per-scene multiview input (347 per-image rows → N scenes by scene_id).
     # Output: group_stage/group/data.parquet — point demo_multiview_all_frame_rot.yaml data_dir here.

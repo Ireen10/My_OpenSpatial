@@ -155,12 +155,17 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
             return None
 
         dir_B2anchor = dir_B2anchors[rng().choice([1, 2])]
-        answer_mode = self._pick_answer_mode(question_type)
         base = (
             f"multiview_position.{frame}"
             if question_type == QuestionType.OPEN_ENDED
             else f"multiview_position.{frame}_mcq"
         )
+        if not self.register_semantic_candidate(
+            "multiview_position", "MCQ" if question_type == QuestionType.MCQ else "OE",
+            frame, A_desc, B_desc, anchor_desc, dir_A2anchor, dir_B2anchor,
+        ):
+            return None
+        answer_mode = self._pick_answer_mode(question_type)
         tpl = f"{base}.{answer_mode}"
         tpl_obj = self.get_structured_template(tpl)
         stem_i = rng().randrange(len(tpl_obj.stem))

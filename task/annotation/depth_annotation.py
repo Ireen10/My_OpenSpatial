@@ -261,6 +261,10 @@ class AnnotationGenerator(BaseAnnotationTask):
         is_points = t_label.startswith("points")
 
         if qtype == QuestionType.OPEN_ENDED:
+            if not self.register_semantic_candidate(
+                "depth.ordering", "OE", t_label, tags_sem, sorted_sem,
+            ):
+                return None, None
             mode = pick_instruction_mode(_DEPTH_INSTRUCTION_MODES)
             tpl = f"depth.ordering.{mode}"
             prompt = self.render_structured_prompt(
@@ -278,6 +282,10 @@ class AnnotationGenerator(BaseAnnotationTask):
                 sorted_semantic=sorted_sem,
             )
         else:
+            if not self.register_semantic_candidate(
+                "depth.ordering", "MCQ", t_label, tags_sem, sorted_sem,
+            ):
+                return None, None
             mode = pick_instruction_mode(_DEPTH_INSTRUCTION_MODES)
             tpl = f"depth.ordering_mcq.{mode}"
             wrong_perms = []
@@ -320,8 +328,6 @@ class AnnotationGenerator(BaseAnnotationTask):
         r = rng().random()
         question_type = "farthest" if r < 0.4 else ("closest" if r < 0.8 else "choice")
         base = f"depth.{question_type}" + ("_mcq" if qtype == QuestionType.MCQ else "")
-        mode = pick_instruction_mode(_DEPTH_INSTRUCTION_MODES)
-        tpl_name = f"{base}.{mode}"
         obj_str = ', '.join(tags)
 
         if question_type == "farthest":
@@ -330,6 +336,14 @@ class AnnotationGenerator(BaseAnnotationTask):
             correct_idx = 0
         else:
             correct_idx = rng().randint(0, len(sorted_sem) - 1)
+
+        if not self.register_semantic_candidate(
+            "depth.choice", "MCQ" if qtype == QuestionType.MCQ else "OE",
+            question_type, t_label, tags_sem, correct_idx, sorted_sem[correct_idx],
+        ):
+            return None, None
+        mode = pick_instruction_mode(_DEPTH_INSTRUCTION_MODES)
+        tpl_name = f"{base}.{mode}"
 
         if qtype == QuestionType.OPEN_ENDED:
             shared = {"T": t_label, "A": obj_str, "X": str(sorted_sem[correct_idx])}

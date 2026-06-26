@@ -61,15 +61,17 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         is_bigger = d_A > d_B
         condition = is_bigger if "big" in tpl_name else not is_bigger
 
+        if not self.register_semantic_candidate(
+            "multiview_size.pair", tpl_name,
+            sorted([str(A_desc), str(B_desc)]), bool(condition),
+        ):
+            return None, None
         prompt = self.render_structured_prompt(tpl_name, condition=condition, shared={"A": A_desc, "B": B_desc})
         return prompt, tpl_name
 
     def multi_relative_size_prompt_func(self, obj_infos, boxes_3d_world=None):
         """Generate a superlative size QA for N objects from different views."""
         size_type = rng().choice(["biggest", "smallest"])
-        mode = pick_instruction_mode(self._SUPERLATIVE_MODES)
-        tpl_name = f"multiview_size.{size_type}.{mode}"
-
         diags = []
         for i, (desc, cloud) in enumerate(obj_infos):
             d = self._diag_from_box_or_cloud(
@@ -87,6 +89,14 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         target_desc = diags[0][1]
         all_tags = [d for _, d in diags]
         rng().shuffle(all_tags)
+
+        if not self.register_semantic_candidate(
+            "multiview_size.superlative", size_type,
+            sorted(all_tags), target_desc,
+        ):
+            return None, None
+        mode = pick_instruction_mode(self._SUPERLATIVE_MODES)
+        tpl_name = f"multiview_size.{size_type}.{mode}"
 
         prompt = self.render_structured_prompt(
             tpl_name, shared={"T": ", ".join(all_tags), "X": target_desc},

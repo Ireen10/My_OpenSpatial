@@ -66,8 +66,8 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
     def _correspondence_option_markers(use_numeric_labels: bool):
         """Option labels shared by MCQ options and OE answers (letter + point id)."""
         if use_numeric_labels:
-            return [f"{letter}. point-{n}" for letter, n in zip("ABCD", "1234")]
-        return [f"{letter}. point-{letter}" for letter in "ABCD"]
+            return [f"{letter}. Point {n}" for letter, n in zip("ABCD", "1234")]
+        return [f"{letter}. Point {letter}" for letter in "ABCD"]
 
     def point_correspondence_prompt_func(self, question_color, candidate_color, gt_answer, question_type=QuestionType.OPEN_ENDED):
         """Build a point correspondence QA string.
@@ -89,7 +89,7 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
         idx = label_order.index(gt_answer)
         full_option = markers[idx]
         option_letter = "ABCD"[idx]
-        point_label = f"point-{gt_answer}"
+        point_label = f"Point {gt_answer}"
         answer_slots = {
             "L": point_label,
             "E": option_letter,
@@ -318,7 +318,17 @@ class AnnotationGenerator(BaseMultiviewAnnotationTask):
             image1, image2, point1, point2, uv_candidates, meta,
         )
 
+        key_points = [point1, point2] + list(uv_candidates or [])
+        if not self.register_semantic_candidate(
+            "multiview_correspondence.point2point",
+            "MCQ" if question_type == QuestionType.MCQ else "OE",
+            key_points,
+            gt_answer,
+        ):
+            return None
         prompt, tpl = self.point_correspondence_prompt_func(color1, color2, gt_answer, question_type)
+        if prompt is None:
+            return None
         qtype = QuestionType.MCQ if question_type == QuestionType.MCQ else QuestionType.OPEN_ENDED
         sub = "point_correspondence_mcq" if qtype == QuestionType.MCQ else "point_correspondence_oe"
         self._record_turn(

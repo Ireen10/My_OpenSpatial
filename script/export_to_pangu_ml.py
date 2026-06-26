@@ -27,6 +27,7 @@ Image tar paths: ``{safe_sample_id}_{view_index:02d}.jpg`` (or .png).
 from __future__ import annotations
 
 import argparse
+import copy
 import io
 import json
 import os
@@ -35,10 +36,11 @@ import re
 import sys
 import tarfile
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import threading
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
@@ -57,6 +59,7 @@ for _pkg in ("task", "task.annotation", _CORE_PKG):
         sys.modules[_pkg] = _mod
 
 from dataset.upstream_export import (  # noqa: E402
+    DATASET_METADATA_FILENAME,
     discover_shard_pairs,
     normalize_messages,
     resolve_shard_image,
@@ -68,11 +71,29 @@ from task.annotation.core.mark_spec import (  # noqa: E402
     render_mark,
     slots_for_view,
 )
+from task.annotation.core.visual_marker import COLOR_QUEUE_DEFAULT  # noqa: E402
 
 try:
     from tqdm import tqdm
 except ImportError:  # pragma: no cover
     tqdm = None  # type: ignore[misc, assignment]
+
+try:
+    import orjson as _orjson  # type: ignore
+except ImportError:  # pragma: no cover
+    _orjson = None
+
+
+def _json_load_line(line: str) -> Dict[str, Any]:
+    if _orjson is not None:
+        return _orjson.loads(line)
+    return json.loads(line)
+
+
+def _json_dump_line(obj: Dict[str, Any]) -> str:
+    if _orjson is not None:
+        return _orjson.dumps(obj, option=_orjson.OPT_APPEND_NEWLINE).decode("utf-8")
+    return json.dumps(obj, ensure_ascii=False) + "\n"
 
 ROLE_MAP = {"human": "user", "gpt": "assistant"}
 MIME_PNG = "image/png"
@@ -93,6 +114,9 @@ PANGU_SHARD_BASENAME_FMT = "data_{:06d}"
 LEGACY_MARK_SUFFIX_RE = re.compile(
     r"\b(\w+)-\(\s*(\w+)\s+(box|mask|point)\s*\)",
     flags=re.IGNORECASE,
+)
+MARKED_INFO_LIST_RE = re.compile(
+    r"\[\s*\('[^']+'\s*,\s*None\)(?:\s*,\s*\('[^']+'\s*,\s*None\))*\s*\]"
 )
 
 # Short parenthetical phrases; ``{color}`` filled at replace time.
@@ -142,6 +166,125 @@ def convert_legacy_marks_to_natural(text: str) -> str:
     return re.sub(r"  +", " ", out).strip()
 
 
+def repair_marked_info_leak_text(text: str) -> str:
+    """Repair prompts that accidentally stringified ``marked_info`` tuple lists."""
+    out = text or ""
+    list_pat = MARKED_INFO_LIST_RE.pattern
+    replacements = (
+        (rf"shows a point marked in {list_pat} color", "shows a marked query point"),
+        (rf"marks a point in {list_pat} color", "marks a query point"),
+        (rf"features a point indicated in {list_pat} color", "features an indicated query point"),
+        (rf"a point is highlighted in {list_pat} color", "a query point is highlighted"),
+        (rf"a point is indicated in {list_pat} color", "a query point is indicated"),
+        (rf"a {list_pat} marked query point", "a marked query point"),
+        (rf"the {list_pat} marked point", "the marked query point"),
+        (rf"the {list_pat} query point", "the query point"),
+        (rf"the {list_pat} highlighted point", "the highlighted query point"),
+        (rf"several {list_pat} labeled points", "several labeled candidate points"),
+        (rf"multiple {list_pat} labeled points", "multiple labeled candidate points"),
+    )
+    for pattern, repl in replacements:
+        out = re.sub(pattern, repl, out, flags=re.IGNORECASE)
+    out = re.sub(r"\b[Tt]he point point-([A-D1-4])\b", r"Point \1", out)
+    out = re.sub(r"\bpoint-([A-D1-4])\b", r"Point \1", out)
+    return re.sub(r"  +", " ", out).strip()
+
+
+def normalize_export_text(text: str) -> str:
+    """Final lightweight cleanup after mark rewriting."""
+    out = WHITESPACE_RE.sub(" ", str(text or "")).strip()
+    if not out:
+        return ""
+    if out[0] in "[{":
+        return out
+    if out[0].isalpha():
+        return out[0].upper() + out[1:]
+    return out
+
+
+def repair_legacy_distance_question_text(text: str) -> str:
+    """Repair older superlative distance stems baked into existing exports."""
+    out = text or ""
+
+    def _repl(match: re.Match) -> str:
+        candidates = match.group(1).strip()
+        metric = match.group(2).strip()
+        target = match.group(3).strip()
+        article = "" if target.lower().startswith(("the ", "a ", "an ")) else "the "
+        return (
+            f"Which object among the listed objects ({candidates}) "
+            f"has the {metric} to {article}{target}?"
+        )
+
+    return re.sub(
+        r"\bWhich object in ([^?]+?) has the "
+        r"((?:minimum|maximum|smallest|greatest) distance) to ([^?]+?)\?",
+        _repl,
+        out,
+        flags=re.IGNORECASE,
+    )
+
+
+def assign_export_colors(mark_spec: Optional[dict]) -> Tuple[Optional[dict], List[dict]]:
+    """Assign final render colors at export time; return (colored_spec, replacements)."""
+    if not isinstance(mark_spec, dict):
+        return mark_spec, []
+
+    out = copy.deepcopy(mark_spec)
+    colors = list(COLOR_QUEUE_DEFAULT)
+    random.shuffle(colors)
+    replacements: List[dict] = []
+    i = 0
+
+    def _colorize_slot(slot: dict) -> None:
+        nonlocal i
+        if not isinstance(slot, dict):
+            return
+        old = slot.get("color_name")
+        new = colors[i % len(colors)]
+        i += 1
+        slot["color_name"] = new
+        replacements.append({
+            "tag": str(slot.get("tag") or ""),
+            "kind": str(slot.get("mark_kind") or "box"),
+            "old_color": str(old or ""),
+            "new_color": new,
+        })
+
+    views = out.get("views")
+    if isinstance(views, list):
+        for view in views:
+            if not isinstance(view, dict):
+                continue
+            for slot in view.get("slots") or []:
+                _colorize_slot(slot)
+        return out, replacements
+
+    for slot in out.get("slots") or []:
+        _colorize_slot(slot)
+    return out, replacements
+
+
+def _apply_export_color_replacements(text: str, replacements: List[dict]) -> str:
+    out = text or ""
+    for repl in replacements:
+        tag = repl.get("tag") or ""
+        kind = repl.get("kind") or "box"
+        old = repl.get("old_color") or ""
+        new = repl.get("new_color") or ""
+        if not tag or not new:
+            continue
+        if old:
+            pattern = rf"\b{re.escape(tag)}-\(\s*{re.escape(old)}\s+{re.escape(kind)}\s*\)"
+            out = re.sub(
+                pattern,
+                f"{tag}-({new} {kind})",
+                out,
+                flags=re.IGNORECASE,
+            )
+    return out
+
+
 def count_legacy_mark_tokens(text: str) -> int:
     return len(LEGACY_MARK_SUFFIX_RE.findall(text or ""))
 
@@ -151,6 +294,38 @@ def count_legacy_marks_in_pairs(pairs: List[Tuple[str, str]]) -> int:
         count_legacy_mark_tokens(q) + count_legacy_mark_tokens(a)
         for q, a in pairs
     )
+
+
+def _legacy_mark_tokens_in_pairs(pairs: List[Tuple[str, str]]) -> List[Tuple[str, str, str]]:
+    tokens: List[Tuple[str, str, str]] = []
+    for q, a in pairs:
+        for tag, color, kind in LEGACY_MARK_SUFFIX_RE.findall(f"{q} {a}"):
+            tokens.append((tag.lower(), color.lower(), kind.lower()))
+    return tokens
+
+
+def _slot_render_key(slot: dict) -> Tuple[str, str, str]:
+    return (
+        str(slot.get("tag") or "").lower(),
+        str(slot.get("color_name") or "").lower(),
+        str(slot.get("mark_kind") or "box").lower(),
+    )
+
+
+def _token_has_renderable_slot(
+    token: Tuple[str, str, str],
+    slot_keys: set[Tuple[str, str, str]],
+) -> bool:
+    tag, color, kind = token
+    for slot_tag, slot_color, slot_kind in slot_keys:
+        if color != slot_color or kind != slot_kind:
+            continue
+        # LEGACY_MARK_SUFFIX_RE intentionally remains narrow for conversion, but
+        # audit should not flag multi-word tags like "washing machine-(red box)"
+        # just because the regex captures the final word.
+        if tag == slot_tag or slot_tag.endswith(f" {tag}"):
+            return True
+    return False
 
 
 def slot_has_renderable_geometry(slot: dict) -> bool:
@@ -217,6 +392,29 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="RNG seed for mark phrase randomization (per-shard: seed + shard_index).",
+    )
+    parser.add_argument(
+        "--intra-shard-workers",
+        type=int,
+        default=4,
+        help=(
+            "Per-file worker threads inside each shard process. "
+            "Set 1 to disable intra-shard threading."
+        ),
+    )
+    parser.add_argument(
+        "--enable-audit",
+        action="store_true",
+        help="Enable mark audit stats (slower).",
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=1000,
+        help=(
+            "Per-shard progress log interval in samples (inside worker process). "
+            "Set 0 to disable."
+        ),
     )
     parser.add_argument(
         "--no-progress",
@@ -384,15 +582,28 @@ def audit_sample_marks(
         if spec_slots > 0 and n == 0:
             views_no_render += 1
 
-    mismatch = int(legacy > 0 and renderable < legacy)
+    slot_keys = {
+        _slot_render_key(s)
+        for s in all_slots_flat(sample_mark_spec)
+        if isinstance(s, dict) and slot_has_renderable_geometry(s)
+    } if sample_mark_spec else set()
+    missing_tokens = [
+        token for token in set(_legacy_mark_tokens_in_pairs(pairs))
+        if not _token_has_renderable_slot(token, slot_keys)
+    ]
+    mismatch = int(bool(missing_tokens))
     return legacy, renderable, views_no_render, mismatch
 
 
-def apply_marked_text(text: str, _mark_spec: Optional[dict] = None) -> str:
+def apply_marked_text(text: str, color_replacements: Optional[List[dict]] = None) -> str:
     stripped = strip_image_placeholder_tokens(text)
     if not stripped:
         return ""
-    return convert_legacy_marks_to_natural(stripped)
+    stripped = repair_marked_info_leak_text(stripped)
+    recolored = _apply_export_color_replacements(stripped, color_replacements or [])
+    natural = convert_legacy_marks_to_natural(recolored)
+    natural = repair_legacy_distance_question_text(natural)
+    return normalize_export_text(natural)
 
 
 def render_marked_image_bytes(
@@ -401,15 +612,14 @@ def render_marked_image_bytes(
     *,
     view_index: int,
 ) -> bytes:
-    from PIL import Image
-
-    img = Image.open(io.BytesIO(raw_bytes))
     if mark_spec and isinstance(mark_spec, dict) and mark_spec.get("slots") is not None and not mark_spec.get("views"):
         # Already a one-view flat spec (e.g. from combined_mark_spec_for_view).
         flat = mark_spec
     else:
         flat = flat_mark_spec_for_view(mark_spec, view_index) if mark_spec else None
     if flat and flat.get("slots"):
+        from PIL import Image
+        img = Image.open(io.BytesIO(raw_bytes))
         out = render_mark(img, flat, view_index=0)
         return out["bytes"]
     return encode_image_for_pangu_tar(raw_bytes)[0]
@@ -472,6 +682,7 @@ def build_pangu_sample(
     sample_mark_spec = metadata.get("mark_spec")
     if sample_mark_spec is not None and not isinstance(sample_mark_spec, dict):
         sample_mark_spec = None
+    sample_mark_spec, color_replacements = assign_export_colors(sample_mark_spec)
 
     turn_specs_raw = metadata.get("turns") or []
     for turn in turn_specs_raw:
@@ -494,7 +705,7 @@ def build_pangu_sample(
     first_user_content: List[Dict[str, Any]] = []
     for rel, _b, w, h, mime in image_rows:
         first_user_content.append(to_image_content(rel, w, h, mime))
-    q0 = apply_marked_text(first_q, sample_mark_spec)
+    q0 = apply_marked_text(first_q, color_replacements)
     if q0:
         first_user_content.append(to_text_content(q0))
     if not first_user_content:
@@ -502,15 +713,15 @@ def build_pangu_sample(
 
     data.append({"role": "user", "content": first_user_content})
 
-    a0 = apply_marked_text(first_a, sample_mark_spec)
+    a0 = apply_marked_text(first_a, color_replacements)
     if not a0:
         return None, [], "empty_first_answer"
     data.append({"role": "assistant", "content": [to_text_content(a0)]})
 
     for ti in range(1, len(pairs)):
         q_raw, a_raw = pairs[ti]
-        q = apply_marked_text(q_raw, sample_mark_spec)
-        a = apply_marked_text(a_raw, sample_mark_spec)
+        q = apply_marked_text(q_raw, color_replacements)
+        a = apply_marked_text(a_raw, color_replacements)
         if not q:
             return None, [], f"empty_question_turn_{ti}"
         if not a:
@@ -544,6 +755,9 @@ class ShardJob:
     global_index_start: int
     max_converted: Optional[int] = None
     seed: Optional[int] = None
+    intra_shard_workers: int = 1
+    enable_audit: bool = False
+    progress_every: int = 1000
 
 
 def _merge_stats(into: ConvertStats, other: ConvertStats) -> None:
@@ -557,28 +771,131 @@ def _merge_stats(into: ConvertStats, other: ConvertStats) -> None:
     into.mark_text_render_mismatch += other.mark_text_render_mismatch
 
 
-def write_shard(
-    shard_index: int,
-    samples: List[Dict[str, Any]],
-    tar_members_by_sample: List[List[Tuple[str, bytes]]],
-    output_root: Path,
-) -> None:
+_THREAD_STATE = threading.local()
+
+
+def _prepare_output_paths(shard_index: int, output_root: Path) -> Tuple[Path, Path]:
     jsonl_dir = output_root / "jsonl"
     images_dir = output_root / "images"
     jsonl_dir.mkdir(parents=True, exist_ok=True)
     images_dir.mkdir(parents=True, exist_ok=True)
-
     base = PANGU_SHARD_BASENAME_FMT.format(shard_index)
     jsonl_path = jsonl_dir / f"{base}.jsonl"
     tar_path = images_dir / f"{base}.tar"
+    return jsonl_path, tar_path
 
-    with open(jsonl_path, "w", encoding="utf-8") as jf, tarfile.open(tar_path, "w") as tar:
-        for sample, members in zip(samples, tar_members_by_sample):
-            jf.write(json.dumps(sample, ensure_ascii=False) + "\n")
-            for rel_path, blob in members:
-                info = tarfile.TarInfo(name=rel_path)
-                info.size = len(blob)
-                tar.addfile(tarinfo=info, fileobj=io.BytesIO(blob))
+
+def _write_one_sample(
+    jf,
+    tar,
+    sample: Dict[str, Any],
+    members: List[Tuple[str, bytes]],
+) -> None:
+    jf.write(_json_dump_line(sample))
+    for rel_path, blob in members:
+        info = tarfile.TarInfo(name=rel_path)
+        info.size = len(blob)
+        tar.addfile(tarinfo=info, fileobj=io.BytesIO(blob))
+
+
+def _close_tar_cache(cache: dict) -> None:
+    try:
+        if "tar" in cache:
+            cache["tar"].close()
+    except Exception:
+        pass
+
+
+def _get_thread_tar_cache(
+    cache_registry: List[dict],
+    registry_lock: threading.Lock,
+) -> dict:
+    cache = getattr(_THREAD_STATE, "tar_cache", None)
+    if cache is None:
+        cache = {}
+        _THREAD_STATE.tar_cache = cache
+        with registry_lock:
+            cache_registry.append(cache)
+    return cache
+
+
+def _process_record_line(
+    line: str,
+    *,
+    bundle_root: str,
+    shard_tar: Optional[str],
+    global_index: int,
+    enable_audit: bool,
+    tar_cache: Optional[dict] = None,
+    cache_registry: Optional[List[dict]] = None,
+    registry_lock: Optional[threading.Lock] = None,
+) -> Dict[str, Any]:
+    if tar_cache is None:
+        if cache_registry is None or registry_lock is None:
+            tar_cache = {}
+        else:
+            tar_cache = _get_thread_tar_cache(cache_registry, registry_lock)
+    record = _json_load_line(line)
+    record["_bundle_root"] = bundle_root
+    if shard_tar:
+        record["_shard_tar"] = shard_tar
+
+    sample, members, partial = build_pangu_sample(record, global_index, tar_cache)
+    if sample is None:
+        return {
+            "ok": False,
+            "skip_reason": partial or "unknown",
+            "partial_reason": None,
+            "legacy": 0,
+            "renderable": 0,
+            "views_without_render": 0,
+            "mismatch": 0,
+        }
+
+    legacy = 0
+    renderable = 0
+    views_without_render = 0
+    mismatch = 0
+    if enable_audit:
+        pairs = parse_qa_pairs(normalize_messages(record.get("messages")))
+        if pairs:
+            legacy, renderable, views_without_render, mismatch = audit_sample_marks(
+                record, pairs,
+            )
+
+    return {
+        "ok": True,
+        "sample": sample,
+        "members": members,
+        "partial_reason": partial,
+        "skip_reason": None,
+        "legacy": legacy,
+        "renderable": renderable,
+        "views_without_render": views_without_render,
+        "mismatch": mismatch,
+    }
+
+
+def _apply_record_result(
+    stats: ConvertStats,
+    result: Dict[str, Any],
+    jf,
+    tar,
+) -> None:
+    if not result.get("ok"):
+        stats.skipped += 1
+        stats.skip_reasons[result.get("skip_reason") or "unknown"] += 1
+        return
+
+    stats.converted += 1
+    partial = result.get("partial_reason")
+    if partial:
+        stats.skip_reasons[partial] += 1
+    stats.legacy_mark_tokens += int(result.get("legacy") or 0)
+    stats.renderable_slots += int(result.get("renderable") or 0)
+    stats.views_without_render += int(result.get("views_without_render") or 0)
+    stats.mark_text_render_mismatch += int(result.get("mismatch") or 0)
+    _write_one_sample(jf, tar, result["sample"], result["members"])
 
 
 def convert_one_shard(job: ShardJob) -> ConvertStats:
@@ -592,60 +909,116 @@ def convert_one_shard(job: ShardJob) -> ConvertStats:
     output_root = Path(job.output_root)
     bundle_root = job.export_dir
     shard_tar = str(tar_path) if tar_path and tar_path.is_file() else None
-
-    buffer_samples: List[Dict[str, Any]] = []
-    buffer_members: List[List[Tuple[str, bytes]]] = []
-    tar_cache: dict = {}
+    jsonl_path, out_tar_path = _prepare_output_paths(job.shard_index, output_root)
     line_index = 0
+    next_progress = max(1, int(job.progress_every)) if int(job.progress_every) > 0 else 0
 
-    with jf_path.open("r", encoding="utf-8") as jf:
-        for line in jf:
-            if job.max_converted is not None and stats.converted >= job.max_converted:
-                break
+    def _maybe_log_progress() -> None:
+        nonlocal next_progress
+        if next_progress <= 0:
+            return
+        completed = stats.converted + stats.skipped
+        if completed < next_progress:
+            return
+        while completed >= next_progress:
+            next_progress += int(job.progress_every)
+        print(
+            f"[export_to_pangu_ml][pid={os.getpid()}][shard={job.shard_index}] "
+            f"done={completed} converted={stats.converted} skipped={stats.skipped}",
+            flush=True,
+        )
+    intra_workers = max(1, int(job.intra_shard_workers))
+    if job.max_converted is not None:
+        # Keep exact ``max_converted`` semantics for validation runs.
+        intra_workers = 1
 
-            line = line.strip()
-            if not line:
-                continue
+    with jf_path.open("r", encoding="utf-8") as jf, open(jsonl_path, "w", encoding="utf-8") as out_jf, tarfile.open(out_tar_path, "w") as out_tar:
+        if intra_workers == 1:
+            tar_cache: dict = {}
+            for line in jf:
+                if job.max_converted is not None and stats.converted >= job.max_converted:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                stats.total_seen += 1
+                global_index = job.global_index_start + line_index
+                line_index += 1
+                try:
+                    result = _process_record_line(
+                        line,
+                        bundle_root=bundle_root,
+                        shard_tar=shard_tar,
+                        global_index=global_index,
+                        enable_audit=job.enable_audit,
+                        tar_cache=tar_cache,
+                    )
+                except Exception:
+                    result = {
+                        "ok": False,
+                        "skip_reason": "worker_failed",
+                        "partial_reason": None,
+                        "legacy": 0,
+                        "renderable": 0,
+                        "views_without_render": 0,
+                        "mismatch": 0,
+                    }
+                _apply_record_result(stats, result, out_jf, out_tar)
+                _maybe_log_progress()
+            _close_tar_cache(tar_cache)
+        else:
+            cache_registry: List[dict] = []
+            registry_lock = threading.Lock()
+            pending = set()
+            window = max(intra_workers * 2, intra_workers + 1)
 
-            stats.total_seen += 1
-            record = json.loads(line)
-            record["_bundle_root"] = bundle_root
-            if shard_tar:
-                record["_shard_tar"] = shard_tar
+            def _drain_done(done_set) -> None:
+                for fut in done_set:
+                    try:
+                        result = fut.result()
+                    except Exception:
+                        result = {
+                            "ok": False,
+                            "skip_reason": "worker_failed",
+                            "partial_reason": None,
+                            "legacy": 0,
+                            "renderable": 0,
+                            "views_without_render": 0,
+                            "mismatch": 0,
+                        }
+                    _apply_record_result(stats, result, out_jf, out_tar)
+                    _maybe_log_progress()
 
-            global_index = job.global_index_start + line_index
-            line_index += 1
+            with ThreadPoolExecutor(max_workers=intra_workers) as pool:
+                for line in jf:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    stats.total_seen += 1
+                    global_index = job.global_index_start + line_index
+                    line_index += 1
+                    pending.add(
+                        pool.submit(
+                            _process_record_line,
+                            line,
+                            bundle_root=bundle_root,
+                            shard_tar=shard_tar,
+                            global_index=global_index,
+                            enable_audit=job.enable_audit,
+                            cache_registry=cache_registry,
+                            registry_lock=registry_lock,
+                        )
+                    )
+                    if len(pending) >= window:
+                        done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                        _drain_done(done)
 
-            sample, members, partial = build_pangu_sample(
-                record, global_index, tar_cache,
-            )
+                while pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    _drain_done(done)
 
-            if sample is None:
-                stats.skipped += 1
-                stats.skip_reasons[partial or "unknown"] += 1
-                continue
-
-            pairs = parse_qa_pairs(normalize_messages(record.get("messages")))
-            if pairs:
-                legacy, renderable, views_no, mismatch = audit_sample_marks(
-                    record, pairs,
-                )
-                stats.legacy_mark_tokens += legacy
-                stats.renderable_slots += renderable
-                stats.views_without_render += views_no
-                stats.mark_text_render_mismatch += mismatch
-
-            stats.converted += 1
-            if partial:
-                stats.skip_reasons[partial] += 1
-            buffer_samples.append(sample)
-            buffer_members.append(members)
-
-    if "tar" in tar_cache:
-        tar_cache["tar"].close()
-
-    if buffer_samples:
-        write_shard(job.shard_index, buffer_samples, buffer_members, output_root)
+            for cache in cache_registry:
+                _close_tar_cache(cache)
 
     return stats
 
@@ -656,6 +1029,9 @@ def _build_shard_jobs(
     output_root: Path,
     *,
     seed: Optional[int],
+    intra_shard_workers: int,
+    enable_audit: bool,
+    progress_every: int,
 ) -> List[ShardJob]:
     jobs: List[ShardJob] = []
 
@@ -670,6 +1046,9 @@ def _build_shard_jobs(
             global_index_start=shard_idx * 10_000_000,
             max_converted=None,
             seed=seed,
+            intra_shard_workers=max(1, int(intra_shard_workers)),
+            enable_audit=bool(enable_audit),
+            progress_every=max(0, int(progress_every)),
         ))
 
     return jobs
@@ -682,6 +1061,9 @@ def convert_export(
     num_workers: Optional[int] = None,
     max_samples: Optional[int] = None,
     seed: Optional[int] = None,
+    intra_shard_workers: int = 1,
+    enable_audit: bool = False,
+    progress_every: int = 1000,
     show_progress: bool = True,
 ) -> ConvertStats:
     stats = ConvertStats()
@@ -689,7 +1071,15 @@ def convert_export(
     if not pairs:
         raise FileNotFoundError(f"No upstream shards under {export_dir / 'jsonl'}")
 
-    jobs = _build_shard_jobs(pairs, export_dir, output_root, seed=seed)
+    jobs = _build_shard_jobs(
+        pairs,
+        export_dir,
+        output_root,
+        seed=seed,
+        intra_shard_workers=intra_shard_workers,
+        enable_audit=enable_audit,
+        progress_every=progress_every,
+    )
     if not jobs:
         return stats
 
@@ -701,7 +1091,9 @@ def convert_export(
         workers = max(1, min(workers, len(jobs)))
 
     print(
-        f">>> Converting {len(jobs)} shard(s) with {workers} worker(s) (1:1 shard id)",
+        f">>> Converting {len(jobs)} shard(s) with {workers} file-worker(s), "
+        f"intra_shard_workers={max(1, int(intra_shard_workers))}, "
+        f"audit={'on' if enable_audit else 'off'}",
         flush=True,
     )
 
@@ -746,6 +1138,23 @@ def convert_export(
     return stats
 
 
+def copy_upstream_metadata(export_dir: Path, output_root: Path) -> None:
+    """Copy dataset-level metadata.json from upstream export root to Pangu output root."""
+    src = export_dir / DATASET_METADATA_FILENAME
+    if not src.is_file():
+        print(f">>> {DATASET_METADATA_FILENAME} not found under {export_dir}; skip copy", flush=True)
+        return
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    dst = output_root / DATASET_METADATA_FILENAME
+    with src.open("r", encoding="utf-8") as f:
+        meta = json.load(f)
+    with dst.open("w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    print(f">>> Copied {DATASET_METADATA_FILENAME} -> {dst}", flush=True)
+
+
 def main() -> None:
     args = parse_args()
     export_dir = args.export_dir.resolve()
@@ -765,6 +1174,9 @@ def main() -> None:
         num_workers=args.num_workers,
         max_samples=args.max_samples,
         seed=args.seed,
+        intra_shard_workers=args.intra_shard_workers,
+        enable_audit=args.enable_audit,
+        progress_every=args.progress_every,
         show_progress=not args.no_progress,
     )
 
@@ -788,6 +1200,8 @@ def main() -> None:
             )
     if stats.skip_reasons:
         print(">>> Skip reasons:", dict(stats.skip_reasons))
+
+    copy_upstream_metadata(export_dir, output_root)
 
 
 if __name__ == "__main__":

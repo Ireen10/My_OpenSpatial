@@ -5,15 +5,22 @@ Extracts the shared run/apply_transform/create_messages patterns
 from all 8 singleview annotation files.
 """
 
+import json
 import threading
 from typing import Dict, List, Optional, Tuple, Any
+import numpy as np
 
 from .scene_graph import SceneGraph, SceneNode
 from .visual_marker import VisualMarker, MarkConfig
 from .message_builder import create_singleview_messages
 from .prompt_template import PromptRenderRecord, PromptTemplate, TemplateRegistry
 from .structured_prompt_template import StructuredPromptTemplate, StructuredTemplateRegistry
-from .sample_metadata import build_turn_record, build_visual_anchor, split_prompt_qa
+from .sample_metadata import (
+    build_turn_record,
+    build_visual_anchor,
+    semantic_object_label,
+    split_prompt_qa,
+)
 from .mark_spec import mark_spec_has_slots, wrap_single_view_mark_spec
 from .question_type import QuestionType
 
@@ -101,8 +108,48 @@ class BaseAnnotationTask(BaseTask):
     def _init_example_context(self, example):
         self._thread_local.turn_records = []
         self._thread_local.viz_turns = []
+        self._thread_local.semantic_candidate_keys = set()
         self._thread_local.preprocess_row = normalize_image_field(example)
         self._thread_local.last_prompt_render = None
+
+    def semantic_item_key(self, item: Any) -> tuple:
+        """Stable object identity for pre-render semantic dedup."""
+        node = None
+        if isinstance(item, SceneNode):
+            node = item
+        elif isinstance(item, (list, tuple)) and len(item) >= 2 and isinstance(item[1], SceneNode):
+            node = item[1]
+        if node is not None:
+            return ("node", str(node.node_id), node.tag)
+        return ("label", semantic_object_label(item))
+
+    def register_semantic_candidate(self, *parts: Any) -> bool:
+        """Return False when this example already emitted the same semantic turn."""
+        seen = getattr(self._thread_local, "semantic_candidate_keys", None)
+        if seen is None:
+            seen = set()
+            self._thread_local.semantic_candidate_keys = seen
+        key = json.dumps(self._json_safe_semantic(parts), sort_keys=True, ensure_ascii=False)
+        if key in seen:
+            return False
+        seen.add(key)
+        return True
+
+    def _json_safe_semantic(self, value: Any) -> Any:
+        if isinstance(value, SceneNode):
+            return self.semantic_item_key(value)
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, (list, tuple)):
+            return [self._json_safe_semantic(v) for v in value]
+        if isinstance(value, dict):
+            return {str(k): self._json_safe_semantic(v) for k, v in value.items()}
+        if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+            try:
+                return self._json_safe_semantic(value.tolist())
+            except Exception:
+                pass
+        return value
 
     def _record_turn(
         self,

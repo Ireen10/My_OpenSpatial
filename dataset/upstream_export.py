@@ -19,6 +19,7 @@ import io
 import json
 import tarfile
 import uuid
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -190,6 +191,103 @@ def _pack_record_images(
     return record, n_new, missing
 
 
+def _write_upstream_shard(
+    *,
+    shard_index: int,
+    records: List[dict],
+    export_root: str,
+    schema_version: str,
+    view_scope: str,
+    total_records: int,
+    global_start: int,
+    progress_every: int,
+) -> Dict[str, Any]:
+    """Write one upstream shard. Safe to run in a separate process."""
+    out = Path(export_root)
+    jsonl_dir = out / JSONL_SUBDIR
+    images_dir = out / IMAGES_SUBDIR
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    base = shard_basename(shard_index)
+    jsonl_path = jsonl_dir / f"{base}.jsonl"
+    tar_path = images_dir / f"{base}.tar"
+    seen_paths: Dict[str, str] = {}
+    shard_missing: List[str] = []
+    shard_images = 0
+    stats = ExportStatsCollector(view_scope=view_scope)
+
+    print(
+        f">>> Upstream export shard {shard_index + 1}: "
+        f"writing {len(records)} sample(s) to {tar_path.name}",
+        flush=True,
+    )
+    with open(jsonl_path, "w", encoding="utf-8") as jf, tarfile.open(tar_path, "w") as tar:
+        for i, record in enumerate(records, start=1):
+            record, n_new, missing = _pack_record_images(
+                record, tar=tar, seen_paths=seen_paths, stats=stats,
+            )
+            shard_missing.extend(missing)
+            shard_images += n_new
+            record["schema_version"] = record.get("schema_version") or schema_version
+            stats.observe_record(record)
+            jf.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            if progress_every and (i % progress_every == 0 or i == len(records)):
+                print(
+                    f">>> Upstream export progress: shard {shard_index + 1} "
+                    f"{i}/{len(records)} samples, "
+                    f"global {global_start + i}/{total_records}",
+                    flush=True,
+                )
+
+    summary = {
+        "shard": shard_index,
+        "basename": base,
+        "n_samples": len(records),
+        "n_images": shard_images,
+        "jsonl": str(jsonl_path.relative_to(out)).replace("\\", "/"),
+        "tar": str(tar_path.relative_to(out)).replace("\\", "/"),
+    }
+    print(
+        f">>> Upstream export shard {shard_index + 1} done: "
+        f"{len(records)} sample(s), {shard_images} image(s)",
+        flush=True,
+    )
+    return {
+        "summary": summary,
+        "stats": stats,
+        "missing": shard_missing,
+    }
+
+
+def _write_upstream_metadata(
+    *,
+    export_root: Path,
+    stats: ExportStatsCollector,
+    schema_version: str,
+    pipeline_run_id: str,
+    shard_size: int,
+    shard_summaries: List[dict],
+    n_images_packed: int,
+    missing_paths: int,
+) -> Path:
+    meta_path = export_root / DATASET_METADATA_FILENAME
+    dataset_meta = stats.finalize(
+        schema_version=schema_version,
+        pipeline_run_id=pipeline_run_id,
+        shard_size=shard_size,
+        n_shards=len(shard_summaries),
+        n_images_packed=n_images_packed,
+        missing_paths=missing_paths,
+    )
+    dataset_meta["shards"] = shard_summaries
+    meta_path.write_text(
+        json.dumps(dataset_meta, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return meta_path
+
+
 def write_sharded_upstream_bundle(
     dataset: pd.DataFrame,
     export_root: Union[str, Path],
@@ -198,6 +296,7 @@ def write_sharded_upstream_bundle(
     pipeline_run_id: Optional[str] = None,
     view_scope: str = "singleview",
     shard_size: int = SHARD_SIZE,
+    num_workers: int = 1,
 ) -> Dict[str, Any]:
     """
     Write sharded jsonl/tar under export_root and dataset-level metadata.json.
@@ -212,86 +311,76 @@ def write_sharded_upstream_bundle(
     run_id = pipeline_run_id or str(uuid.uuid4())
 
     stats = ExportStatsCollector(view_scope=view_scope)
-    shard_idx = 0
-    buffer: List[dict] = []
-    n_images_packed = 0
-    all_missing: List[str] = []
-    shard_summaries: List[dict] = []
     total_records = len(dataset)
-    records_processed = 0
     progress_every = 500
-
-    def flush_shard() -> None:
-        nonlocal shard_idx, n_images_packed, records_processed
-        if not buffer:
-            return
-        base = shard_basename(shard_idx)
-        jsonl_path = jsonl_dir / f"{base}.jsonl"
-        tar_path = images_dir / f"{base}.tar"
-        seen_paths: Dict[str, str] = {}
-        shard_missing: List[str] = []
-        shard_images = 0
-
-        print(
-            f">>> Upstream export shard {shard_idx + 1}: "
-            f"writing {len(buffer)} sample(s) to {tar_path.name}"
-        )
-        with open(jsonl_path, "w", encoding="utf-8") as jf, tarfile.open(tar_path, "w") as tar:
-            for i, record in enumerate(buffer, start=1):
-                record, n_new, missing = _pack_record_images(
-                    record, tar=tar, seen_paths=seen_paths, stats=stats
-                )
-                shard_missing.extend(missing)
-                shard_images += n_new
-                record["schema_version"] = record.get("schema_version") or schema_version
-                stats.observe_record(record)
-                jf.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-                records_processed += 1
-                if i % progress_every == 0 or i == len(buffer):
-                    print(
-                        f">>> Upstream export progress: shard {shard_idx + 1} "
-                        f"{i}/{len(buffer)} samples, "
-                        f"global {records_processed}/{total_records}"
-                    )
-
-        n_images_packed += shard_images
-        all_missing.extend(shard_missing)
-        shard_summaries.append({
-            "shard": shard_idx,
-            "basename": base,
-            "n_samples": len(buffer),
-            "n_images": shard_images,
-            "jsonl": str(jsonl_path.relative_to(out)).replace("\\", "/"),
-            "tar": str(tar_path.relative_to(out)).replace("\\", "/"),
-        })
-        print(
-            f">>> Upstream export shard {shard_idx + 1} done: "
-            f"{len(buffer)} sample(s), {shard_images} image(s)"
-        )
-        shard_idx += 1
-        buffer.clear()
+    workers = max(1, int(num_workers or 1))
+    shard_size = max(1, int(shard_size or SHARD_SIZE))
+    shard_jobs: List[Tuple[int, int, List[dict]]] = []
 
     for idx in range(len(dataset)):
         record = merged_row_to_upstream_record(dataset.iloc[idx])
         record["sample_id"] = record["sample_id"] or f"sample_{idx}"
-        buffer.append(record)
-        if len(buffer) >= shard_size:
-            flush_shard()
-    flush_shard()
+        if not shard_jobs or len(shard_jobs[-1][2]) >= shard_size:
+            shard_jobs.append((len(shard_jobs), idx, []))
+        shard_jobs[-1][2].append(record)
 
-    meta_path = out / DATASET_METADATA_FILENAME
-    dataset_meta = stats.finalize(
+    print(
+        f">>> Upstream export: {total_records} samples, {len(shard_jobs)} shard(s), "
+        f"workers={min(workers, max(1, len(shard_jobs)))}",
+        flush=True,
+    )
+
+    results: List[Dict[str, Any]] = []
+    if workers == 1 or len(shard_jobs) <= 1:
+        for shard_idx, global_start, records in shard_jobs:
+            results.append(_write_upstream_shard(
+                shard_index=shard_idx,
+                records=records,
+                export_root=str(out),
+                schema_version=schema_version,
+                view_scope=view_scope,
+                total_records=total_records,
+                global_start=global_start,
+                progress_every=progress_every,
+            ))
+    else:
+        with ProcessPoolExecutor(max_workers=min(workers, len(shard_jobs))) as pool:
+            futures = [
+                pool.submit(
+                    _write_upstream_shard,
+                    shard_index=shard_idx,
+                    records=records,
+                    export_root=str(out),
+                    schema_version=schema_version,
+                    view_scope=view_scope,
+                    total_records=total_records,
+                    global_start=global_start,
+                    progress_every=progress_every,
+                )
+                for shard_idx, global_start, records in shard_jobs
+            ]
+            for fut in as_completed(futures):
+                results.append(fut.result())
+
+    results.sort(key=lambda r: int(r["summary"]["shard"]))
+    shard_summaries: List[dict] = []
+    all_missing: List[str] = []
+    n_images_packed = 0
+    for result in results:
+        shard_summaries.append(result["summary"])
+        n_images_packed += int(result["summary"]["n_images"])
+        all_missing.extend(result["missing"])
+        stats.merge_from(result["stats"])
+
+    meta_path = _write_upstream_metadata(
+        export_root=out,
+        stats=stats,
         schema_version=schema_version,
         pipeline_run_id=run_id,
         shard_size=shard_size,
-        n_shards=shard_idx,
+        shard_summaries=shard_summaries,
         n_images_packed=n_images_packed,
         missing_paths=len(all_missing),
-    )
-    dataset_meta["shards"] = shard_summaries
-    meta_path.write_text(
-        json.dumps(dataset_meta, indent=2, ensure_ascii=False),
-        encoding="utf-8",
     )
 
     if all_missing:
@@ -301,14 +390,14 @@ def write_sharded_upstream_bundle(
         )
     print(
         f">>> Upstream export: {stats.n_samples} samples, {n_images_packed} images, "
-        f"{shard_idx} shard(s) -> {out}"
+        f"{len(shard_summaries)} shard(s) -> {out}"
     )
 
     return {
         "export_dir": str(out),
         "n_samples": stats.n_samples,
         "n_images": n_images_packed,
-        "n_shards": shard_idx,
+        "n_shards": len(shard_summaries),
         "missing_paths": len(all_missing),
         "metadata_path": str(meta_path),
         "jsonl_dir": str(jsonl_dir),

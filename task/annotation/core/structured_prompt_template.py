@@ -15,7 +15,12 @@ from dataclasses import dataclass, field
 from .thread_rng import rng
 from typing import Dict, List, Optional, Sequence
 
-from .prompt_template import PLACEHOLDER_RE, PromptRenderRecord, PromptTemplate
+from .prompt_template import (
+    PLACEHOLDER_RE,
+    PromptRenderRecord,
+    PromptTemplate,
+    normalize_generated_text,
+)
 from .question_type import QuestionType
 
 
@@ -247,8 +252,8 @@ class StructuredPromptTemplate:
             answer_index=answer_index,
             question_line=stem_line,
             answer_line=answer_line,
-            question_text=q_text.strip(),
-            answer_text=a_text.strip(),
+            question_text=normalize_generated_text(q_text),
+            answer_text=normalize_generated_text(a_text),
             question_bindings=q_bindings,
             answer_bindings=a_bindings,
             question_type=self.question_type.value,

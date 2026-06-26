@@ -464,8 +464,6 @@ def _bbox_entries_from_prompt_struct(parsed):
             if val is None:
                 continue
             entries.extend(_parse_bbox_entries_from_text(str(val)))
-        if entries:
-            return entries
     return []
 
 
@@ -555,10 +553,10 @@ def _resolve_grounding_context(row, parsed):
     ref_size = None
 
     if not entries:
+        parsed_entries = []
         for turn in _grounding_display_turns(parsed):
-            entries = _parse_bbox_entries_from_text(turn.get("answer") or "")
-            if entries:
-                break
+            parsed_entries.extend(_parse_bbox_entries_from_text(turn.get("answer") or ""))
+        entries = parsed_entries
 
     if not entries:
         entries = _bbox_entries_from_prompt_struct(parsed)

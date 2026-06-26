@@ -1,4 +1,5 @@
 from typing import List, Dict, Any
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
@@ -13,6 +14,11 @@ class SampleFlattener:
         self.split_col_list = self.args.get("split_col_list", default_split_col_list)
         assert self.anchor_col in self.split_col_list, f"anchor_col '{self.anchor_col}' must be in split_col_list {self.split_col_list}"
 
+    @staticmethod
+    def _is_sequence_value(value: Any) -> bool:
+        """Parquet list columns often load as numpy arrays instead of Python lists."""
+        return isinstance(value, (list, tuple, np.ndarray))
+
     def flatten(self, dataset: pd.DataFrame) -> pd.DataFrame:
         """
         Flatten multi-image samples (attributes as lists) into single-image samples (attributes as single values).
@@ -25,7 +31,7 @@ class SampleFlattener:
             sample = dataset.iloc[idx]
             anchor_col = self.anchor_col
             anchor_val = sample.get(anchor_col, None)
-            is_multi = isinstance(anchor_val, list)
+            is_multi = self._is_sequence_value(anchor_val)
             if not is_multi:
                 flat_examples.append(sample)
                 continue
@@ -43,8 +49,8 @@ class SampleFlattener:
             # Check that all columns to split are lists and have the same length as anchor_column
             for k in split_col_list:
                 v = sample.get(k, None)
-                if not isinstance(v, list) or len(v) != n_img:
-                    raise ValueError(f"Column '{k}' must be a list of length {n_img} (same as anchor_column '{anchor_col}'). Got type {type(v)} and length {len(v) if isinstance(v, list) else 'N/A'}.")
+                if not self._is_sequence_value(v) or len(v) != n_img:
+                    raise ValueError(f"Column '{k}' must be a sequence of length {n_img} (same as anchor_column '{anchor_col}'). Got type {type(v)} and length {len(v) if self._is_sequence_value(v) else 'N/A'}.")
 
             for i in range(n_img):
                 new_sample = {}

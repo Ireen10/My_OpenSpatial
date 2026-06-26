@@ -12,7 +12,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from PIL import Image
 
 from task.base_task import BaseTask
@@ -642,6 +642,7 @@ class Sam3Refiner(BaseTask):
         )
         self.min_mask_pixels = int(args.get("min_mask_pixels", self.MIN_MASK_PIXELS))
         self.prompt_batch_size = int(args.get("prompt_batch_size", 32))
+        self.postprocess_workers = int(args.get("postprocess_workers", 0))
 
         load_kwargs = {}
         replicas_per_device = int(args.get("replicas_per_device", 1))
@@ -667,6 +668,7 @@ class Sam3Refiner(BaseTask):
             f"[Sam3Refiner] Sam3Model text-only on {','.join(devices)} | "
             f"replicas={total_replicas} prompt_batch_size={self.prompt_batch_size} "
             f"pipeline_batch_size={args.get('batch_size', 4)} "
+            f"postprocess_workers={self.postprocess_workers or 'auto'} "
             f"score_threshold={self.score_threshold:.2f} "
             f"match_sim_threshold={self.match_sim_threshold:.2f} "
             f"min_mask_pixels={self.min_mask_pixels}",
@@ -754,27 +756,25 @@ class Sam3Refiner(BaseTask):
         )
         boxes_in = sum(len(x[3]) for x in valid_items)
         boxes_kept = 0
-        outputs = []
+        save_jobs = []
 
         for (idx, example, _, _), (pred_masks, scores) in zip(valid_items, per_image):
             refined, bboxes_2d, keep_indices = self._filter_masks(pred_masks, scores)
             boxes_kept += len(keep_indices)
             if not keep_indices:
                 continue
-            saved = self._save_example(example, idx, refined, bboxes_2d, keep_indices)
-            if saved is not None:
-                outputs.append(saved)
+            save_jobs.append((example, idx, refined, bboxes_2d, keep_indices))
 
-        return outputs, {
+        return save_jobs, {
             "samples": len(batch_items),
             "boxes_in": boxes_in,
             "boxes_kept": boxes_kept,
-            "samples_saved": len(outputs),
         }
 
     def _run_batched(self, dataset):
         num_workers = self.args.get("num_workers", 4)
         batch_size = int(self.args.get("batch_size", 4))
+        post_workers = self.postprocess_workers or max(8, int(num_workers) * 2)
         examples = list(enumerate(dataset.to_dict("records")))
         batches = [examples[i : i + batch_size] for i in range(0, len(examples), batch_size)]
         window = num_workers * 2
@@ -795,26 +795,59 @@ class Sam3Refiner(BaseTask):
                 )
                 next_log_at += 1000
 
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        save_pending = set()
+
+        def _save_job(job):
+            example, idx, refined, bboxes_2d, keep_indices = job
+            return self._save_example(example, idx, refined, bboxes_2d, keep_indices)
+
+        def _drain_save(done_set):
+            nonlocal total_samples_saved
+            for fut in done_set:
+                try:
+                    saved = fut.result()
+                except Exception as exc:
+                    print(f"[WARN] SAM3 save failed: {exc}", flush=True)
+                    continue
+                if saved is not None:
+                    processed.append(saved)
+                    total_samples_saved += 1
+
+        with (
+            ThreadPoolExecutor(max_workers=num_workers) as executor,
+            ThreadPoolExecutor(max_workers=post_workers) as save_executor,
+        ):
             pbar = tqdm.tqdm(total=len(examples), desc="SAM3 samples")
             for chunk_start in range(0, len(batches), window):
                 chunk = batches[chunk_start : chunk_start + window]
                 futures = [executor.submit(self._process_batch, b) for b in chunk]
                 for future in as_completed(futures):
                     try:
-                        outs, st = future.result()
-                        processed.extend(outs)
+                        save_jobs, st = future.result()
                         with lock:
                             total_samples += st["samples"]
                             total_boxes_in += st["boxes_in"]
                             total_boxes_kept += st["boxes_kept"]
-                            total_samples_saved += st["samples_saved"]
                             pbar.update(st["samples"])
                             _log()
+                        for save_job in save_jobs:
+                            save_pending.add(save_executor.submit(_save_job, save_job))
+                        while len(save_pending) >= post_workers * 4:
+                            done, save_pending = wait(
+                                save_pending,
+                                return_when=FIRST_COMPLETED,
+                            )
+                            with lock:
+                                _drain_save(done)
                     except Exception as exc:
                         import traceback as _tb
                         print(f"[WARN] SAM3 batch failed: {exc}")
                         print(_tb.format_exc())
+
+            while save_pending:
+                done, save_pending = wait(save_pending, return_when=FIRST_COMPLETED)
+                with lock:
+                    _drain_save(done)
             pbar.close()
 
         if total_samples > 0 and total_samples % 1000 != 0:

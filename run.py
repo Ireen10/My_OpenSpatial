@@ -1,6 +1,7 @@
 import argparse
 import copy
 import os
+import time
 from types import SimpleNamespace
 
 import yaml
@@ -158,10 +159,11 @@ def _create_pipeline_instance(config):
 
 def _run_single_pipeline(config):
     """Run a single pipeline config and return True/False for success."""
+    end_to_end_start = time.perf_counter()
     pipeline = _create_pipeline_instance(config)
     if pipeline is None:
         return False
-    pipeline.run()
+    pipeline.run(end_to_end_start_time=end_to_end_start)
     return True
 
 

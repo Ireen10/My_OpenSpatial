@@ -75,6 +75,12 @@ class AnnotationGenerator(BaseAnnotationTask):
         else:
             premise = f"The {lower_desc} is at a lower elevation than the {higher_desc}"
 
+        if not self.register_semantic_candidate(
+            "position.height", base_tpl,
+            sorted([self.semantic_item_key(A), self.semantic_item_key(B)]),
+            letter,
+        ):
+            return None, None
         mode = pick_instruction_mode(_POSITION_MCQ_MODES)
         tpl = f"{base_tpl}.{mode}"
         prompt = self.render_structured_prompt(
@@ -113,6 +119,12 @@ class AnnotationGenerator(BaseAnnotationTask):
         else:
             premise = f"The {A_desc} and the {B_desc} are far from each other"
 
+        if not self.register_semantic_candidate(
+            "position.proximity", near_or_far,
+            sorted([self.semantic_item_key(A), self.semantic_item_key(B)]),
+            letter,
+        ):
+            return None, None
         prompt = self.render_structured_prompt(
             tpl_name,
             shared={
@@ -140,6 +152,8 @@ class AnnotationGenerator(BaseAnnotationTask):
             marked = [(n.tag, n) for n in sampled]
 
         prompt, tpl = self.height_comparison_prompt_func(marked[0], marked[1])
+        if prompt is None:
+            return None
         self._record_turn(
             "height_comparison", tpl, prompt, qtype,
             mark_spec=self.marker.last_mark_spec,
@@ -184,12 +198,13 @@ class AnnotationGenerator(BaseAnnotationTask):
                 processed_image = None
                 marked = [(n.tag, n) for n in pair]
             prompt, tpl = self.proximity_prompt_func(marked[0], marked[1], "near")
-            self._record_turn(
-                "proximity", tpl, prompt, QuestionType.MCQ,
-                mark_spec=self.marker.last_mark_spec,
-                extra_slots=self._slots_from_marked(marked),
-            )
-            results.append((prompt, processed_image, QuestionType.MCQ))
+            if prompt is not None:
+                self._record_turn(
+                    "proximity", tpl, prompt, QuestionType.MCQ,
+                    mark_spec=self.marker.last_mark_spec,
+                    extra_slots=self._slots_from_marked(marked),
+                )
+                results.append((prompt, processed_image, QuestionType.MCQ))
         if far_candidates:
             pair = rng().choice(far_candidates)
             if rng().random() < 0.5:
@@ -198,11 +213,12 @@ class AnnotationGenerator(BaseAnnotationTask):
                 processed_image = None
                 marked = [(n.tag, n) for n in pair]
             prompt, tpl = self.proximity_prompt_func(marked[0], marked[1], "far")
-            self._record_turn(
-                "proximity", tpl, prompt, QuestionType.MCQ,
-                mark_spec=self.marker.last_mark_spec,
-                extra_slots=self._slots_from_marked(marked),
-            )
-            results.append((prompt, processed_image, QuestionType.MCQ))
+            if prompt is not None:
+                self._record_turn(
+                    "proximity", tpl, prompt, QuestionType.MCQ,
+                    mark_spec=self.marker.last_mark_spec,
+                    extra_slots=self._slots_from_marked(marked),
+                )
+                results.append((prompt, processed_image, QuestionType.MCQ))
 
-        return results
+        return results or None

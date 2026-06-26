@@ -34,6 +34,8 @@ class DatasetExporter(BaseTask):
         self.schema_version = args.get("schema_version", UPSTREAM_SCHEMA_VERSION)
         self.pipeline_run_id = args.get("pipeline_run_id")
         self.view_scope = args.get("view_scope") or self._infer_view_scope(stage_out)
+        self.shard_size = int(args.get("shard_size", 8192))
+        self.num_workers = int(args.get("num_workers", 1)) if self.use_multi_processing else 1
 
     @staticmethod
     def _infer_view_scope(stage_out: str) -> str:
@@ -47,6 +49,8 @@ class DatasetExporter(BaseTask):
             schema_version=self.schema_version,
             pipeline_run_id=self.pipeline_run_id,
             view_scope=self.view_scope,
+            shard_size=self.shard_size,
+            num_workers=self.num_workers,
         )
         return pd.DataFrame()
 

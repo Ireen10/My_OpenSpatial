@@ -14,14 +14,14 @@ grounding_camera_introduction = [
     (
         "Here are the detailed camera parameters for the image. "
         "Camera intrinsic parameters: Focal length f_x=[FX], f_y=[FY]. "
-        "Principal point coordinate locates near the center of the image, "
-        "c_x=[CX] and c_y=[CY], when image width [W] and height [H]. "
+        "The principal point is near the center of the image: "
+        "c_x=[CX] and c_y=[CY], with image width [W] and height [H]. "
         "We do not consider distortion parameters here. "
         "Therefore, the intrinsic matrix K = [[[FX], 0, [CX]], [0, [FY], [CY]], [0, 0, 1]]. "
-        "Camera coordinate: X-axis points rightward, Y-axis points downward, "
+        "Camera coordinates are defined as follows: the X-axis points rightward, the Y-axis points downward, "
         "and Z-axis points forward. The origin point is the camera location. "
-        "We take the camera coordinate system as the world coordinate system, "
-        "namely the camera extrinsic matrix is [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]]."
+        "We use the camera coordinate system as the world coordinate system; "
+        "therefore, the camera extrinsic matrix is [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]]."
     ),
 ]
 
